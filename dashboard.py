@@ -1,19 +1,25 @@
 import os
+from pathlib import Path
 from datetime import datetime
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-LOGS_DIR = "logs"
-SIGNALS_FILE = os.path.join(LOGS_DIR, "signals.csv")
-SUMMARY_FILE = os.path.join(LOGS_DIR, "daily_summary.txt")
+BASE_DIR = Path(__file__).resolve().parent
+LOGS_DIR = BASE_DIR / "logs"
+SIGNALS_FILE = LOGS_DIR / "signals.csv"
+SUMMARY_FILE = LOGS_DIR / "daily_summary.txt"
+MARKETS_FILE = LOGS_DIR / "markets.csv"
+WHALES_FILE = LOGS_DIR / "whales.csv"
+ALERTS_FILE = LOGS_DIR / "alerts.csv"
 
 st.set_page_config(page_title="Neural Network for Crypto", page_icon="📈", layout="wide")
 
 
 def load_csv(path):
-    if not os.path.exists(path):
+    path = Path(path)
+    if not path.exists():
         return pd.DataFrame()
     try:
         return pd.read_csv(path)
@@ -32,16 +38,6 @@ def inject_styles():
                 background: linear-gradient(135deg, #121826 0%, #0f172a 100%);
                 border: 1px solid rgba(255,255,255,0.08);
                 margin-bottom: 1rem;
-            }
-            .metric-chip {
-                display: inline-block;
-                padding: 0.35rem 0.7rem;
-                border-radius: 999px;
-                background: rgba(99, 102, 241, 0.15);
-                color: #c7d2fe;
-                font-size: 0.85rem;
-                margin-right: 0.4rem;
-                margin-bottom: 0.4rem;
             }
             .market-card {
                 background: linear-gradient(180deg, #121826 0%, #111827 100%);
@@ -98,29 +94,25 @@ def inject_styles():
     )
 
 
-def metric_card(label, value, help_text=None):
-    st.metric(label=label, value=value, help=help_text)
-
-
 def render_header():
     st.markdown(
         """
         <div class="hero-box">
             <h1 style="margin-bottom:0.35rem;">📈 Neural Network for Crypto</h1>
             <div style="color:#94a3b8; font-size:1rem;">
-                Real-time public-data research + paper-trading dashboard
+                Real-time public-data market tracker + whale tracker + paper-trading dashboard
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
     st.info(
-        "This interface shows ranked paper-trading opportunities and simulated trades only. "
+        "This interface shows ranked paper-trading opportunities, public market tracking, whale activity, and alerts only. "
         "It does not place real bets or connect to a live account."
     )
 
 
-def render_overview(signals_df, trades_df):
+def render_overview(signals_df, trades_df, markets_df, alerts_df):
     st.markdown('<div class="section-title">Overview</div>', unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
 
@@ -132,13 +124,15 @@ def render_overview(signals_df, trades_df):
             top_conf = "-"
 
     with c1:
-        metric_card("Ranked Signals", len(signals_df))
+        st.metric("Ranked Signals", len(signals_df))
     with c2:
-        metric_card("Paper Trades", len(trades_df))
+        st.metric("Paper Trades", len(trades_df))
     with c3:
-        metric_card("Highest Confidence", top_conf)
+        st.metric("Tracked BTC Markets", len(markets_df))
     with c4:
-        metric_card("Last Refresh", datetime.now().strftime("%H:%M:%S"))
+        st.metric("Active Alerts", len(alerts_df))
+
+    st.caption(f"Highest confidence: {top_conf} | Last refresh: {datetime.now().strftime('%H:%M:%S')}")
 
 
 def badge_class(label: str) -> str:
@@ -191,26 +185,43 @@ def render_top_opportunities(signals_df):
                 unsafe_allow_html=True,
             )
             if pd.notna(market_url) and market_url:
-                st.link_button("Open market on Polymarket", market_url, use_container_width=True)
+                st.link_button("Open market on Polymarket", market_url, width="stretch")
 
 
-def render_signal_charts(signals_df):
-    st.markdown('<div class="section-title">Signal Visualizations</div>', unsafe_allow_html=True)
-    if signals_df.empty or "confidence" not in signals_df.columns:
-        st.info("No signal chart data yet.")
+def render_market_tracker(markets_df):
+    st.markdown('<div class="section-title">BTC Market Tracker</div>', unsafe_allow_html=True)
+    if markets_df.empty:
+        st.info("No BTC market snapshots yet.")
         return
 
-    chart_df = signals_df.copy().head(25)
-    fig = px.bar(
-        chart_df,
-        x="confidence",
-        y="market",
-        color="signal_label",
-        orientation="h",
-        title="Top Ranked Opportunities by Confidence",
-    )
-    fig.update_layout(height=500, yaxis={"categoryorder": "total ascending"})
-    st.plotly_chart(fig, use_container_width=True)
+    view = markets_df.copy().tail(20)
+    st.dataframe(view[[c for c in ["question", "last_trade_price", "liquidity", "volume", "url"] if c in view.columns]], width="stretch")
+
+
+    if "last_trade_price" in view.columns and "question" in view.columns:
+        chart_df = view.dropna(subset=["last_trade_price"]).tail(12)
+        if not chart_df.empty:
+            fig = px.bar(chart_df, x="last_trade_price", y="question", orientation="h", title="Current BTC Market Prices")
+            fig.update_layout(height=420, yaxis={"categoryorder": "total ascending"})
+            st.plotly_chart(fig, width="stretch")
+
+
+def render_whale_tracker(whales_df):
+    st.markdown('<div class="section-title">Whale Activity Tracker</div>', unsafe_allow_html=True)
+    if whales_df.empty:
+        st.info("No whale summary yet.")
+        return
+
+    st.dataframe(whales_df.head(15), width="stretch")
+
+
+def render_alerts(alerts_df):
+    st.markdown('<div class="section-title">Alerts</div>', unsafe_allow_html=True)
+    if alerts_df.empty:
+        st.info("No alerts generated yet.")
+        return
+
+    st.dataframe(alerts_df.tail(20), width="stretch")
 
 
 def render_paper_trades(trades_df):
@@ -219,7 +230,7 @@ def render_paper_trades(trades_df):
         st.warning("No paper trades yet. Run supervisor.py first.")
         return
 
-    st.dataframe(trades_df.sort_index(ascending=False), use_container_width=True, height=420)
+    st.dataframe(trades_df.sort_index(ascending=False).tail(30), width="stretch", height=420)
 
 
 def render_trade_chart(trades_df):
@@ -239,15 +250,21 @@ def render_trade_chart(trades_df):
         title="Recent Simulated Fill Prices",
         markers=True,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
-def render_raw_data(signals_df, trades_df):
+def render_raw_data(signals_df, trades_df, markets_df, whales_df, alerts_df):
     with st.expander("Raw data"):
         st.markdown("**Signals CSV**")
         st.dataframe(signals_df, width="stretch")
         st.markdown("**Paper Trade Ledger**")
         st.dataframe(trades_df, width="stretch")
+        st.markdown("**Markets CSV**")
+        st.dataframe(markets_df, width="stretch")
+        st.markdown("**Whales CSV**")
+        st.dataframe(whales_df, width="stretch")
+        st.markdown("**Alerts CSV**")
+        st.dataframe(alerts_df, width="stretch")
 
 
 def main():
@@ -255,25 +272,41 @@ def main():
     render_header()
 
     refresh_seconds = st.sidebar.slider("Auto-refresh hint (seconds)", min_value=5, max_value=120, value=15)
-    st.sidebar.caption(
-        "Tip: Streamlit does not auto-refresh by itself here. Re-run manually or use a refresh extension if desired."
-    )
+    st.sidebar.caption("Tip: rerun/refresh after a supervisor cycle completes.")
     st.sidebar.write(f"Suggested refresh interval: {refresh_seconds}s")
+    st.sidebar.caption(f"Signals file: {SIGNALS_FILE}")
+    st.sidebar.caption(f"Trades file: {SUMMARY_FILE}")
+    st.sidebar.caption(f"Markets file: {MARKETS_FILE}")
+    st.sidebar.caption(f"Whales file: {WHALES_FILE}")
+    st.sidebar.caption(f"Alerts file: {ALERTS_FILE}")
 
     signals_df = load_csv(SIGNALS_FILE)
     trades_df = load_csv(SUMMARY_FILE)
+    markets_df = load_csv(MARKETS_FILE)
+    whales_df = load_csv(WHALES_FILE)
+    alerts_df = load_csv(ALERTS_FILE)
 
-    render_overview(signals_df, trades_df)
+    render_overview(signals_df, trades_df, markets_df, alerts_df)
 
-    left, right = st.columns([1.2, 1])
-    with left:
+    top_left, top_right = st.columns([1.2, 1])
+    with top_left:
         render_top_opportunities(signals_df)
-        render_signal_charts(signals_df)
-    with right:
+    with top_right:
+        render_market_tracker(markets_df)
+
+    mid_left, mid_right = st.columns([1, 1])
+    with mid_left:
+        render_whale_tracker(whales_df)
+    with mid_right:
+        render_alerts(alerts_df)
+
+    bottom_left, bottom_right = st.columns([1, 1])
+    with bottom_left:
         render_paper_trades(trades_df)
+    with bottom_right:
         render_trade_chart(trades_df)
 
-    render_raw_data(signals_df, trades_df)
+    render_raw_data(signals_df, trades_df, markets_df, whales_df, alerts_df)
 
 
 if __name__ == "__main__":

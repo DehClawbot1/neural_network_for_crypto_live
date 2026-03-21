@@ -7,9 +7,11 @@ from datetime import datetime
 from stable_baselines3 import PPO
 
 from leaderboard_scraper import run_scraper_cycle
-from market_monitor import fetch_btc_markets
+from market_monitor import fetch_btc_markets, save_market_snapshot
 from feature_builder import FeatureBuilder
 from signal_engine import SignalEngine
+from whale_tracker import WhaleTracker
+from alerts_engine import AlertsEngine
 
 # Configure logging for zero-intervention monitoring
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -18,6 +20,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 os.makedirs("logs", exist_ok=True)
 SUMMARY_FILE = "logs/daily_summary.txt"
 SIGNALS_FILE = "logs/signals.csv"
+MARKETS_FILE = "logs/markets.csv"
 
 
 def load_brain(model_path="weights/ppo_polytrader"):
@@ -121,6 +124,9 @@ def main_loop():
 
     feature_builder = FeatureBuilder()
     signal_engine = SignalEngine()
+    whale_tracker = WhaleTracker()
+    alerts_engine = AlertsEngine()
+    previous_markets_df = None
 
     while True:
         try:
@@ -128,6 +134,7 @@ def main_loop():
 
             # 1. Gather public market context + public wallet activity
             markets_df = fetch_btc_markets()
+            save_market_snapshot(markets_df)
             signals_df = run_scraper_cycle()
 
             if signals_df.empty:
@@ -136,7 +143,12 @@ def main_loop():
                 time.sleep(60)
                 continue
 
-            # 2. Build features and score paper-trading opportunities
+            # 2. Build whale summaries and detect alerts from public data
+            whale_tracker.write_summary(signals_df)
+            alerts_engine.process_alerts(markets_df, previous_markets_df, signals_df)
+            previous_markets_df = markets_df.copy()
+
+            # 3. Build features and score paper-trading opportunities
             features_df = feature_builder.build_features(signals_df, markets_df)
             scored_df = signal_engine.score_features(features_df)
 
