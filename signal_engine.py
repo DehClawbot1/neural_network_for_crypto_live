@@ -14,9 +14,9 @@ class SignalEngine:
 
     LABELS = {
         0: "IGNORE",
-        1: "WATCH",
-        2: "PAPER_SMALL",
-        3: "PAPER_LARGE",
+        1: "LOW-CONFIDENCE WATCH",
+        2: "STRONG PAPER OPPORTUNITY",
+        3: "HIGHEST-RANKED PAPER SIGNAL",
     }
 
     def score_row(self, row: dict):

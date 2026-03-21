@@ -30,7 +30,7 @@ The pipeline consists of five core components working in sequence:
    Merges scraped signals with market context and builds normalized features for scoring and paper-trading evaluation.
 
 8. **`signal_engine.py` (The Ranking Layer)**  
-   Scores each candidate into safe research labels such as `IGNORE`, `WATCH`, `PAPER_SMALL`, and `PAPER_LARGE`, with confidence and reason text.
+   Scores each candidate into safe research labels such as `IGNORE`, `LOW-CONFIDENCE WATCH`, `STRONG PAPER OPPORTUNITY`, and `HIGHEST-RANKED PAPER SIGNAL`, with confidence and reason text.
 
 ## 🚀 Installation & Setup
 
