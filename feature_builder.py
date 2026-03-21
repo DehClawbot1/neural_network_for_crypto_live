@@ -14,9 +14,13 @@ def _safe_float(value, default=0.0):
         return default
 
 
+def _clip01(value):
+    return float(np.clip(value, 0.0, 1.0))
+
+
 class FeatureBuilder:
     """
-    Converts raw wallet/activity + market-monitor data into normalized features
+    Converts raw wallet/activity + market-monitor data into grouped, normalized features
     for research scoring and paper-trading only.
     """
 
@@ -35,17 +39,17 @@ class FeatureBuilder:
                 "avg_size": max(avg_size, 1.0),
                 "trade_count": count,
                 # placeholder until real outcome-resolution tracking exists
-                "win_rate": 0.55 if count >= 5 else 0.50,
+                "win_rate": 0.60 if count >= 10 else 0.55 if count >= 5 else 0.50,
             }
 
     def _normalized_trade_size(self, wallet: str, size: float) -> float:
         wallet_info = self.wallet_stats.get(wallet, {"avg_size": 1.0})
         avg_size = max(_safe_float(wallet_info.get("avg_size", 1.0), 1.0), 1.0)
         ratio = size / avg_size
-        return float(np.clip(ratio / 3.0, 0.0, 1.0))
+        return _clip01(ratio / 3.0)
 
     def _wallet_win_rate(self, wallet: str) -> float:
-        return float(np.clip(self.wallet_stats.get(wallet, {}).get("win_rate", 0.50), 0.0, 1.0))
+        return _clip01(self.wallet_stats.get(wallet, {}).get("win_rate", 0.50))
 
     def _time_left_feature(self, end_date) -> float:
         if not end_date:
@@ -55,31 +59,78 @@ class FeatureBuilder:
             end_dt = datetime.fromisoformat(str(end_date).replace("Z", "+00:00"))
             now = datetime.now(timezone.utc)
             seconds_left = max((end_dt - now).total_seconds(), 0)
-            # squash to 0..1 over ~7 day window
-            return float(np.clip(seconds_left / (7 * 24 * 3600), 0.0, 1.0))
+            return _clip01(seconds_left / (7 * 24 * 3600))
         except Exception:
             return 0.5
+
+    def _liquidity_score(self, liquidity: float) -> float:
+        return _clip01(_safe_float(liquidity, 0.0) / 100000.0)
+
+    def _volume_score(self, volume: float) -> float:
+        return _clip01(_safe_float(volume, 0.0) / 250000.0)
+
+    def _probability_momentum_proxy(self, signal_price: float, market_last_trade_price: float) -> float:
+        move = abs(signal_price - market_last_trade_price)
+        return _clip01(move / 0.20)
+
+    def _volatility_proxy(self, signal_price: float, market_last_trade_price: float, volume: float) -> float:
+        move_component = abs(signal_price - market_last_trade_price) / 0.15
+        volume_component = _safe_float(volume, 0.0) / 250000.0
+        return _clip01((move_component * 0.7) + (volume_component * 0.3))
+
+    def _whale_consensus_score(self, size_score: float, win_rate: float) -> float:
+        return _clip01((size_score * 0.6) + (win_rate * 0.4))
 
     def build_feature_row(self, signal: dict, market_row: dict | None = None):
         wallet = signal.get("trader_wallet")
         size = _safe_float(signal.get("size", 0), 0.0)
-        price = _safe_float(signal.get("price", 0.5), 0.5)
+        signal_price = _clip01(_safe_float(signal.get("price", 0.5), 0.5))
 
         market_row = market_row or {}
         time_left = self._time_left_feature(market_row.get("end_date"))
+        liquidity = _safe_float(market_row.get("liquidity", 0), 0.0)
+        volume = _safe_float(market_row.get("volume", 0), 0.0)
+        last_trade_price = _clip01(_safe_float(market_row.get("last_trade_price", signal_price), signal_price))
+
+        trader_win_rate = self._wallet_win_rate(wallet)
+        normalized_trade_size = self._normalized_trade_size(wallet, size)
+        liquidity_score = self._liquidity_score(liquidity)
+        volume_score = self._volume_score(volume)
+        probability_momentum = self._probability_momentum_proxy(signal_price, last_trade_price)
+        volatility_score = self._volatility_proxy(signal_price, last_trade_price, volume)
+        whale_consensus_score = self._whale_consensus_score(normalized_trade_size, trader_win_rate)
+
+        whale_pressure = _clip01((trader_win_rate * 0.4) + (normalized_trade_size * 0.35) + (whale_consensus_score * 0.25))
+        market_structure_score = _clip01((signal_price * 0.2) + (liquidity_score * 0.3) + (volume_score * 0.25) + (probability_momentum * 0.25))
+        volatility_risk = volatility_score
+        time_decay_score = _clip01(1.0 - time_left)
 
         feature_row = {
             "trader_wallet": wallet,
             "market_title": signal.get("market_title"),
             "condition_id": signal.get("condition_id"),
             "side": signal.get("side"),
-            "trader_win_rate": self._wallet_win_rate(wallet),
-            "normalized_trade_size": self._normalized_trade_size(wallet, size),
-            "current_price": float(np.clip(price, 0.0, 1.0)),
+            # core normalized inputs
+            "trader_win_rate": trader_win_rate,
+            "normalized_trade_size": normalized_trade_size,
+            "current_price": signal_price,
             "time_left": time_left,
+            # expanded microstructure/context
+            "market_liquidity": liquidity,
+            "market_volume": volume,
+            "liquidity_score": liquidity_score,
+            "volume_score": volume_score,
+            "market_last_trade_price": last_trade_price,
+            "probability_momentum": probability_momentum,
+            "volatility_score": volatility_score,
+            "whale_consensus_score": whale_consensus_score,
+            # grouped sub-scores
+            "whale_pressure": whale_pressure,
+            "market_structure_score": market_structure_score,
+            "volatility_risk": volatility_risk,
+            "time_decay_score": time_decay_score,
+            # metadata
             "raw_size": size,
-            "market_liquidity": _safe_float(market_row.get("liquidity", 0), 0.0),
-            "market_volume": _safe_float(market_row.get("volume", 0), 0.0),
             "market_slug": market_row.get("slug"),
             "market_url": market_row.get("url"),
         }
@@ -104,5 +155,5 @@ class FeatureBuilder:
             rows.append(self.build_feature_row(signal, matched_market))
 
         features_df = pd.DataFrame(rows)
-        logging.info("Built %s feature rows.", len(features_df))
+        logging.info("Built %s grouped feature rows.", len(features_df))
         return features_df

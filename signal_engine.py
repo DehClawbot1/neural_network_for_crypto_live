@@ -9,7 +9,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 class SignalEngine:
     """
     Safe research/paper-trading signal scorer.
-    Outputs observation labels and confidence, not live betting instructions.
+    Uses grouped feature sub-scores and outputs observation labels and confidence,
+    not live betting instructions.
     """
 
     LABELS = {
@@ -20,17 +21,16 @@ class SignalEngine:
     }
 
     def score_row(self, row: dict):
-        trader_win_rate = float(row.get("trader_win_rate", 0.5))
-        normalized_trade_size = float(row.get("normalized_trade_size", 0.0))
-        current_price = float(row.get("current_price", 0.5))
-        time_left = float(row.get("time_left", 0.5))
+        whale_pressure = float(row.get("whale_pressure", 0.5))
+        market_structure_score = float(row.get("market_structure_score", 0.5))
+        volatility_risk = float(row.get("volatility_risk", 0.5))
+        time_decay_score = float(row.get("time_decay_score", 0.5))
 
-        # Simple bounded heuristic for research-only scoring
         confidence = (
-            trader_win_rate * 0.40
-            + normalized_trade_size * 0.25
-            + (1.0 - abs(current_price - 0.5) * 2.0) * 0.20
-            + time_left * 0.15
+            whale_pressure * 0.40
+            + market_structure_score * 0.35
+            + (1.0 - volatility_risk) * 0.15
+            + (1.0 - time_decay_score) * 0.10
         )
         confidence = float(np.clip(confidence, 0.0, 1.0))
 
@@ -53,10 +53,10 @@ class SignalEngine:
 
     def _build_reason(self, row: dict, confidence: float):
         return (
-            f"wallet_win_rate={float(row.get('trader_win_rate', 0.5)):.2f}, "
-            f"trade_size_score={float(row.get('normalized_trade_size', 0.0)):.2f}, "
-            f"price={float(row.get('current_price', 0.5)):.2f}, "
-            f"time_left={float(row.get('time_left', 0.5)):.2f}, "
+            f"whale_pressure={float(row.get('whale_pressure', 0.5)):.2f}, "
+            f"market_structure={float(row.get('market_structure_score', 0.5)):.2f}, "
+            f"volatility_risk={float(row.get('volatility_risk', 0.5)):.2f}, "
+            f"time_decay={float(row.get('time_decay_score', 0.5)):.2f}, "
             f"confidence={confidence:.2f}"
         )
 
@@ -66,7 +66,7 @@ class SignalEngine:
 
         scored = [self.score_row(row.to_dict()) for _, row in features_df.iterrows()]
         scored_df = pd.DataFrame(scored)
-        logging.info("Scored %s feature rows.", len(scored_df))
+        logging.info("Scored %s grouped feature rows.", len(scored_df))
         return scored_df
 
 
@@ -76,10 +76,10 @@ if __name__ == "__main__":
             {
                 "trader_wallet": "0xabc",
                 "market_title": "Will Bitcoin close above $100k?",
-                "trader_win_rate": 0.72,
-                "normalized_trade_size": 0.80,
-                "current_price": 0.55,
-                "time_left": 0.40,
+                "whale_pressure": 0.72,
+                "market_structure_score": 0.80,
+                "volatility_risk": 0.35,
+                "time_decay_score": 0.20,
             }
         ]
     )
