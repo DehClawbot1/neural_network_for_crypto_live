@@ -13,6 +13,9 @@ SUMMARY_FILE = LOGS_DIR / "daily_summary.txt"
 MARKETS_FILE = LOGS_DIR / "markets.csv"
 WHALES_FILE = LOGS_DIR / "whales.csv"
 ALERTS_FILE = LOGS_DIR / "alerts.csv"
+TRADER_ANALYTICS_FILE = LOGS_DIR / "trader_analytics.csv"
+BACKTEST_FILE = LOGS_DIR / "backtest_summary.csv"
+DATASET_FILE = LOGS_DIR / "historical_dataset.csv"
 
 st.set_page_config(page_title="Neural Network for Crypto", page_icon="📈", layout="wide")
 

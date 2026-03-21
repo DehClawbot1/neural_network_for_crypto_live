@@ -9,3 +9,5 @@ tqdm
 rich
 streamlit
 plotly
+fastapi
+uvicorn
