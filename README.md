@@ -109,7 +109,7 @@ During each cycle, the supervisor will:
 
 ### Step 3: Monitor performance and opportunities
 
-Check these output files:
+You can inspect the raw output files directly:
 
 ```text
 logs/daily_summary.txt
@@ -118,6 +118,20 @@ logs/signals.csv
 
 - `logs/daily_summary.txt` records mock fills and simulated slippage
 - `logs/signals.csv` records ranked opportunities, confidence, and reason strings
+
+### Step 4: Open the browser dashboard
+
+Run:
+
+```bash
+streamlit run dashboard.py
+```
+
+This opens a local dashboard in your browser with:
+- top paper-trading opportunities
+- confidence/ranking views
+- paper trade ledger
+- simple visualizations of recent simulated activity
 
 ## 📁 Repository Structure
 
@@ -128,6 +142,7 @@ neural_network_for_crypto/
 ├── .gitignore
 ├── .env                 # generated locally, ignored by git
 ├── api_setup.py
+├── dashboard.py
 ├── leaderboard_scraper.py
 ├── market_monitor.py
 ├── feature_builder.py

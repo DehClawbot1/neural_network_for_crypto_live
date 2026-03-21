@@ -7,3 +7,5 @@ requests
 tensorboard
 tqdm
 rich
+streamlit
+plotly
