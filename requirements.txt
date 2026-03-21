@@ -3,3 +3,4 @@ stable-baselines3
 gymnasium
 pandas
 python-dotenv
+requests
