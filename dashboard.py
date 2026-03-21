@@ -13,6 +13,8 @@ SUMMARY_FILE = LOGS_DIR / "daily_summary.txt"
 MARKETS_FILE = LOGS_DIR / "markets.csv"
 WHALES_FILE = LOGS_DIR / "whales.csv"
 ALERTS_FILE = LOGS_DIR / "alerts.csv"
+MODEL_STATUS_FILE = LOGS_DIR / "model_status.csv"
+WEIGHTS_FILE = BASE_DIR / "weights" / "ppo_polytrader.zip"
 TRADER_ANALYTICS_FILE = LOGS_DIR / "trader_analytics.csv"
 BACKTEST_FILE = LOGS_DIR / "backtest_summary.csv"
 DATASET_FILE = LOGS_DIR / "historical_dataset.csv"
@@ -149,6 +151,29 @@ def badge_class(label: str) -> str:
     return "badge-ignore"
 
 
+def render_factor_matrix(signals_df):
+    st.markdown('<div class="section-title">Confidence Matrix</div>', unsafe_allow_html=True)
+    if signals_df.empty:
+        st.info("No ranked signals available yet.")
+        return
+
+    top_row = signals_df.sort_values(by="confidence", ascending=False).iloc[0].to_dict() if "confidence" in signals_df.columns else signals_df.iloc[0].to_dict()
+    factor_df = pd.DataFrame(
+        [
+            {"factor": "Whale Pressure", "score": float(top_row.get("whale_pressure", 0.0))},
+            {"factor": "Market Structure", "score": float(top_row.get("market_structure_score", 0.0))},
+            {"factor": "Volatility Risk", "score": float(top_row.get("volatility_risk", 0.0))},
+            {"factor": "Time Decay", "score": float(top_row.get("time_decay_score", 0.0))},
+            {"factor": "Liquidity", "score": float(top_row.get("liquidity_score", 0.0))},
+            {"factor": "Volume", "score": float(top_row.get("volume_score", 0.0))},
+        ]
+    )
+    st.caption(f"Top signal: {top_row.get('market', top_row.get('market_title', 'Unknown Market'))}")
+    fig = px.bar(factor_df, x="score", y="factor", orientation="h", title="Top Signal Factor Breakdown")
+    fig.update_layout(height=360, yaxis={"categoryorder": "total ascending"})
+    st.plotly_chart(fig, width="stretch")
+
+
 def render_top_opportunities(signals_df):
     st.markdown('<div class="section-title">Top Paper-Trading Opportunities</div>', unsafe_allow_html=True)
     if signals_df.empty:
@@ -256,7 +281,23 @@ def render_trade_chart(trades_df):
     st.plotly_chart(fig, width="stretch")
 
 
-def render_raw_data(signals_df, trades_df, markets_df, whales_df, alerts_df):
+def render_model_status(model_status_df):
+    st.markdown('<div class="section-title">Model / Learning Status</div>', unsafe_allow_html=True)
+    weights_status = "present" if WEIGHTS_FILE.exists() else "missing"
+    st.write(f"**Weights file:** {weights_status}")
+
+    if model_status_df.empty:
+        st.info("No retraining status yet.")
+        return
+
+    latest = model_status_df.iloc[-1].to_dict()
+    st.write(f"**Dataset rows:** {latest.get('dataset_rows', 0)}")
+    st.write(f"**Retrain threshold:** {latest.get('retrain_threshold', 0)}")
+    st.write(f"**Progress ratio:** {latest.get('progress_ratio', 0)}")
+    st.write(f"**Last action:** {latest.get('last_action', 'Unknown')}")
+
+
+def render_raw_data(signals_df, trades_df, markets_df, whales_df, alerts_df, model_status_df):
     with st.expander("Raw data"):
         st.markdown("**Signals CSV**")
         st.dataframe(signals_df, width="stretch")
@@ -268,6 +309,8 @@ def render_raw_data(signals_df, trades_df, markets_df, whales_df, alerts_df):
         st.dataframe(whales_df, width="stretch")
         st.markdown("**Alerts CSV**")
         st.dataframe(alerts_df, width="stretch")
+        st.markdown("**Model Status CSV**")
+        st.dataframe(model_status_df, width="stretch")
 
 
 def main():
@@ -288,28 +331,40 @@ def main():
     markets_df = load_csv(MARKETS_FILE)
     whales_df = load_csv(WHALES_FILE)
     alerts_df = load_csv(ALERTS_FILE)
+    model_status_df = load_csv(MODEL_STATUS_FILE)
 
     render_overview(signals_df, trades_df, markets_df, alerts_df)
 
-    top_left, top_right = st.columns([1.2, 1])
-    with top_left:
-        render_top_opportunities(signals_df)
-    with top_right:
-        render_market_tracker(markets_df)
+    st.caption("Quick guide: Overview = status, Opportunities = strongest paper signals, Markets = BTC tracker, Whales = public wallet summaries, Alerts = notable changes, Learning = model/retraining state.")
 
-    mid_left, mid_right = st.columns([1, 1])
-    with mid_left:
+    tab1, tab2, tab3, tab4 = st.tabs(["Opportunities", "Markets & Whales", "Learning", "Raw Data"])
+
+    with tab1:
+        top_left, top_right = st.columns([1.2, 1])
+        with top_left:
+            render_top_opportunities(signals_df)
+        with top_right:
+            render_factor_matrix(signals_df)
+
+        bottom_left, bottom_right = st.columns([1, 1])
+        with bottom_left:
+            render_paper_trades(trades_df)
+        with bottom_right:
+            render_trade_chart(trades_df)
+
+    with tab2:
+        top_left, top_right = st.columns([1.1, 0.9])
+        with top_left:
+            render_market_tracker(markets_df)
+        with top_right:
+            render_alerts(alerts_df)
         render_whale_tracker(whales_df)
-    with mid_right:
-        render_alerts(alerts_df)
 
-    bottom_left, bottom_right = st.columns([1, 1])
-    with bottom_left:
-        render_paper_trades(trades_df)
-    with bottom_right:
-        render_trade_chart(trades_df)
+    with tab3:
+        render_model_status(model_status_df)
 
-    render_raw_data(signals_df, trades_df, markets_df, whales_df, alerts_df)
+    with tab4:
+        render_raw_data(signals_df, trades_df, markets_df, whales_df, alerts_df, model_status_df)
 
 
 if __name__ == "__main__":

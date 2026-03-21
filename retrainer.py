@@ -19,28 +19,38 @@ class Retrainer:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.dataset_file = self.logs_dir / "historical_dataset.csv"
         self.status_file = self.logs_dir / "retrainer_status.txt"
+        self.status_csv = self.logs_dir / "model_status.csv"
         self.retrain_threshold = retrain_threshold
+
+    def _write_status(self, dataset_rows: int, action: str):
+        self.status_file.write_text(action + "\n", encoding="utf-8")
+        pd.DataFrame(
+            [
+                {
+                    "dataset_rows": dataset_rows,
+                    "retrain_threshold": self.retrain_threshold,
+                    "progress_ratio": round(dataset_rows / self.retrain_threshold, 4) if self.retrain_threshold else 0,
+                    "last_action": action,
+                }
+            ]
+        ).to_csv(self.status_csv, index=False)
 
     def maybe_retrain(self):
         if not self.dataset_file.exists():
+            self._write_status(0, "No historical dataset yet.")
             return False
 
         try:
             dataset = pd.read_csv(self.dataset_file)
         except Exception:
+            self._write_status(0, "Historical dataset unreadable.")
             return False
 
         if len(dataset) < self.retrain_threshold:
-            self.status_file.write_text(
-                f"Not enough rows for retraining yet: {len(dataset)} / {self.retrain_threshold}\n",
-                encoding="utf-8",
-            )
+            self._write_status(len(dataset), f"Not enough rows for retraining yet: {len(dataset)} / {self.retrain_threshold}")
             return False
 
         logging.info("Historical dataset reached retraining threshold. Starting paper-mode retraining...")
         train_model(timesteps=5000)
-        self.status_file.write_text(
-            f"Retraining triggered successfully with {len(dataset)} rows.\n",
-            encoding="utf-8",
-        )
+        self._write_status(len(dataset), f"Retraining triggered successfully with {len(dataset)} rows.")
         return True
