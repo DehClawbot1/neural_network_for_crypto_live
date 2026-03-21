@@ -4,3 +4,6 @@ gymnasium
 pandas
 python-dotenv
 requests
+tensorboard
+tqdm
+rich
