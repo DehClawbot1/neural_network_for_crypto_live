@@ -62,6 +62,7 @@ def log_ranked_signal(signal_row):
         "signal_label": signal_row.get("signal_label", "UNKNOWN"),
         "confidence": signal_row.get("confidence", 0.0),
         "reason": signal_row.get("reason", ""),
+        "market_url": signal_row.get("market_url"),
     }
     append_csv_record(SIGNALS_FILE, record)
 

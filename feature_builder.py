@@ -80,6 +80,8 @@ class FeatureBuilder:
             "raw_size": size,
             "market_liquidity": _safe_float(market_row.get("liquidity", 0), 0.0),
             "market_volume": _safe_float(market_row.get("volume", 0), 0.0),
+            "market_slug": market_row.get("slug"),
+            "market_url": market_row.get("url"),
         }
         return feature_row
 

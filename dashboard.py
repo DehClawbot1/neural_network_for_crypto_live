@@ -71,10 +71,13 @@ def render_top_opportunities(signals_df):
         with st.container(border=True):
             st.markdown(f"### {row.get('signal_label', 'UNKNOWN')}")
             st.write(f"**Market:** {row.get('market', row.get('market_title', 'Unknown'))}")
-            st.write(f"**Side:** {row.get('side', 'UNKNOWN')}")
+            st.write(f"**Observed side:** {row.get('side', 'UNKNOWN')}")
             st.write(f"**Wallet:** {row.get('wallet_copied', row.get('trader_wallet', 'Unknown'))}")
             st.write(f"**Confidence:** {row.get('confidence', '-')}")
             st.write(f"**Reason:** {row.get('reason', 'No reason available')}")
+            market_url = row.get('market_url')
+            if pd.notna(market_url) and market_url:
+                st.link_button("Open market on Polymarket", market_url)
 
 
 def render_signal_charts(signals_df):
