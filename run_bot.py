@@ -6,6 +6,7 @@ from pathlib import Path
 from api_setup import validate_environment
 from rl_trainer import train_model
 from supervisor import main_loop, load_brain
+from retrainer import Retrainer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -53,6 +54,16 @@ def ensure_model():
     return False
 
 
+def maybe_retrain_before_start():
+    print("[2.5/3] Checking whether the model should retrain from accumulated data...")
+    retrainer = Retrainer()
+    retrained = retrainer.maybe_retrain()
+    if retrained:
+        print("[+] Retraining triggered before startup. Latest weights refreshed.\n")
+    else:
+        print("[+] No pre-start retraining needed yet.\n")
+
+
 def start_supervisor():
     print("[3/3] Starting supervisor...")
     print("[+] Status: RUNNING")
@@ -77,6 +88,8 @@ def main():
         sys.exit(1)
 
     # Final quick sanity check before loop
+    maybe_retrain_before_start()
+
     if load_brain() is None:
         print("[-] Model exists but could not be loaded. Aborting.")
         sys.exit(1)
