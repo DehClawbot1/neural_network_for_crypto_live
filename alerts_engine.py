@@ -51,7 +51,21 @@ class AlertsEngine:
         return normalized
 
     def _append_alert(self, record: dict):
-        df = pd.DataFrame([self._normalize_alert(record)])
+        normalized = self._normalize_alert(record)
+        if self.alerts_file.exists():
+            try:
+                existing = pd.read_csv(self.alerts_file)
+                dedupe_cols = [c for c in ["alert_type", "market", "message", "status"] if c in existing.columns and c in normalized]
+                if dedupe_cols and not existing.empty:
+                    latest = existing.tail(50)
+                    mask = pd.Series(True, index=latest.index)
+                    for col in dedupe_cols:
+                        mask &= latest[col].astype(str) == str(normalized.get(col))
+                    if mask.any():
+                        return
+            except Exception:
+                pass
+        df = pd.DataFrame([normalized])
         df.to_csv(self.alerts_file, mode="a", header=not self.alerts_file.exists(), index=False)
 
     def detect_probability_moves(self, current_markets_df: pd.DataFrame, previous_markets_df: pd.DataFrame | None):

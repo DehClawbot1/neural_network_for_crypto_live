@@ -292,7 +292,7 @@ def render_pipeline_health_strip(signals_df, markets_df, positions_df, model_sta
             st.markdown('</div>', unsafe_allow_html=True)
 
 
-def render_attention_needed(signals_df, trades_df, alerts_df, positions_df, model_status_df, path_replay_df):
+def render_attention_needed(signals_df, trades_df, alerts_df, positions_df, model_status_df, path_replay_df, system_health_df=None):
     st.markdown('<div class="section-title">Attention Needed</div>', unsafe_allow_html=True)
     warnings = []
     now = pd.Timestamp.utcnow()
@@ -316,6 +316,9 @@ def render_attention_needed(signals_df, trades_df, alerts_df, positions_df, mode
         warnings.append("Model outputs missing")
     if path_replay_df is None or path_replay_df.empty:
         warnings.append("No replay outputs available")
+    health_ts = _latest_timestamp_from_df(system_health_df) if system_health_df is not None else None
+    if health_ts is None or (now - health_ts).total_seconds() > 600:
+        warnings.append("System health feed stale")
 
     if warnings:
         for item in warnings:
@@ -1614,7 +1617,7 @@ def main():
             ("system_health.csv", SYSTEM_HEALTH_FILE, system_health_df),
         ])
         render_pipeline_health_strip(signals_df, markets_df, positions_df, model_status_df, path_replay_df, system_health_df=system_health_df)
-        render_attention_needed(signals_df, trades_df, alerts_df, positions_df, model_status_df, path_replay_df)
+        render_attention_needed(signals_df, trades_df, alerts_df, positions_df, model_status_df, path_replay_df, system_health_df=system_health_df)
         render_performance_charts(trades_df, closed_positions_df, alerts_df, backtest_wallet_df, model_registry_df, positions_df=positions_df)
 
     with tab2:

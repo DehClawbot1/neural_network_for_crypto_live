@@ -47,6 +47,7 @@ def health():
         "trades": (LOGS_DIR / "daily_summary.txt").exists(),
         "whales": (LOGS_DIR / "whales.csv").exists(),
         "alerts": (LOGS_DIR / "alerts.csv").exists(),
+        "system_health": (LOGS_DIR / "system_health.csv").exists(),
         "analytics": (LOGS_DIR / "trader_analytics.csv").exists(),
         "backtest": (LOGS_DIR / "backtest_summary.csv").exists(),
         "dataset": (LOGS_DIR / "historical_dataset.csv").exists(),
