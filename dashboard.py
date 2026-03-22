@@ -337,6 +337,46 @@ def render_alerts(alerts_df):
     st.dataframe(alerts_df.tail(20), width="stretch")
 
 
+def render_simulated_decisions(positions_df, closed_positions_df):
+    st.markdown('<div class="section-title">Simulated Trade Decisions</div>', unsafe_allow_html=True)
+    rows = []
+
+    if not positions_df.empty:
+        for _, row in positions_df.tail(10).iterrows():
+            rows.append(
+                {
+                    "market": row.get("market"),
+                    "status": "HOLDING",
+                    "outcome_side": row.get("outcome_side", row.get("side")),
+                    "entry_price": row.get("entry_price"),
+                    "live_price": row.get("current_price"),
+                    "profit_usdc": row.get("unrealized_pnl", 0.0),
+                    "reason": row.get("signal_label", "paper_hold"),
+                }
+            )
+
+    if not closed_positions_df.empty:
+        for _, row in closed_positions_df.tail(10).iterrows():
+            rows.append(
+                {
+                    "market": row.get("market"),
+                    "status": "CLOSED",
+                    "outcome_side": row.get("outcome_side", row.get("side")),
+                    "entry_price": row.get("entry_price"),
+                    "live_price": row.get("current_price", row.get("exit_price")),
+                    "profit_usdc": row.get("unrealized_pnl", row.get("net_pnl", 0.0)),
+                    "reason": row.get("close_reason", row.get("exit_reason", "paper_exit")),
+                }
+            )
+
+    if not rows:
+        st.info("No simulated trade decisions yet.")
+        return
+
+    decisions_df = pd.DataFrame(rows)
+    st.dataframe(decisions_df.sort_values(by="profit_usdc", ascending=False), width="stretch")
+
+
 def render_positions(positions_df, closed_positions_df):
     st.markdown('<div class="section-title">Paper Positions</div>', unsafe_allow_html=True)
     c1, c2 = st.columns(2)
@@ -583,6 +623,7 @@ def main():
             render_factor_matrix(signals_df)
 
         render_action_board(signals_df, positions_df)
+        render_simulated_decisions(positions_df, closed_positions_df)
         render_positions(positions_df, closed_positions_df)
         render_best_trades(closed_positions_df, path_replay_df)
         bottom_left, bottom_right = st.columns([1, 1])
