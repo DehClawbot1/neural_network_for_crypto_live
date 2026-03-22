@@ -32,6 +32,8 @@ class HistoricalDatasetBuilder:
         markets_df = self._safe_read("markets.csv")
         alerts_df = self._safe_read("alerts.csv")
         wallet_alpha_df = self._safe_read("wallet_alpha.csv")
+        wallet_alpha_history_df = self._safe_read("wallet_alpha_history.csv")
+        btc_targets_df = self._safe_read("btc_targets.csv")
 
         if signals_df.empty:
             return pd.DataFrame()
@@ -73,6 +75,29 @@ class HistoricalDatasetBuilder:
 
         if not wallet_alpha_df.empty and "trader_wallet" in dataset.columns and "wallet_copied" in wallet_alpha_df.columns:
             dataset = dataset.merge(wallet_alpha_df, left_on="trader_wallet", right_on="wallet_copied", how="left")
+
+        if not wallet_alpha_history_df.empty and "trader_wallet" in dataset.columns and "timestamp" in dataset.columns:
+            dataset["timestamp"] = pd.to_datetime(dataset["timestamp"], utc=True, errors="coerce")
+            wallet_alpha_history_df["timestamp"] = pd.to_datetime(wallet_alpha_history_df["timestamp"], utc=True, errors="coerce")
+            dataset = dataset.sort_values(["trader_wallet", "timestamp"])
+            wallet_alpha_history_df = wallet_alpha_history_df.sort_values(["wallet_copied", "timestamp"])
+            merged_parts = []
+            for wallet, group in dataset.groupby("trader_wallet"):
+                history = wallet_alpha_history_df[wallet_alpha_history_df["wallet_copied"] == wallet]
+                if history.empty:
+                    merged_parts.append(group)
+                    continue
+                merged_parts.append(pd.merge_asof(group.sort_values("timestamp"), history.sort_values("timestamp"), on="timestamp", direction="backward"))
+            dataset = pd.concat(merged_parts, ignore_index=True) if merged_parts else dataset
+
+        if not btc_targets_df.empty and "timestamp" in dataset.columns:
+            btc_targets_df["timestamp"] = pd.to_datetime(btc_targets_df["timestamp"], utc=True, errors="coerce")
+            dataset = pd.merge_asof(
+                dataset.sort_values("timestamp"),
+                btc_targets_df[[c for c in btc_targets_df.columns if c in ["timestamp", "btc_price", "btc_spot_return_5m", "btc_spot_return_15m", "btc_realized_vol_15m", "btc_volume_proxy"]]].sort_values("timestamp"),
+                on="timestamp",
+                direction="backward",
+            )
 
         if "best_ask" in dataset.columns and "best_bid" in dataset.columns:
             dataset["spread"] = (dataset["best_ask"].fillna(0) - dataset["best_bid"].fillna(0)).abs()

@@ -43,6 +43,11 @@ class TargetBuilder:
         df["future_price"] = df["btc_price"].shift(-horizon_steps)
         df["future_return"] = (df["future_price"] - df["btc_price"]) / df["btc_price"]
         df["target_up"] = (df["future_return"] > 0).astype(int)
+
+        df["btc_spot_return_5m"] = df["btc_price"].pct_change(1)
+        df["btc_spot_return_15m"] = df["btc_price"].pct_change(3)
+        df["btc_realized_vol_15m"] = df["btc_spot_return_5m"].rolling(3).std()
+        df["btc_volume_proxy"] = df["btc_spot_return_5m"].abs().rolling(6).sum()
         return df.dropna().reset_index(drop=True)
 
     def write(self, days=30, horizon_minutes=60):

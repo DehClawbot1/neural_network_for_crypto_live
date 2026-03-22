@@ -13,6 +13,7 @@ class WalletAlphaBuilder:
         self.logs_dir = Path(logs_dir)
         self.contract_targets_file = self.logs_dir / "contract_targets.csv"
         self.output_file = self.logs_dir / "wallet_alpha.csv"
+        self.history_file = self.logs_dir / "wallet_alpha_history.csv"
 
     def _safe_read(self, path):
         if not path.exists():
@@ -24,24 +25,65 @@ class WalletAlphaBuilder:
 
     def build(self):
         df = self._safe_read(self.contract_targets_file)
-        if df.empty or "wallet_copied" not in df.columns or "future_return" not in df.columns:
+        wallet_col = "wallet_copied" if "wallet_copied" in df.columns else "trader_wallet" if "trader_wallet" in df.columns else None
+        return_col = "future_return" if "future_return" in df.columns else "forward_return_15m" if "forward_return_15m" in df.columns else None
+        hit_col = "target_up" if "target_up" in df.columns else "tp_before_sl_60m" if "tp_before_sl_60m" in df.columns else None
+        if df.empty or wallet_col is None or return_col is None:
             return pd.DataFrame()
 
         alpha = (
-            df.groupby("wallet_copied")
+            df.groupby(wallet_col)
             .agg(
-                observations=("wallet_copied", "size"),
-                avg_future_return=("future_return", "mean"),
-                hit_rate=("target_up", "mean"),
-                avg_confidence=("confidence", "mean") if "confidence" in df.columns else ("future_return", "mean"),
+                observations=(wallet_col, "size"),
+                avg_future_return=(return_col, "mean"),
+                hit_rate=(hit_col, "mean") if hit_col else (return_col, "mean"),
+                avg_confidence=("confidence", "mean") if "confidence" in df.columns else (return_col, "mean"),
             )
             .reset_index()
             .sort_values(by=["avg_future_return", "hit_rate"], ascending=[False, False])
         )
+        alpha = alpha.rename(columns={wallet_col: "wallet_copied"})
         return alpha
+
+    def build_history(self):
+        df = self._safe_read(self.contract_targets_file)
+        wallet_col = "wallet_copied" if "wallet_copied" in df.columns else "trader_wallet" if "trader_wallet" in df.columns else None
+        return_col = "future_return" if "future_return" in df.columns else "forward_return_15m" if "forward_return_15m" in df.columns else None
+        hit_col = "target_up" if "target_up" in df.columns else "tp_before_sl_60m" if "tp_before_sl_60m" in df.columns else None
+        if df.empty or wallet_col is None or return_col is None or "timestamp" not in df.columns:
+            return pd.DataFrame()
+
+        df = df.copy()
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        df = df.sort_values([wallet_col, "timestamp"]).reset_index(drop=True)
+
+        rows = []
+        for wallet, group in df.groupby(wallet_col):
+            group = group.reset_index(drop=True)
+            for idx in range(len(group)):
+                past = group.iloc[max(0, idx - 200):idx]
+                if past.empty:
+                    rows.append({"wallet_copied": wallet, "timestamp": group.iloc[idx]["timestamp"]})
+                    continue
+                rows.append(
+                    {
+                        "wallet_copied": wallet,
+                        "timestamp": group.iloc[idx]["timestamp"],
+                        "wallet_trade_count_30d": len(past),
+                        "wallet_avg_forward_return_15m": float(past[return_col].mean()),
+                        "wallet_winrate_30d": float((past[return_col] > 0).mean()),
+                        "wallet_alpha_30d": float(past[return_col].mean()),
+                        "wallet_signal_precision_tp": float(past[hit_col].mean()) if hit_col else None,
+                        "wallet_recent_streak": int((past[return_col].tail(5) > 0).sum()),
+                    }
+                )
+        return pd.DataFrame(rows)
 
     def write(self):
         alpha = self.build()
+        history = self.build_history()
         if not alpha.empty:
             alpha.to_csv(self.output_file, index=False)
+        if not history.empty:
+            history.to_csv(self.history_file, index=False)
         return alpha
