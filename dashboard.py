@@ -1273,7 +1273,7 @@ def render_action_board(signals_df, positions_df):
             st.dataframe(group_df, width="stretch", hide_index=True)
 
 
-def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df, path_replay_df, backtest_wallet_df, model_registry_df):
+def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df, path_replay_df, backtest_wallet_df, model_registry_df, signals_df=None):
     st.markdown('<div class="section-title">Model / Learning Status</div>', unsafe_allow_html=True)
     st.caption("This tab shows whether the paper-trading system has enough historical rows to train/evaluate the newer supervised models.")
     missing_outputs = []
@@ -1408,6 +1408,30 @@ def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df,
     if not backtest_wallet_df.empty:
         st.markdown("**Wallet Alpha Evolution / Leaders**")
         st.dataframe(backtest_wallet_df.head(15), width="stretch")
+
+    if signals_df is not None and not signals_df.empty:
+        st.markdown("**Prediction Health & Drift**")
+        if "confidence" in signals_df.columns:
+            conf_df = signals_df.copy()
+            conf_df["confidence"] = pd.to_numeric(conf_df["confidence"], errors="coerce")
+            conf_df = conf_df.dropna(subset=["confidence"])
+            if not conf_df.empty:
+                st.plotly_chart(px.histogram(conf_df, x="confidence", nbins=20, title="Confidence Distribution"), width="stretch")
+                if "timestamp" in conf_df.columns:
+                    conf_df["timestamp"] = pd.to_datetime(conf_df["timestamp"], errors="coerce")
+                    conf_df = conf_df.dropna(subset=["timestamp"]).sort_values("timestamp")
+                    if not conf_df.empty:
+                        roll = conf_df.set_index("timestamp")["confidence"].rolling("6H").mean().reset_index(name="rolling_confidence")
+                        st.plotly_chart(px.line(roll, x="timestamp", y="rolling_confidence", title="Rolling Confidence Drift"), width="stretch")
+        availability_checks = {
+            "confidence": "confidence" in signals_df.columns,
+            "edge_score": "edge_score" in signals_df.columns,
+            "expected_return": "expected_return" in signals_df.columns,
+            "p_tp_before_sl": "p_tp_before_sl" in signals_df.columns,
+            "current_price": "current_price" in signals_df.columns or "market_last_trade_price" in signals_df.columns,
+        }
+        avail_df = pd.DataFrame([{"field": k, "available": "Yes" if v else "No"} for k, v in availability_checks.items()])
+        st.dataframe(avail_df, width="stretch", hide_index=True)
 
 
 def render_data_quality_panel(signals_df, trades_df, markets_df, whales_df, alerts_df, model_status_df, positions_df, closed_positions_df, path_replay_df, system_health_df=None):
@@ -1709,7 +1733,7 @@ def main():
     with tab5:
         sub_model, sub_quality = st.tabs(["Model Performance", "Data Quality & Pipeline Readiness"])
         with sub_model:
-            render_model_status(model_status_df, supervised_eval_df, time_split_eval_df, path_replay_df, backtest_wallet_df, model_registry_df)
+            render_model_status(model_status_df, supervised_eval_df, time_split_eval_df, path_replay_df, backtest_wallet_df, model_registry_df, signals_df=signals_df)
         with sub_quality:
             render_data_quality_panel(signals_df, trades_df, markets_df, whales_df, alerts_df, model_status_df, positions_df, closed_positions_df, path_replay_df, system_health_df=system_health_df)
             if show_debug_sections:
