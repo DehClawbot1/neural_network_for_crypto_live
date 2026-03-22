@@ -284,13 +284,13 @@ def render_top_opportunities(signals_df):
 
 def render_market_tracker(markets_df):
     st.markdown('<div class="section-title">BTC Market Tracker</div>', unsafe_allow_html=True)
+    st.caption("Sortable market coverage view for BTC-related markets being tracked by the system.")
     if markets_df.empty:
         st.info("No BTC market snapshots yet.")
         return
 
     view = markets_df.copy().tail(20)
     st.dataframe(view[[c for c in ["question", "last_trade_price", "liquidity", "volume", "url"] if c in view.columns]], width="stretch")
-
 
     if "last_trade_price" in view.columns and "question" in view.columns:
         chart_df = view.dropna(subset=["last_trade_price"]).tail(12)
@@ -302,6 +302,7 @@ def render_market_tracker(markets_df):
 
 def render_whale_tracker(whales_df):
     st.markdown('<div class="section-title">Whale Activity Tracker</div>', unsafe_allow_html=True)
+    st.caption("Public wallet summaries showing who is most active and where concentration is forming.")
     if whales_df.empty:
         st.info("No whale summary yet.")
         return
@@ -325,6 +326,7 @@ def render_market_distribution(distribution_df):
 
 def render_alerts(alerts_df):
     st.markdown('<div class="section-title">Alerts</div>', unsafe_allow_html=True)
+    st.caption("Recent notable changes detected by the monitoring logic.")
     if alerts_df.empty:
         st.info("No alerts generated yet.")
         return
@@ -380,7 +382,7 @@ def render_trade_chart(trades_df):
 
 def render_model_status(model_status_df):
     st.markdown('<div class="section-title">Model / Learning Status</div>', unsafe_allow_html=True)
-    weights_status = "present" if WEIGHTS_FILE.exists() else "missing"
+    weights_status = "🟢 current" if WEIGHTS_FILE.exists() else "🔴 missing"
     st.write(f"**Weights file:** {weights_status}")
 
     if model_status_df.empty:
@@ -388,29 +390,42 @@ def render_model_status(model_status_df):
         return
 
     latest = model_status_df.iloc[-1].to_dict()
-    st.write(f"**Dataset rows:** {latest.get('dataset_rows', 0)}")
-    st.write(f"**Retrain threshold:** {latest.get('retrain_threshold', 0)}")
-    st.write(f"**Progress ratio:** {latest.get('progress_ratio', 0)}")
-    st.write(f"**Last action:** {latest.get('last_action', 'Unknown')}")
+    dataset_rows = int(latest.get('dataset_rows', 0) or 0)
+    retrain_threshold = int(latest.get('retrain_threshold', 0) or 0)
+    progress_ratio = float(latest.get('progress_ratio', 0) or 0)
+    last_action = latest.get('last_action', 'Unknown')
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.metric("Dataset Rows", dataset_rows)
+        st.metric("Retrain Threshold", retrain_threshold)
+    with c2:
+        st.metric("Progress Ratio", f"{progress_ratio:.2f}")
+
+    st.progress(max(0.0, min(1.0, progress_ratio)))
+    st.code(last_action, language="text")
 
 
 def render_raw_data(signals_df, trades_df, markets_df, whales_df, alerts_df, model_status_df, positions_df, closed_positions_df):
-    with st.expander("Raw data"):
-        st.markdown("**Signals CSV**")
+    st.caption("Raw data is split into sub-tabs for faster inspection and export-oriented review.")
+    raw_tabs = st.tabs(["Signals", "Trades", "Markets", "Whales", "Alerts", "Learning", "Positions"])
+
+    with raw_tabs[0]:
         st.dataframe(signals_df, width="stretch")
-        st.markdown("**Paper Trade Ledger**")
+    with raw_tabs[1]:
         st.dataframe(trades_df, width="stretch")
-        st.markdown("**Markets CSV**")
+    with raw_tabs[2]:
         st.dataframe(markets_df, width="stretch")
-        st.markdown("**Whales CSV**")
+    with raw_tabs[3]:
         st.dataframe(whales_df, width="stretch")
-        st.markdown("**Alerts CSV**")
+    with raw_tabs[4]:
         st.dataframe(alerts_df, width="stretch")
-        st.markdown("**Model Status CSV**")
+    with raw_tabs[5]:
         st.dataframe(model_status_df, width="stretch")
-        st.markdown("**Open Positions CSV**")
+    with raw_tabs[6]:
+        st.markdown("**Open Positions**")
         st.dataframe(positions_df, width="stretch")
-        st.markdown("**Closed Positions CSV**")
+        st.markdown("**Closed Positions**")
         st.dataframe(closed_positions_df, width="stretch")
 
 
