@@ -5,6 +5,7 @@ import pandas as pd
 from sklearn.impute import SimpleImputer
 from sklearn.utils import resample
 from sklearn.metrics import accuracy_score, mean_squared_error
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.neural_network import MLPClassifier, MLPRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -64,36 +65,54 @@ class Stage2TemporalModels:
         if not feature_cols:
             return pd.DataFrame()
 
-        split_idx = int(len(df) * 0.8)
-        train_df = df.iloc[:split_idx]
-        test_df = df.iloc[split_idx:]
-        if train_df.empty or test_df.empty:
-            return pd.DataFrame()
-
         metrics = {}
+        n_splits = min(5, max(2, len(df) // 50))
+        tscv = TimeSeriesSplit(n_splits=n_splits)
 
         if target_cls:
-            balanced_train_df = self._balance_binary_frame(train_df, target_cls)
-            clf = Pipeline([
-                ("imputer", SimpleImputer(strategy="median")),
-                ("scaler", StandardScaler()),
-                ("model", MLPClassifier(hidden_layer_sizes=(64, 32), random_state=42, max_iter=300)),
-            ])
-            clf.fit(balanced_train_df[feature_cols], balanced_train_df[target_cls].fillna(0).astype(int))
-            preds = clf.predict(test_df[feature_cols])
-            metrics["temporal_test_accuracy"] = accuracy_score(test_df[target_cls].fillna(0).astype(int), preds)
-            joblib.dump({"model": clf, "features": feature_cols}, self.classifier_file)
+            cls_scores = []
+            last_clf = None
+            for train_idx, test_idx in tscv.split(df):
+                train_df = df.iloc[train_idx]
+                test_df = df.iloc[test_idx]
+                if train_df.empty or test_df.empty:
+                    continue
+                balanced_train_df = self._balance_binary_frame(train_df, target_cls)
+                clf = Pipeline([
+                    ("imputer", SimpleImputer(strategy="median")),
+                    ("scaler", StandardScaler()),
+                    ("model", MLPClassifier(hidden_layer_sizes=(64, 32), random_state=42, max_iter=300)),
+                ])
+                clf.fit(balanced_train_df[feature_cols], balanced_train_df[target_cls].fillna(0).astype(int))
+                preds = clf.predict(test_df[feature_cols])
+                cls_scores.append(accuracy_score(test_df[target_cls].fillna(0).astype(int), preds))
+                last_clf = clf
+            if cls_scores:
+                metrics["temporal_walk_forward_accuracy"] = float(sum(cls_scores) / len(cls_scores))
+            if last_clf is not None:
+                joblib.dump({"model": last_clf, "features": feature_cols}, self.classifier_file)
 
         if target_reg:
-            reg = Pipeline([
-                ("imputer", SimpleImputer(strategy="median")),
-                ("scaler", StandardScaler()),
-                ("model", MLPRegressor(hidden_layer_sizes=(64, 32), random_state=42, max_iter=300)),
-            ])
-            reg.fit(train_df[feature_cols], train_df[target_reg].fillna(0.0))
-            preds = reg.predict(test_df[feature_cols])
-            metrics["temporal_test_rmse"] = mean_squared_error(test_df[target_reg].fillna(0.0), preds) ** 0.5
-            joblib.dump({"model": reg, "features": feature_cols}, self.regressor_file)
+            reg_scores = []
+            last_reg = None
+            for train_idx, test_idx in tscv.split(df):
+                train_df = df.iloc[train_idx]
+                test_df = df.iloc[test_idx]
+                if train_df.empty or test_df.empty:
+                    continue
+                reg = Pipeline([
+                    ("imputer", SimpleImputer(strategy="median")),
+                    ("scaler", StandardScaler()),
+                    ("model", MLPRegressor(hidden_layer_sizes=(64, 32), random_state=42, max_iter=300)),
+                ])
+                reg.fit(train_df[feature_cols], train_df[target_reg].fillna(0.0))
+                preds = reg.predict(test_df[feature_cols])
+                reg_scores.append(mean_squared_error(test_df[target_reg].fillna(0.0), preds) ** 0.5)
+                last_reg = reg
+            if reg_scores:
+                metrics["temporal_walk_forward_rmse"] = float(sum(reg_scores) / len(reg_scores))
+            if last_reg is not None:
+                joblib.dump({"model": last_reg, "features": feature_cols}, self.regressor_file)
 
         result = pd.DataFrame([metrics]) if metrics else pd.DataFrame()
         if not result.empty:
