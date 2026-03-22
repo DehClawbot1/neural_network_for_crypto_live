@@ -30,20 +30,40 @@ class ContractTargetBuilder:
             return market_row.get("no_token_id")
         return market_row.get("yes_token_id")
 
-    def _compute_path_labels(self, entry_price, future_prices, tp_move, sl_move):
-        if future_prices.empty:
-            return None, None, None, None, None
+    def _compute_path_labels(self, entry_price, future_window, tp_move, sl_move):
+        if future_window.empty:
+            return {}
 
-        first_future = float(future_prices.iloc[-1])
-        forward_return = (first_future - entry_price) / entry_price if entry_price else None
+        future_prices = future_window["price"].astype(float)
+        forward_return = (float(future_prices.iloc[-1]) - entry_price) / entry_price if entry_price else None
         moves = [(float(price) - entry_price) for price in future_prices]
         mfe = max(moves) if moves else None
         mae = min(moves) if moves else None
+        max_price = float(future_prices.max()) if len(future_prices) else None
+        best_exit_price = max_price
         tp_hit_idx = next((i for i, move in enumerate(moves) if move >= tp_move), None)
         sl_hit_idx = next((i for i, move in enumerate(moves) if move <= -sl_move), None)
         tp_before_sl = int(tp_hit_idx is not None and (sl_hit_idx is None or tp_hit_idx < sl_hit_idx))
         target_up = int((forward_return or 0) > 0)
-        return forward_return, tp_before_sl, mfe, mae, target_up
+        time_to_tp = None
+        if tp_hit_idx is not None:
+            time_to_tp = float((future_window.iloc[tp_hit_idx]["timestamp"] - future_window.iloc[0]["timestamp"]).total_seconds() / 60.0)
+        time_to_max_pnl = None
+        if moves:
+            max_idx = int(moves.index(mfe))
+            time_to_max_pnl = float((future_window.iloc[max_idx]["timestamp"] - future_window.iloc[0]["timestamp"]).total_seconds() / 60.0)
+        return {
+            "forward_return_15m": forward_return,
+            "tp_before_sl_60m": tp_before_sl,
+            "tp_hit_before_sl": tp_before_sl,
+            "mfe_60m": mfe,
+            "mae_60m": mae,
+            "max_price_within_horizon": max_price,
+            "best_exit_price_within_horizon": best_exit_price,
+            "time_to_tp": time_to_tp,
+            "time_to_max_pnl": time_to_max_pnl,
+            "target_up": target_up,
+        }
 
     def build(self, forward_minutes=15, max_hold_minutes=60, tp_move=0.04, sl_move=0.03):
         signals_df = self._safe_read(self.signals_file)
@@ -95,11 +115,9 @@ class ContractTargetBuilder:
             if future_window.empty:
                 continue
 
-            forward_window = future_window[future_window["timestamp"] <= signal_ts + pd.Timedelta(minutes=forward_minutes)]
-            future_prices = forward_window["price"] if not forward_window.empty else future_window["price"].head(1)
-            forward_return, tp_before_sl, mfe, mae, target_up = self._compute_path_labels(
+            labels = self._compute_path_labels(
                 entry_price,
-                future_prices,
+                future_window,
                 tp_move,
                 sl_move,
             )
@@ -110,11 +128,7 @@ class ContractTargetBuilder:
                     "token_id": token_id,
                     "entry_price": entry_price,
                     "anchor_timestamp": anchor_row.get("timestamp"),
-                    "forward_return_15m": forward_return,
-                    "tp_before_sl_60m": tp_before_sl,
-                    "mfe_60m": mfe,
-                    "mae_60m": mae,
-                    "target_up": target_up,
+                    **labels,
                 }
             )
             rows.append(row)
