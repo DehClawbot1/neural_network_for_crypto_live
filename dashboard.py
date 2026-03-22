@@ -907,8 +907,34 @@ def render_alerts(alerts_df):
     c5.metric("Entry Alerts", entry_alerts)
     c6.metric("Exit Alerts", exit_alerts)
 
-    display_cols = [c for c in [time_col, market_col, alert_col, severity_col, "signal_label", "confidence", "message"] if c and c in view.columns]
+    if time_col:
+        chart_df = view.copy()
+        chart_df[time_col] = pd.to_datetime(chart_df[time_col], errors="coerce")
+        chart_df = chart_df.dropna(subset=[time_col])
+        if not chart_df.empty:
+            over_time = chart_df.groupby(chart_df[time_col].dt.floor("H")).size().reset_index(name="count")
+            st.plotly_chart(px.line(over_time, x=time_col, y="count", title="Alerts Over Time"), width="stretch")
+    if alert_col and not view.empty:
+        type_counts = view[alert_col].astype(str).value_counts().reset_index()
+        type_counts.columns = [alert_col, "count"]
+        st.plotly_chart(px.bar(type_counts, x=alert_col, y="count", title="Alerts by Type"), width="stretch")
+    if market_col and not view.empty:
+        market_counts = view[market_col].astype(str).value_counts().head(15).reset_index()
+        market_counts.columns = [market_col, "count"]
+        st.plotly_chart(px.bar(market_counts, x=market_col, y="count", title="Alerts by Market"), width="stretch")
+
+    source_col = "source_module" if "source_module" in view.columns else "source" if "source" in view.columns else None
+    status_col = "status" if "status" in view.columns else None
+    display_cols = [c for c in [time_col, severity_col, alert_col, market_col, "message", source_col, status_col] if c and c in view.columns]
     st.dataframe(view.sort_index(ascending=False).tail(50)[display_cols] if display_cols else view.tail(50), width="stretch", hide_index=True)
+
+    missing_schema_bits = []
+    if severity_col is None:
+        missing_schema_bits.append("severity")
+    if source_col is None:
+        missing_schema_bits.append("source module")
+    if missing_schema_bits:
+        st.caption("Schema follow-up later: missing alert fields -> " + ", ".join(missing_schema_bits))
 
 
 def render_simulated_decisions(positions_df, closed_positions_df):
