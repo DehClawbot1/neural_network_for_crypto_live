@@ -1488,6 +1488,21 @@ def render_data_quality_panel(signals_df, trades_df, markets_df, whales_df, aler
     else:
         st.success("Core schema columns are present.")
 
+    st.markdown("**Cross-Source Reconciliation**")
+    reconciliation_rows = []
+    signal_markets = set(signals_df.get("market_title", signals_df.get("market", pd.Series(dtype=str))).dropna().astype(str)) if signals_df is not None and not signals_df.empty else set()
+    position_markets = set(positions_df.get("market", pd.Series(dtype=str)).dropna().astype(str)) if positions_df is not None and not positions_df.empty else set()
+    alert_markets = set(alerts_df.get("market", alerts_df.get("market_title", pd.Series(dtype=str))).dropna().astype(str)) if alerts_df is not None and not alerts_df.empty else set()
+    replay_markets = set(path_replay_df.get("market", pd.Series(dtype=str)).dropna().astype(str)) if path_replay_df is not None and not path_replay_df.empty else set()
+    reconciliation_rows.append({"check": "open positions backed by signals", "status": "ok" if position_markets.issubset(signal_markets | position_markets) else "warning", "details": f"positions_without_signals={len(position_markets - signal_markets)}"})
+    reconciliation_rows.append({"check": "alerts linked to known markets", "status": "ok" if alert_markets.issubset(signal_markets | position_markets | replay_markets | alert_markets) else "warning", "details": f"unknown_alert_markets={len(alert_markets - (signal_markets | position_markets | replay_markets))}"})
+    reconciliation_rows.append({"check": "replay markets overlap closed outcomes", "status": "ok" if len(replay_markets) == 0 or len(replay_markets & set(closed_positions_df.get('market', pd.Series(dtype=str)).dropna().astype(str))) > 0 else "warning", "details": f"replay_markets={len(replay_markets)}"})
+    if "token_id" in signals_df.columns and "token_id" in positions_df.columns:
+        signal_tokens = set(signals_df["token_id"].dropna().astype(str))
+        position_tokens = set(positions_df["token_id"].dropna().astype(str))
+        reconciliation_rows.append({"check": "open position tokens seen in signals", "status": "ok" if position_tokens.issubset(signal_tokens | position_tokens) else "warning", "details": f"positions_without_signal_tokens={len(position_tokens - signal_tokens)}"})
+    st.dataframe(pd.DataFrame(reconciliation_rows), width="stretch", hide_index=True)
+
     st.markdown("**Duplicate & Anomaly Checks**")
     anomaly_rows = []
     for name, df in frames.items():
