@@ -27,6 +27,10 @@ class Evaluator:
         if df.empty or not self.model_file.exists() or "target_up" not in df.columns:
             return pd.DataFrame()
 
+        if "timestamp" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+            df = df.sort_values("timestamp")
+
         saved = joblib.load(self.model_file)
         model = saved["model"]
         features = saved["features"]
@@ -34,11 +38,17 @@ class Evaluator:
         if not usable:
             return pd.DataFrame()
 
-        X = df[usable]
-        y = df["target_up"].astype(int)
+        split_idx = int(len(df) * 0.8)
+        eval_df = df.iloc[split_idx:]
+        if eval_df.empty:
+            return pd.DataFrame()
+
+        X = eval_df[usable]
+        y = eval_df["target_up"].astype(int)
         preds = model.predict(X)
 
-        strategy_returns = np.where(preds == 1, df["future_return"], -df["future_return"])
+        return_col = "future_return" if "future_return" in eval_df.columns else None
+        strategy_returns = np.where(preds == 1, eval_df[return_col], -eval_df[return_col]) if return_col else np.zeros(len(eval_df))
         sharpe = 0.0
         if np.std(strategy_returns) > 0:
             sharpe = float(np.mean(strategy_returns) / np.std(strategy_returns))
@@ -57,7 +67,8 @@ class Evaluator:
                 "mean_strategy_return": float(np.mean(strategy_returns)),
                 "sharpe": sharpe,
                 "max_drawdown": max_drawdown,
-                "rows_evaluated": len(df),
+                "rows_evaluated": len(eval_df),
+                "evaluation_split": "last_20_percent_time_split",
             }
         ])
         result.to_csv(self.output_file, index=False)
