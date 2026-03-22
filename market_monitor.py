@@ -10,19 +10,28 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 
 
-def fetch_btc_markets(limit=1000, closed=False):
+def fetch_btc_markets(limit_per_page=100, closed=False, max_offset=2000):
     """
     Fetch public Polymarket markets and filter for Bitcoin/BTC-related ones.
     This is for research/monitoring only.
     """
-    params = {
-        "limit": limit,
-        "closed": str(closed).lower(),
-    }
-
-    response = requests.get(GAMMA_MARKETS_URL, params=params, timeout=20)
-    response.raise_for_status()
-    markets = response.json()
+    markets = []
+    offset = 0
+    while True:
+        params = {
+            "limit": limit_per_page,
+            "offset": offset,
+            "closed": str(closed).lower(),
+        }
+        response = requests.get(GAMMA_MARKETS_URL, params=params, timeout=20)
+        response.raise_for_status()
+        page_data = response.json()
+        if not page_data:
+            break
+        markets.extend(page_data)
+        offset += limit_per_page
+        if offset > max_offset:
+            break
 
     btc_markets = []
     for market in markets:
