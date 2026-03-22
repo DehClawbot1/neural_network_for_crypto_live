@@ -550,6 +550,20 @@ def render_action_board(signals_df, positions_df):
 def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df, path_replay_df, backtest_wallet_df, model_registry_df):
     st.markdown('<div class="section-title">Model / Learning Status</div>', unsafe_allow_html=True)
     st.caption("This tab shows whether the paper-trading system has enough historical rows to train/evaluate the newer supervised models.")
+    missing_outputs = []
+    for label, path in [
+        ("contract targets", LOGS_DIR / "contract_targets.csv"),
+        ("CLOB price history", LOGS_DIR / "clob_price_history.csv"),
+        ("replay backtest", PATH_REPLAY_FILE),
+        ("supervised eval", SUPERVISED_EVAL_FILE),
+        ("time-split eval", TIME_SPLIT_EVAL_FILE),
+    ]:
+        if not Path(path).exists():
+            missing_outputs.append(f"{label}: {path.name}")
+
+    if missing_outputs:
+        st.warning("Learning outputs still missing: " + "; ".join(missing_outputs))
+
     weights_status = "🟢 current" if WEIGHTS_FILE.exists() else "🔴 missing"
     st.write(f"**Weights file:** {weights_status}")
 
