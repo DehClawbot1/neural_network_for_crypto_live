@@ -1461,6 +1461,24 @@ def render_data_quality_panel(signals_df, trades_df, markets_df, whales_df, aler
     for label, ok in checklist:
         st.write(f"{'✅' if ok else '❌'} {label}")
 
+    st.markdown("**Schema Health**")
+    schema_checks = [
+        ("confidence", signals_df is not None and "confidence" in signals_df.columns),
+        ("edge_score", signals_df is not None and "edge_score" in signals_df.columns),
+        ("p_tp_before_sl", signals_df is not None and "p_tp_before_sl" in signals_df.columns),
+        ("market", (signals_df is not None and "market" in signals_df.columns) or (markets_df is not None and "market" in markets_df.columns) or (signals_df is not None and "market_title" in signals_df.columns)),
+        ("wallet_copied / trader_wallet", (signals_df is not None and "wallet_copied" in signals_df.columns) or (signals_df is not None and "trader_wallet" in signals_df.columns) or (trades_df is not None and "wallet_copied" in trades_df.columns)),
+        ("current_price", (signals_df is not None and "current_price" in signals_df.columns) or (positions_df is not None and "current_price" in positions_df.columns)),
+        ("unrealized_pnl", positions_df is not None and "unrealized_pnl" in positions_df.columns),
+    ]
+    missing_schema = [label for label, ok in schema_checks if not ok]
+    for label, ok in schema_checks:
+        st.write(f"{'✅' if ok else '❌'} {label}")
+    if missing_schema:
+        st.warning("Missing core columns: " + ", ".join(missing_schema))
+    else:
+        st.success("Core schema columns are present.")
+
 
 def render_raw_data(signals_df, trades_df, episode_log_df, markets_df, whales_df, alerts_df, model_status_df, positions_df, closed_positions_df):
     st.caption("Raw data is split into sub-tabs for faster inspection and export-oriented review.")
