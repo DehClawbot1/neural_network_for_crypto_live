@@ -6,6 +6,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.metrics import accuracy_score, mean_squared_error
 from sklearn.neural_network import MLPClassifier, MLPRegressor
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 
 class Stage2TemporalModels:
@@ -57,6 +58,7 @@ class Stage2TemporalModels:
         if target_cls:
             clf = Pipeline([
                 ("imputer", SimpleImputer(strategy="median")),
+                ("scaler", StandardScaler()),
                 ("model", MLPClassifier(hidden_layer_sizes=(64, 32), random_state=42, max_iter=300)),
             ])
             clf.fit(train_df[feature_cols], train_df[target_cls].fillna(0).astype(int))
@@ -67,6 +69,7 @@ class Stage2TemporalModels:
         if target_reg:
             reg = Pipeline([
                 ("imputer", SimpleImputer(strategy="median")),
+                ("scaler", StandardScaler()),
                 ("model", MLPRegressor(hidden_layer_sizes=(64, 32), random_state=42, max_iter=300)),
             ])
             reg.fit(train_df[feature_cols], train_df[target_reg].fillna(0.0))
