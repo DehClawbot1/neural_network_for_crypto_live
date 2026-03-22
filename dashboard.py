@@ -1516,15 +1516,17 @@ def main():
     show_debug_sections = st.sidebar.checkbox("Show debug sections", value=True)
     theme_mode = st.sidebar.selectbox("Theme", ["Dark", "Light", "Auto"], index=0)
 
+    st.sidebar.markdown("**Global filters**")
+    date_range_days = st.sidebar.selectbox("Date range", [1, 3, 7, 14, 30], index=2)
     market_search = st.sidebar.text_input("Market search", "")
     wallet_search = st.sidebar.text_input("Wallet search", "")
     side_filter = st.sidebar.selectbox("Side filter", ["All", "YES", "NO", "unknown"])
     signal_label_filter = st.sidebar.selectbox("Signal label filter", ["All", "IGNORE", "LOW-CONFIDENCE WATCH", "STRONG PAPER OPPORTUNITY", "HIGHEST-RANKED PAPER SIGNAL"])
     min_confidence = st.sidebar.slider("Minimum confidence", 0.0, 1.0, 0.0, 0.01)
     min_edge_score = st.sidebar.slider("Minimum edge score", -1.0, 1.0, -1.0, 0.01)
-    only_open_positions = st.sidebar.checkbox("Only open positions", value=False)
-    only_actionable = st.sidebar.checkbox("Only actionable signals", value=False)
-    time_range_hours = st.sidebar.selectbox("Time range", [1, 6, 12, 24, 72, 168], index=3)
+    only_open_positions = st.sidebar.checkbox("Open positions only", value=False)
+    only_actionable = st.sidebar.checkbox("Actionable only", value=False)
+    time_range_hours = date_range_days * 24
     if auto_refresh_enabled:
         components.html(
             f"<script>setTimeout(function() {{ window.parent.location.reload(); }}, {int(refresh_seconds) * 1000});</script>",
