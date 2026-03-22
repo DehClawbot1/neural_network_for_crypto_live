@@ -16,7 +16,7 @@ class PositionManager:
     Research/paper-trading only.
     """
 
-    def __init__(self, logs_dir="logs", max_open_positions=10, max_positions_per_token=1, max_positions_per_condition=2, max_positions_per_wallet=2, cooldown_minutes=30, take_profit_price_move=0.25, take_profit_roi_pct=0.25, trailing_stop_pct=0.08, time_stop_minutes=180, max_spread_to_exit=0.05, min_bid_size_to_exit=0):
+    def __init__(self, logs_dir="logs", max_open_positions=10, max_positions_per_token=1, max_positions_per_condition=2, max_positions_per_wallet=2, cooldown_minutes=30, take_profit_price_move=0.25, take_profit_roi_pct=0.25, trailing_stop_pct=0.08, time_stop_minutes=180, max_spread_to_exit=0.05, min_bid_size_to_exit=0, fee_rate=0.0, slippage_rate=0.005):
         self.logs_dir = Path(logs_dir)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.positions_file = self.logs_dir / "positions.csv"
@@ -34,6 +34,8 @@ class PositionManager:
         self.time_stop_minutes = time_stop_minutes
         self.max_spread_to_exit = max_spread_to_exit
         self.min_bid_size_to_exit = min_bid_size_to_exit
+        self.fee_rate = fee_rate
+        self.slippage_rate = slippage_rate
 
     def _read_positions(self):
         if not self.positions_file.exists():
@@ -176,8 +178,9 @@ class PositionManager:
 
         shares_closed = shares * fraction
         shares_remaining = shares - shares_closed
-        gross_realized_pnl = shares_closed * (exit_price - entry_price)
-        fees_paid_exit = shares_closed * exit_price * self.price_service.max_age_seconds * 0 + 0.0
+        effective_exit_price = exit_price * (1.0 - self.slippage_rate)
+        gross_realized_pnl = shares_closed * (effective_exit_price - entry_price)
+        fees_paid_exit = shares_closed * effective_exit_price * self.fee_rate
         net_realized_pnl = gross_realized_pnl - fees_paid_exit
 
         positions.at[idx, "shares"] = shares_remaining
@@ -210,9 +213,10 @@ class PositionManager:
         size_usdc = float(row.get("size_usdc", 0.0) or 0.0)
         fees_paid = float(row.get("fees_paid", 0.0) or 0.0)
         shares = float(row.get("shares", 0.0) or 0.0)
-        market_value = shares * exit_price
-        gross_realized_pnl = shares * (exit_price - entry_price)
-        fees_paid_exit = 0.0
+        effective_exit_price = exit_price * (1.0 - self.slippage_rate)
+        market_value = shares * effective_exit_price
+        gross_realized_pnl = shares * (effective_exit_price - entry_price)
+        fees_paid_exit = shares * effective_exit_price * self.fee_rate
         net_realized_pnl = gross_realized_pnl - fees_paid_exit - fees_paid
 
         row["current_price"] = exit_price
@@ -288,8 +292,9 @@ class PositionManager:
                 shares = float(closed_row.get("shares", 0.0) or 0.0)
                 entry_price = float(closed_row.get("entry_price", 0.0) or 0.0)
                 exit_price = float(closed_row.get("current_price", entry_price) or entry_price)
-                gross_realized_pnl = shares * (exit_price - entry_price)
-                fees_paid_exit = 0.0
+                effective_exit_price = exit_price * (1.0 - self.slippage_rate)
+                gross_realized_pnl = shares * (effective_exit_price - entry_price)
+                fees_paid_exit = shares * effective_exit_price * self.fee_rate
                 net_realized_pnl = gross_realized_pnl - fees_paid_exit - float(closed_row.get("fees_paid", 0.0) or 0.0)
                 closed_row["exit_price"] = exit_price
                 closed_row["gross_realized_pnl"] = gross_realized_pnl
