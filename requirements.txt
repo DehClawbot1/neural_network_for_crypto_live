@@ -12,3 +12,5 @@ plotly
 fastapi
 uvicorn
 scikit-learn
+lightgbm
+catboost

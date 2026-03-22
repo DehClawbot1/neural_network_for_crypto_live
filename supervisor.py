@@ -20,6 +20,7 @@ from autonomous_monitor import AutonomousMonitor
 from retrainer import Retrainer
 from position_manager import PositionManager
 from model_inference import ModelInference
+from stage1_inference import Stage1Inference
 from strategy_layers import EntryRuleLayer
 
 # Configure logging for zero-intervention monitoring
@@ -179,6 +180,7 @@ def main_loop():
     feature_builder = FeatureBuilder()
     signal_engine = SignalEngine()
     model_inference = ModelInference()
+    stage1_inference = Stage1Inference()
     entry_rule = EntryRuleLayer()
     whale_tracker = WhaleTracker()
     alerts_engine = AlertsEngine()
@@ -214,6 +216,7 @@ def main_loop():
             # 3. Build features, run supervised inference, and score paper-trading opportunities
             features_df = feature_builder.build_features(signals_df, markets_df)
             inferred_df = model_inference.run(features_df)
+            inferred_df = stage1_inference.run(inferred_df)
             scored_df = signal_engine.score_features(inferred_df)
 
             if scored_df.empty:

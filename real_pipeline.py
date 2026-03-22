@@ -6,6 +6,7 @@ from dataset_aligner import DatasetAligner
 from supervised_trainer import SupervisedTrainer
 from evaluator import Evaluator
 from supervised_models import SupervisedModels
+from stage1_models import Stage1Models
 from contract_target_builder import ContractTargetBuilder
 from wallet_alpha_builder import WalletAlphaBuilder
 from walk_forward_evaluator import WalkForwardEvaluator
@@ -43,6 +44,7 @@ def run_research_pipeline():
     ContractTargetBuilder().write(forward_minutes=15, max_hold_minutes=60, tp_move=0.04, sl_move=0.03)
     WalletAlphaBuilder().write()
     SupervisedModels().train()
+    Stage1Models().train()
     WalkForwardEvaluator().evaluate()
     TimeSplitTrainer().run()
     PathReplaySimulator().write()
