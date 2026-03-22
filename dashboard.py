@@ -238,6 +238,37 @@ def render_data_freshness_panel(source_frames):
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
 
+def render_pipeline_health_strip(signals_df, markets_df, positions_df, model_status_df, path_replay_df):
+    st.markdown('<div class="section-title">Pipeline Health</div>', unsafe_allow_html=True)
+
+    def yes_no(df, max_age_seconds=600):
+        ts = _latest_timestamp_from_df(df)
+        if ts is None:
+            return "No"
+        age = (pd.Timestamp.utcnow() - ts).total_seconds()
+        return "Yes" if age <= max_age_seconds else "No"
+
+    cards = [
+        ("Market monitor", yes_no(markets_df)),
+        ("Whale tracker", yes_no(load_csv(WHALES_FILE))),
+        ("Signal engine", yes_no(signals_df)),
+        ("Order simulation", yes_no(positions_df)),
+        ("Model status", yes_no(model_status_df, max_age_seconds=1800)),
+        ("Replay/backtest available", "Yes" if path_replay_df is not None and not path_replay_df.empty else "No"),
+        ("Signals growing", "Yes" if signals_df is not None and len(signals_df) > 0 else "No"),
+        ("Markets updated", "Yes" if yes_no(markets_df) == "Yes" else "No"),
+        ("Positions changing", "Yes" if yes_no(positions_df) == "Yes" else "No"),
+        ("Replay file exists", "Yes" if PATH_REPLAY_FILE.exists() else "No"),
+    ]
+
+    cols = st.columns(5)
+    for idx, (label, value) in enumerate(cards):
+        with cols[idx % 5]:
+            st.markdown('<div class="overview-card">', unsafe_allow_html=True)
+            st.metric(label, value)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+
 def render_header():
     freshness = get_data_freshness(SIGNALS_FILE, MARKETS_FILE, ALERTS_FILE)
     st.markdown(
@@ -948,6 +979,7 @@ def main():
             ("positions.csv", POSITIONS_FILE, positions_df),
             ("model_status.csv", MODEL_STATUS_FILE, model_status_df),
         ])
+        render_pipeline_health_strip(signals_df, markets_df, positions_df, model_status_df, path_replay_df)
         render_performance_charts(trades_df, closed_positions_df, alerts_df, backtest_wallet_df, model_registry_df, positions_df=positions_df)
 
     with tab2:
