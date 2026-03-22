@@ -39,27 +39,16 @@ def ensure_environment():
     return True
 
 
-def ensure_model():
-    print("[2/3] Checking RL model weights...")
+def ensure_optional_rl_model():
+    print("[2/3] Checking optional RL model weights...")
 
     if WEIGHTS_PATH.exists():
-        print(f"[+] Found model weights: {WEIGHTS_PATH}\n")
+        print(f"[+] Found RL weights: {WEIGHTS_PATH} (optional fallback)\n")
         return True
 
-    print("[!] No trained model found.")
-    print("[!] Starting a quick bootstrap training run so the supervisor has a model to use...")
-    try:
-        train_model(timesteps=5000)
-    except Exception as exc:
-        print(f"[-] Failed to train bootstrap model: {exc}")
-        return False
-
-    if WEIGHTS_PATH.exists():
-        print(f"[+] Model created successfully: {WEIGHTS_PATH}\n")
-        return True
-
-    print("[-] Training completed but weights were not found.")
-    return False
+    print("[!] No RL weights found.")
+    print("[+] Continuing anyway: supervised / event-driven pipeline is the default path.\n")
+    return True
 
 
 def maybe_retrain_before_start():
@@ -102,7 +91,7 @@ def main():
     if not ensure_environment():
         sys.exit(1)
 
-    if not ensure_model():
+    if not ensure_optional_rl_model():
         sys.exit(1)
 
     # Final quick sanity check before loop
@@ -110,8 +99,7 @@ def main():
     build_research_artifacts()
 
     if load_brain() is None:
-        print("[-] Model exists but could not be loaded. Aborting.")
-        sys.exit(1)
+        print("[!] RL model not available. Starting with supervised-first mode only.\n")
 
     start_supervisor()
 
