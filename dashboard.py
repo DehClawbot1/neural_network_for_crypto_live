@@ -55,7 +55,7 @@ def _cached_execution_history(logs_dir_str, execution_mtime, legacy_mtime):
 
 def load_execution_history():
     execution_path = LOGS_DIR / "execution_log.csv"
-    legacy_path = LOGS_DIR / "daily_summary.txt"
+    legacy_path = LEGACY_EXECUTION_FILE
     execution_mtime = execution_path.stat().st_mtime if execution_path.exists() else 0
     legacy_mtime = legacy_path.stat().st_mtime if legacy_path.exists() else 0
     return _cached_execution_history(str(LOGS_DIR), execution_mtime, legacy_mtime)
@@ -420,7 +420,7 @@ def render_alerts(alerts_df):
 
 
 def render_simulated_decisions(positions_df, closed_positions_df):
-    st.markdown('<div class="section-title">Simulated Trade Decisions</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Trade Decisions</div>', unsafe_allow_html=True)
     rows = []
 
     if not positions_df.empty:
@@ -584,7 +584,7 @@ def render_best_trades(closed_positions_df, path_replay_df):
 
 
 def render_action_board(signals_df, positions_df):
-    st.markdown('<div class="section-title">Top 10 Entry / Hold / Leave Board</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Top 10 Action Board</div>', unsafe_allow_html=True)
     st.caption("Paper-trading action board only — not live execution advice.")
     if signals_df.empty:
         st.info("No ranked signals available yet.")
