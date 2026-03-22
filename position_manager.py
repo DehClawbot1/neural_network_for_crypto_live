@@ -5,6 +5,7 @@ from datetime import datetime
 import pandas as pd
 
 from pnl_engine import PNLEngine
+from market_price_service import MarketPriceService
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -20,6 +21,7 @@ class PositionManager:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.positions_file = self.logs_dir / "positions.csv"
         self.closed_file = self.logs_dir / "closed_positions.csv"
+        self.price_service = MarketPriceService()
 
     def _read_positions(self):
         if not self.positions_file.exists():
@@ -41,8 +43,11 @@ class PositionManager:
         shares = PNLEngine.shares_from_capital(size_usdc, fill_price)
 
         record = {
+            "position_id": f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
             "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "market": market,
+            "condition_id": signal_row.get("condition_id"),
+            "token_id": signal_row.get("token_id"),
             "wallet_copied": wallet,
             "trade_side": trade_side,
             "outcome_side": outcome_side,
@@ -53,7 +58,9 @@ class PositionManager:
             "shares": shares,
             "entry_price": fill_price,
             "current_price": fill_price,
+            "market_value": size_usdc,
             "fees_paid": 0.0,
+            "realized_pnl": 0.0,
             "unrealized_pnl": 0.0,
             "status": "OPEN",
         }
@@ -62,38 +69,37 @@ class PositionManager:
         self._write_positions(df)
         logging.info("Opened paper position on %s", market)
 
-    def update_mark_to_market(self, scored_df: pd.DataFrame):
+    def update_mark_to_market(self, scored_df: pd.DataFrame | None = None):
         positions = self._read_positions()
-        if positions.empty or scored_df is None or scored_df.empty:
+        if positions.empty:
             return positions
 
-        latest_prices = {}
         latest_conf = {}
-        for _, row in scored_df.iterrows():
-            market = row.get("market_title", row.get("market", "Unknown Market"))
-            latest_prices[market] = float(row.get("current_price", 0.5))
-            latest_conf[market] = float(row.get("confidence", 0.0))
+        if scored_df is not None and not scored_df.empty:
+            for _, row in scored_df.iterrows():
+                token_id = row.get("token_id")
+                if token_id:
+                    latest_conf[str(token_id)] = float(row.get("confidence", 0.0))
+
+        token_ids = [str(x) for x in positions.get("token_id", pd.Series(dtype=str)).dropna().tolist()]
+        latest_prices = self.price_service.get_latest_prices(token_ids) if token_ids else {}
 
         for idx, row in positions.iterrows():
-            market = row.get("market")
-            if market not in latest_prices:
-                continue
-            current_price = latest_prices[market]
+            token_id = str(row.get("token_id", ""))
+            current_price = latest_prices.get(token_id)
+            if current_price is None:
+                current_price = float(row.get("current_price", row.get("entry_price", 0.5)))
             entry_price = float(row.get("entry_price", current_price))
-            outcome_side = str(row.get("outcome_side", row.get("side", "YES"))).upper()
-            size = float(row.get("size_usdc", 0.0))
+            shares = float(row.get("shares", 0.0))
             fees_paid = float(row.get("fees_paid", 0.0))
-
-            pnl = PNLEngine.mark_to_market_pnl(
-                capital_usdc=size,
-                entry_price=entry_price,
-                current_price=current_price,
-                side="BUY" if outcome_side == "YES" else "SELL",
-            ) - fees_paid
+            market_value = shares * float(current_price)
+            unrealized_pnl = market_value - (shares * entry_price) - fees_paid
 
             positions.at[idx, "current_price"] = current_price
-            positions.at[idx, "unrealized_pnl"] = round(float(pnl), 4)
-            positions.at[idx, "confidence"] = latest_conf.get(market, row.get("confidence", 0.0))
+            positions.at[idx, "market_value"] = round(float(market_value), 4)
+            positions.at[idx, "unrealized_pnl"] = round(float(unrealized_pnl), 4)
+            if token_id in latest_conf:
+                positions.at[idx, "confidence"] = latest_conf[token_id]
 
         self._write_positions(positions)
         return positions
