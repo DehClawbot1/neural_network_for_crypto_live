@@ -1,5 +1,6 @@
 import time
 import logging
+from pathlib import Path
 
 import pandas as pd
 import requests
@@ -48,13 +49,30 @@ def get_top_crypto_traders(limit=100):
         return []
 
 
-def get_recent_btc_trades(wallet_address, limit=50):
-    """Fetch recent wallet trades from the public Data API and filter for BTC markets."""
+def load_btc_market_universe(logs_dir="logs"):
+    markets_file = Path(logs_dir) / "markets.csv"
+    if not markets_file.exists():
+        return {"condition_ids": set(), "token_ids": set(), "slugs": set()}
+    try:
+        df = pd.read_csv(markets_file, engine="python", on_bad_lines="skip")
+    except Exception:
+        return {"condition_ids": set(), "token_ids": set(), "slugs": set()}
+
+    condition_ids = set(df.get("condition_id", pd.Series(dtype=str)).dropna().astype(str).tolist())
+    token_ids = set()
+    for col in ["yes_token_id", "no_token_id", "token_id"]:
+        if col in df.columns:
+            token_ids.update(df[col].dropna().astype(str).tolist())
+    slugs = set(df.get("slug", pd.Series(dtype=str)).dropna().astype(str).tolist())
+    return {"condition_ids": condition_ids, "token_ids": token_ids, "slugs": slugs}
+
+
+def get_recent_btc_trades(wallet_address, limit=50, market_universe=None):
+    """Fetch recent wallet trades from the public Data API and keep only trades that map into the BTC universe."""
     url = "https://data-api.polymarket.com/trades"
     params = {
         "user": wallet_address,
         "limit": limit,
-        "side": "BUY",
     }
 
     try:
@@ -63,31 +81,43 @@ def get_recent_btc_trades(wallet_address, limit=50):
         response.raise_for_status()
         trades = response.json()
 
+        market_universe = market_universe or {"condition_ids": set(), "token_ids": set(), "slugs": set()}
         signals = []
         for trade in trades:
+            condition_id = str(trade.get("conditionId", "") or "")
+            token_id = str(trade.get("tokenId", "") or "")
+            slug = str(trade.get("slug", trade.get("marketSlug", "")) or "")
             title = str(trade.get("title", ""))
             title_l = title.lower()
 
-            if (
-                "bitcoin" in title_l
-                or "btc" in title_l
-                or "bitcoin para cima ou para baixo" in title_l
-                or "para cima ou para baixo" in title_l
-            ):
-                signals.append(
-                    {
-                        "trader_wallet": wallet_address,
-                        "market_title": title,
-                        "token_id": trade.get("tokenId"),
-                        "condition_id": trade.get("conditionId"),
-                        "trade_side": trade.get("side"),
-                        "outcome_side": trade.get("outcome"),
-                        "side": trade.get("outcome"),
-                        "price": float(trade.get("price", 0)),
-                        "size": float(trade.get("size", 0)),
-                        "timestamp": trade.get("timestamp"),
-                    }
-                )
+            mapped_to_btc = (
+                condition_id in market_universe.get("condition_ids", set())
+                or token_id in market_universe.get("token_ids", set())
+                or slug in market_universe.get("slugs", set())
+            )
+            keyword_fallback = (
+                "bitcoin" in title_l or "btc" in title_l or "bitcoin para cima ou para baixo" in title_l or "para cima ou para baixo" in title_l
+            )
+            if not mapped_to_btc and not keyword_fallback:
+                continue
+
+            signals.append(
+                {
+                    "trade_id": trade.get("id"),
+                    "tx_hash": trade.get("transactionHash", trade.get("txHash")),
+                    "trader_wallet": wallet_address,
+                    "market_title": title,
+                    "market_slug": slug,
+                    "token_id": trade.get("tokenId"),
+                    "condition_id": trade.get("conditionId"),
+                    "trade_side": trade.get("side"),
+                    "outcome_side": trade.get("outcome"),
+                    "side": trade.get("outcome"),
+                    "price": float(trade.get("price", 0)),
+                    "size": float(trade.get("size", 0)),
+                    "timestamp": trade.get("timestamp"),
+                }
+            )
         return signals
     except Exception as e:
         logging.error(f"Error fetching trades for {wallet_address[:8]}...: {e}")
@@ -99,10 +129,11 @@ def run_scraper_cycle():
     logging.info("Starting Alpha Signal Scraper cycle...")
     top_traders = get_top_crypto_traders(limit=100)
 
+    market_universe = load_btc_market_universe()
     all_signals = []
     for trader in top_traders:
         logging.info(f"Scanning recent trades for wallet: {trader[:8]}...")
-        trades = get_recent_btc_trades(trader, limit=15)
+        trades = get_recent_btc_trades(trader, limit=50, market_universe=market_universe)
         all_signals.extend(trades)
         time.sleep(0.25)
 

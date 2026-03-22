@@ -77,7 +77,17 @@ class WalletAlphaBuilder:
                         "wallet_recent_streak": int((past[return_col].tail(5) > 0).sum()),
                     }
                 )
-        return pd.DataFrame(rows)
+        history_df = pd.DataFrame(rows)
+        if not history_df.empty and "outcome_side" in df.columns and wallet_col in df.columns:
+            side_stats = (
+                df.groupby([wallet_col, "outcome_side"])[return_col]
+                .mean()
+                .unstack(fill_value=0.0)
+                .reset_index()
+                .rename(columns={wallet_col: "wallet_copied", "YES": "yes_side_avg_return", "NO": "no_side_avg_return"})
+            )
+            history_df = history_df.merge(side_stats, on="wallet_copied", how="left")
+        return history_df
 
     def write(self):
         alpha = self.build()
