@@ -1280,16 +1280,14 @@ def main():
             render_trade_chart(trades_df, positions_df=positions_df, closed_positions_df=closed_positions_df)
 
     with tab4:
-        top_left, top_right = st.columns([1.1, 0.9])
-        with top_left:
+        sub1, sub2, sub3 = st.tabs(["Markets", "Whale activity", "Alerts"])
+        with sub1:
             render_market_tracker(markets_df)
-        with top_right:
-            render_alerts(alerts_df)
-        lower_left, lower_right = st.columns([1, 1])
-        with lower_left:
-            render_whale_tracker(whales_df)
-        with lower_right:
             render_market_distribution(distribution_df)
+        with sub2:
+            render_whale_tracker(whales_df)
+        with sub3:
+            render_alerts(alerts_df)
 
     with tab5:
         render_model_status(model_status_df, supervised_eval_df, time_split_eval_df, path_replay_df, backtest_wallet_df, model_registry_df)
