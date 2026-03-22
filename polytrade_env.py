@@ -198,6 +198,118 @@ class PolyTradeEnv(gym.Env):
         return self._build_state(), float(reward), terminated, truncated, info
 
 
+class LivePolyTradeEnv(gym.Env):
+    """
+    Live-state environment scaffold for `live-test`.
+    This does not perform online training by itself; it exposes a live observation
+    built from execution, balance, and quote context so the runtime can evolve
+    toward shadow-mode / live experience collection safely.
+    """
+
+    FEATURE_DIM = 12
+
+    def __init__(self, execution_client, market_price_service, token_id=None, outcome_side="YES", max_hold_steps=120):
+        super().__init__()
+        self.execution_client = execution_client
+        self.market_price_service = market_price_service
+        self.current_token_id = str(token_id) if token_id else None
+        self.outcome_side = str(outcome_side).upper()
+        self.max_hold_steps = max_hold_steps
+
+        self.action_space = spaces.Discrete(6)
+        self.observation_space = spaces.Box(low=-10.0, high=10.0, shape=(self.FEATURE_DIM,), dtype=np.float32)
+
+        self.position_open = False
+        self.entry_price = 0.0
+        self.shares = 0.0
+        self.position_age = 0
+        self.last_quote = {}
+        self.state = np.zeros(self.FEATURE_DIM, dtype=np.float32)
+
+    def set_market_context(self, token_id, outcome_side="YES", entry_price=None, shares=None, position_open=False, position_age=0):
+        self.current_token_id = str(token_id) if token_id else None
+        self.outcome_side = str(outcome_side).upper()
+        self.entry_price = float(entry_price or 0.0)
+        self.shares = float(shares or 0.0)
+        self.position_open = bool(position_open)
+        self.position_age = int(position_age or 0)
+
+    def _safe_balance(self):
+        try:
+            payload = self.execution_client.get_balance_allowance()
+            if isinstance(payload, dict):
+                for key in ["balance", "available", "available_balance", "amount"]:
+                    if key in payload and payload[key] is not None:
+                        return float(payload[key])
+            return 0.0
+        except Exception:
+            return 0.0
+
+    def _safe_quote(self):
+        if not self.current_token_id:
+            return {}
+        try:
+            return self.market_price_service.get_quote(self.current_token_id) or {}
+        except Exception:
+            return {}
+
+    def _build_state(self):
+        quote = self._safe_quote()
+        self.last_quote = quote
+        best_bid = float(quote.get("best_bid") or 0.0)
+        best_ask = float(quote.get("best_ask") or 0.0)
+        midpoint = float(quote.get("midpoint") or quote.get("last_trade_price") or 0.0)
+        spread = float(quote.get("spread") or max(0.0, best_ask - best_bid))
+        live_balance = float(self._safe_balance())
+        position_value = float(self.shares * midpoint)
+        unrealized = float(position_value - (self.shares * self.entry_price if self.position_open else 0.0))
+        side_flag = 1.0 if self.outcome_side == "YES" else -1.0
+
+        state = np.array(
+            [
+                midpoint,
+                best_bid,
+                best_ask,
+                spread,
+                live_balance,
+                float(self.entry_price if self.position_open else midpoint),
+                float(self.shares),
+                float(position_value),
+                float(unrealized),
+                float(self.position_age / max(1, self.max_hold_steps)),
+                float(side_flag),
+                float(1.0 if self.position_open else 0.0),
+            ],
+            dtype=np.float32,
+        )
+        self.state = state
+        return state
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        self.position_age = 0 if not self.position_open else self.position_age
+        return self._build_state(), {"token_id": self.current_token_id, "outcome_side": self.outcome_side}
+
+    def step(self, action):
+        action = int(action)
+        if self.position_open:
+            self.position_age += 1
+        obs = self._build_state()
+        reward = 0.0
+        terminated = False
+        truncated = self.position_age >= self.max_hold_steps
+        info = {
+            "action_requested": action,
+            "token_id": self.current_token_id,
+            "outcome_side": self.outcome_side,
+            "quote": self.last_quote,
+            "position_open": self.position_open,
+            "shares": self.shares,
+            "entry_price": self.entry_price,
+        }
+        return obs, float(reward), terminated, truncated, info
+
+
 if __name__ == "__main__":
     from gymnasium.utils.env_checker import check_env
 
