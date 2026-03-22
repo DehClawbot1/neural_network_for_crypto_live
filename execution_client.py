@@ -13,6 +13,7 @@ class ExecutionClient:
             from py_clob_client.client import ClobClient
             from py_clob_client.clob_types import OrderArgs, OrderType
             from py_clob_client.order_builder.constants import BUY, SELL
+            from py_clob_client.credentials import ApiCreds
         except Exception as exc:
             raise ImportError("py-clob-client is required for live-test execution_client.py") from exc
 
@@ -21,6 +22,7 @@ class ExecutionClient:
         self.OrderType = OrderType
         self.BUY = BUY
         self.SELL = SELL
+        self.ApiCreds = ApiCreds
 
         self.host = host or os.getenv("POLYMARKET_HOST", "https://clob.polymarket.com")
         self.chain_id = int(chain_id or os.getenv("POLYMARKET_CHAIN_ID", "137"))
@@ -35,14 +37,16 @@ class ExecutionClient:
             raise ValueError("PRIVATE_KEY is required for live-test execution client")
 
         if self.api_key and self.api_secret and self.api_passphrase:
-            self.api_creds = {
-                "key": self.api_key,
-                "secret": self.api_secret,
-                "passphrase": self.api_passphrase,
-            }
+            self.api_creds = self.ApiCreds(self.api_key, self.api_secret, self.api_passphrase)
         else:
             temp_client = self.ClobClient(self.host, key=self.private_key, chain_id=self.chain_id)
             self.api_creds = temp_client.create_or_derive_api_creds()
+            print(
+                "SAVE THESE TO .ENV:\n"
+                f"POLYMARKET_API_KEY={getattr(self.api_creds, 'api_key', getattr(self.api_creds, 'key', ''))}\n"
+                f"POLYMARKET_API_SECRET={getattr(self.api_creds, 'api_secret', getattr(self.api_creds, 'secret', ''))}\n"
+                f"POLYMARKET_API_PASSPHRASE={getattr(self.api_creds, 'api_passphrase', getattr(self.api_creds, 'passphrase', ''))}"
+            )
 
         self.client = self.ClobClient(
             self.host,
