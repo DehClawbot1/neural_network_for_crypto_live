@@ -548,25 +548,29 @@ def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df,
 
     if not model_status_df.empty:
         latest = model_status_df.iloc[-1].to_dict()
-        dataset_rows = int(latest.get('dataset_rows', 0) or 0)
-        retrain_threshold = int(latest.get('retrain_threshold', 0) or 0)
+        dataset_rows = int(latest.get('dataset_rows', latest.get('closed_trade_rows', 0)) or 0)
+        retrain_threshold = int(latest.get('retrain_threshold', latest.get('closed_trade_threshold', 0)) or 0)
+        replay_rows = int(latest.get('replay_rows', 0) or 0)
+        replay_threshold = int(latest.get('replay_threshold', 0) or 0)
         progress_ratio = float(latest.get('progress_ratio', 0) or 0)
         last_action = latest.get('last_action', 'Unknown')
 
         c1, c2 = st.columns(2)
         with c1:
-            st.metric("Dataset Rows", dataset_rows)
-            st.metric("Retrain Threshold", retrain_threshold)
+            st.metric("Closed Trade Rows", dataset_rows)
+            st.metric("Closed Trade Threshold", retrain_threshold)
+            st.metric("Replay Rows", replay_rows)
         with c2:
+            st.metric("Replay Threshold", replay_threshold)
             st.metric("Progress Ratio", f"{progress_ratio:.2f}")
 
         st.progress(max(0.0, min(1.0, progress_ratio)))
-        if dataset_rows < retrain_threshold:
+        if retrain_threshold and dataset_rows < retrain_threshold and replay_threshold and replay_rows < replay_threshold:
             st.warning(
-                f"Not enough historical rows yet for a stronger supervised retrain: {dataset_rows} / {retrain_threshold}. Keep the bot running so it collects more signal history."
+                f"Not enough real outcomes yet for stronger retraining: closed={dataset_rows}/{retrain_threshold}, replay={replay_rows}/{replay_threshold}."
             )
         else:
-            st.success("Enough rows collected for stronger supervised training/evaluation passes.")
+            st.success("Enough outcome history is available for stronger supervised/replay training passes.")
         st.code(last_action, language="text")
     else:
         st.info("No model status rows yet. Run `python run_bot.py` for a while so the system can collect signals, markets, and replay data.")
