@@ -302,18 +302,26 @@ class LivePolyTradeEnv(gym.Env):
         if self.order_manager is None or not self.current_token_id:
             return {"status": "NO_ORDER_MANAGER", "action": int(action)}
         quote = self.last_quote or self._safe_quote()
-        buy_price = float(quote.get("best_ask") or quote.get("midpoint") or 0.0)
-        sell_price = float(quote.get("best_bid") or quote.get("midpoint") or 0.0)
+        best_ask = float(quote.get("best_ask") or quote.get("midpoint") or 0.0)
+        best_bid = float(quote.get("best_bid") or quote.get("midpoint") or 0.0)
         if action == 1:
-            return self.order_manager.submit_entry(token_id=self.current_token_id, price=buy_price, size=10, side="BUY", outcome_side=self.outcome_side)[0]
+            row, _ = self.order_manager.submit_entry(token_id=self.current_token_id, price=best_ask, size=10, side="BUY", outcome_side=self.outcome_side)
+            return row
         if action == 2:
-            return self.order_manager.submit_entry(token_id=self.current_token_id, price=buy_price, size=50, side="BUY", outcome_side=self.outcome_side)[0]
+            row, _ = self.order_manager.submit_entry(token_id=self.current_token_id, price=best_ask, size=50, side="BUY", outcome_side=self.outcome_side)
+            return row
         if action == 4:
             reduce_size = max(float(self.shares) * 0.5, 0.0)
-            return self.order_manager.submit_entry(token_id=self.current_token_id, price=sell_price, size=reduce_size, side="SELL", outcome_side=self.outcome_side)[0] if reduce_size > 0 else {"status": "NO_POSITION_TO_REDUCE"}
+            if reduce_size <= 0:
+                return {"status": "NO_POSITION_TO_REDUCE"}
+            row, _ = self.order_manager.submit_entry(token_id=self.current_token_id, price=best_bid, size=reduce_size, side="SELL", outcome_side=self.outcome_side)
+            return row
         if action == 5:
             exit_size = max(float(self.shares), 0.0)
-            return self.order_manager.submit_entry(token_id=self.current_token_id, price=sell_price, size=exit_size, side="SELL", outcome_side=self.outcome_side)[0] if exit_size > 0 else {"status": "NO_POSITION_TO_EXIT"}
+            if exit_size <= 0:
+                return {"status": "NO_POSITION_TO_EXIT"}
+            row, _ = self.order_manager.submit_entry(token_id=self.current_token_id, price=best_bid, size=exit_size, side="SELL", outcome_side=self.outcome_side)
+            return row
         return {"status": "HOLD", "action": int(action)}
 
     def _log_experience(self, action, reward, obs_before, obs_after, order_result):
@@ -341,9 +349,14 @@ class LivePolyTradeEnv(gym.Env):
         if self.position_open:
             self.position_age += 1
         obs_before = self._build_state()
+        balance_before = float(self._safe_balance())
         order_result = self._submit_live_action(action)
+        fill_result = None
+        if self.order_manager is not None and isinstance(order_result, dict) and order_result.get("order_id"):
+            fill_result = self.order_manager.wait_for_fill(order_result.get("order_id"))
         obs_after = self._build_state()
-        reward = float(obs_after[8] - obs_before[8]) if len(obs_after) > 8 else 0.0
+        balance_after = float(self._safe_balance())
+        reward = float(balance_after - balance_before)
         self._log_experience(action, reward, obs_before, obs_after, order_result)
         terminated = False
         truncated = self.position_age >= self.max_hold_steps
@@ -356,6 +369,9 @@ class LivePolyTradeEnv(gym.Env):
             "shares": self.shares,
             "entry_price": self.entry_price,
             "order_result": order_result,
+            "fill_result": fill_result,
+            "balance_before": balance_before,
+            "balance_after": balance_after,
             "experience_file": str(self.experience_file),
         }
         return obs_after, float(reward), terminated, truncated, info

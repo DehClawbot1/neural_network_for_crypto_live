@@ -1,5 +1,6 @@
 from datetime import datetime
 from pathlib import Path
+import time
 
 import pandas as pd
 
@@ -81,6 +82,22 @@ class OrderManager:
     def get_order_status(self, order_id):
         response = self.client.get_order(order_id)
         return response
+
+    def wait_for_fill(self, order_id, timeout_seconds=20, poll_seconds=2):
+        deadline = time.time() + float(timeout_seconds)
+        last_response = None
+        while time.time() < deadline:
+            try:
+                last_response = self.get_order_status(order_id)
+            except Exception:
+                last_response = None
+            status = str((last_response or {}).get("status", "")).upper()
+            if status in ["FILLED", "EXECUTED", "MATCHED"]:
+                return {"filled": True, "response": last_response}
+            if status in ["CANCELED", "FAILED", "REJECTED"]:
+                return {"filled": False, "response": last_response}
+            time.sleep(float(poll_seconds))
+        return {"filled": False, "response": last_response, "reason": "timeout_waiting_for_fill"}
 
     def place_target_exit_order(self, token_id, target_price, size, condition_id=None, outcome_side=None):
         row, response = self.submit_entry(

@@ -84,3 +84,11 @@ class ExecutionClient:
         if asset_type is not None:
             kwargs["asset_type"] = asset_type
         return self.client.get_balance_allowance(**kwargs)
+
+    def get_available_balance(self, asset_type=None):
+        payload = self.get_balance_allowance(asset_type=asset_type)
+        if isinstance(payload, dict):
+            for key in ["balance", "available", "available_balance", "amount"]:
+                if payload.get(key) is not None:
+                    return float(payload[key])
+        return 0.0
