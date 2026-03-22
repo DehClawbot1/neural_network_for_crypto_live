@@ -3,6 +3,7 @@ from pathlib import Path
 import joblib
 import pandas as pd
 from sklearn.impute import SimpleImputer
+from sklearn.utils import resample
 from sklearn.metrics import accuracy_score, mean_squared_error
 from sklearn.neural_network import MLPClassifier, MLPRegressor
 from sklearn.pipeline import Pipeline
@@ -32,6 +33,22 @@ class Stage2TemporalModels:
         except Exception:
             return pd.DataFrame()
 
+    def _balance_binary_frame(self, df, target_col):
+        if target_col not in df.columns or df.empty:
+            return df
+        counts = df[target_col].fillna(0).astype(int).value_counts()
+        if len(counts) < 2:
+            return df
+        majority_class = counts.idxmax()
+        minority_class = counts.idxmin()
+        majority_df = df[df[target_col].fillna(0).astype(int) == majority_class]
+        minority_df = df[df[target_col].fillna(0).astype(int) == minority_class]
+        if minority_df.empty or majority_df.empty:
+            return df
+        minority_upsampled = resample(minority_df, replace=True, n_samples=len(majority_df), random_state=42)
+        balanced = pd.concat([majority_df, minority_upsampled], ignore_index=True)
+        return balanced.sample(frac=1.0, random_state=42).reset_index(drop=True)
+
     def train(self):
         df = self._safe_read()
         if df.empty:
@@ -56,12 +73,13 @@ class Stage2TemporalModels:
         metrics = {}
 
         if target_cls:
+            balanced_train_df = self._balance_binary_frame(train_df, target_cls)
             clf = Pipeline([
                 ("imputer", SimpleImputer(strategy="median")),
                 ("scaler", StandardScaler()),
                 ("model", MLPClassifier(hidden_layer_sizes=(64, 32), random_state=42, max_iter=300)),
             ])
-            clf.fit(train_df[feature_cols], train_df[target_cls].fillna(0).astype(int))
+            clf.fit(balanced_train_df[feature_cols], balanced_train_df[target_cls].fillna(0).astype(int))
             preds = clf.predict(test_df[feature_cols])
             metrics["temporal_test_accuracy"] = accuracy_score(test_df[target_cls].fillna(0).astype(int), preds)
             joblib.dump({"model": clf, "features": feature_cols}, self.classifier_file)
