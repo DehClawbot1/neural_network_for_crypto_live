@@ -795,8 +795,29 @@ def render_whale_tracker(whales_df):
     c3.metric("Highest Concentration Market", highest_concentration_market)
     c4.metric("Unique Markets Touched", total_unique_markets)
 
-    cols = [c for c in [wallet_col, "username", "profit", "volume", "positionValue", market_col] if c and c in whales_df.columns]
-    st.dataframe(whales_df[cols].head(20) if cols else whales_df.head(20), width="stretch", hide_index=True)
+    if wallet_col:
+        summary = whales_df.copy()
+        if market_col:
+            grouped = summary.groupby(wallet_col).agg(
+                action_count=(wallet_col, "size"),
+                unique_markets=(market_col, pd.Series.nunique),
+            )
+        else:
+            grouped = summary.groupby(wallet_col).agg(action_count=(wallet_col, "size"))
+            grouped["unique_markets"] = 0
+        if market_col:
+            grouped["concentration_score"] = grouped["action_count"] / grouped["unique_markets"].replace(0, 1)
+        else:
+            grouped["concentration_score"] = grouped["action_count"]
+        if "alpha_score" in summary.columns:
+            grouped["alpha_score"] = summary.groupby(wallet_col)["alpha_score"].mean()
+        time_col = "timestamp" if "timestamp" in summary.columns else "updated_at" if "updated_at" in summary.columns else None
+        if time_col:
+            grouped["latest_activity_time"] = pd.to_datetime(summary[time_col], errors="coerce").groupby(summary[wallet_col]).max()
+        grouped = grouped.reset_index().sort_values("action_count", ascending=False)
+        st.dataframe(grouped.head(20), width="stretch", hide_index=True)
+    else:
+        st.dataframe(whales_df.head(20), width="stretch", hide_index=True)
 
     if wallet_col:
         wallet_counts = whales_df[wallet_col].astype(str).value_counts().head(15).reset_index()
