@@ -1503,6 +1503,42 @@ def render_data_quality_panel(signals_df, trades_df, markets_df, whales_df, aler
         reconciliation_rows.append({"check": "open position tokens seen in signals", "status": "ok" if position_tokens.issubset(signal_tokens | position_tokens) else "warning", "details": f"positions_without_signal_tokens={len(position_tokens - signal_tokens)}"})
     st.dataframe(pd.DataFrame(reconciliation_rows), width="stretch", hide_index=True)
 
+    st.markdown("**Monitoring-Grade Anomaly Detection**")
+    anomaly_flags = []
+    if signals_df is not None and not signals_df.empty and "token_id" in signals_df.columns:
+        dup_signal_tokens = int(signals_df["token_id"].astype(str).duplicated().sum())
+        if dup_signal_tokens > 0:
+            anomaly_flags.append(f"duplicate signal tokens={dup_signal_tokens}")
+    if positions_df is not None and not positions_df.empty and "current_price" in positions_df.columns:
+        stale_quote_rows = int(positions_df["current_price"].isna().sum())
+        if stale_quote_rows > 0:
+            anomaly_flags.append(f"stale/missing position quotes={stale_quote_rows}")
+    if positions_df is not None and not positions_df.empty and "opened_at" in positions_df.columns:
+        opened_ts = pd.to_datetime(positions_df["opened_at"], errors="coerce", utc=True)
+        long_open = int(((pd.Timestamp.utcnow() - opened_ts).dt.total_seconds() > 86400).fillna(False).sum())
+        if long_open > 0:
+            anomaly_flags.append(f"positions open >24h={long_open}")
+    if closed_positions_df is not None and not closed_positions_df.empty:
+        pnl_col = "net_realized_pnl" if "net_realized_pnl" in closed_positions_df.columns else "realized_pnl" if "realized_pnl" in closed_positions_df.columns else None
+        if pnl_col:
+            bad_pnl = int(pd.to_numeric(closed_positions_df[pnl_col], errors="coerce").isna().sum())
+            if bad_pnl > 0:
+                anomaly_flags.append(f"invalid closed-trade pnl rows={bad_pnl}")
+    if trades_df is not None and not trades_df.empty and "timestamp" in trades_df.columns:
+        tts = pd.to_datetime(trades_df["timestamp"], errors="coerce")
+        if tts.notna().sum() > 1 and tts.diff().dropna().lt(pd.Timedelta(0)).any():
+            anomaly_flags.append("trade timestamp regression detected")
+    if system_health_df is not None and not system_health_df.empty and "signal_rows" in system_health_df.columns:
+        shr = pd.to_numeric(system_health_df["signal_rows"], errors="coerce")
+        if shr.notna().sum() > 1 and shr.diff().fillna(0).lt(0).any():
+            anomaly_flags.append("signal row-count regression detected")
+
+    if anomaly_flags:
+        for item in anomaly_flags:
+            st.warning(item)
+    else:
+        st.success("No major operational anomalies detected.")
+
     st.markdown("**Duplicate & Anomaly Checks**")
     anomaly_rows = []
     for name, df in frames.items():
