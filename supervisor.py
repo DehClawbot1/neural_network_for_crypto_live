@@ -160,25 +160,39 @@ def choose_action(signal_row, entry_rule: EntryRuleLayer, brain=None):
     return 2 if edge_score >= 0.04 else 1
 
 
-def execute_paper_trade(action, signal_row):
+def quote_entry_price(signal_row, slippage=0.01):
+    current_price = float(signal_row.get("current_price", signal_row.get("price", 0.5)))
+    best_ask = signal_row.get("best_ask")
+    base_price = float(best_ask) if best_ask not in [None, ""] and pd.notna(best_ask) else current_price
+    return min(0.99, base_price + slippage)
+
+
+def quote_exit_price(signal_row, slippage=0.01):
+    current_price = float(signal_row.get("current_price", signal_row.get("price", 0.5)))
+    best_bid = signal_row.get("best_bid")
+    base_price = float(best_bid) if best_bid not in [None, ""] and pd.notna(best_bid) else current_price
+    return max(0.01, base_price - slippage)
+
+
+def execute_paper_trade(action, signal_row, fill_price=None):
     """Simulates a trade fill and logs the hypothetical position."""
     if action == 0:
         logging.info(f"Brain: IGNORE -> Skipping signal from {signal_row.get('trader_wallet', 'Unknown')[:8]}")
         return
 
-    # Action 1 = Small Trade (10 USDC), Action 2 = Large Trade (50 USDC)
     size = 10 if action == 1 else 50
-    side = str(signal_row.get("side", "BUY")).upper()
-
-    # Simulate slippage (e.g., getting filled 1 cent worse than the signal price)
+    outcome_side = str(signal_row.get("outcome_side", signal_row.get("side", "UNKNOWN"))).upper()
     signal_price = float(signal_row.get("current_price", signal_row.get("price", 0.5)))
-    fill_price = min(0.99, signal_price + 0.01) if side == "BUY" else max(0.01, signal_price - 0.01)
+    fill_price = quote_entry_price(signal_row) if fill_price is None else fill_price
 
     trade_record = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "market": signal_row.get("market_title", "Unknown Market"),
         "wallet_copied": str(signal_row.get("trader_wallet", "Unknown"))[:8],
-        "side": side,
+        "token_id": signal_row.get("token_id"),
+        "condition_id": signal_row.get("condition_id"),
+        "outcome_side": outcome_side,
+        "order_side": signal_row.get("order_side", "BUY"),
         "signal_price": round(signal_price, 3),
         "fill_price": round(fill_price, 3),
         "size_usdc": size,
@@ -190,7 +204,7 @@ def execute_paper_trade(action, signal_row):
     logging.info(
         "Brain: FOLLOW -> Paper filled %s USDC on %s at $%.3f for '%s' | label=%s confidence=%.2f",
         size,
-        side,
+        outcome_side,
         fill_price,
         trade_record["market"],
         trade_record["signal_label"],
@@ -315,11 +329,10 @@ def main_loop():
                 if action_val not in [0, 1, 2]:
                     action_val = 0
 
-                execute_paper_trade(action_val, signal_row)
-
                 if action_val != 0:
                     size = 10 if action_val == 1 else 50
-                    fill_price = min(0.99, float(signal_row.get("current_price", 0.5)) + 0.01)
+                    fill_price = quote_entry_price(signal_row)
+                    execute_paper_trade(action_val, signal_row, fill_price=fill_price)
                     position_manager.open_position(signal_row, size_usdc=size, fill_price=fill_price)
 
             # 4B. Open-position management path for hold / reduce / exit
