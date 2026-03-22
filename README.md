@@ -53,7 +53,8 @@ It does **not**:
 
 4. **`leaderboard_scraper.py`**
    - monitors public top crypto wallets from the Polymarket leaderboard
-   - currently scans a larger public wallet set for BTC-related activity
+   - currently scans a much larger public wallet set for BTC-related activity
+   - uses retry/backoff behavior for more resilient API collection
 
 5. **`market_monitor.py`**
    - fetches BTC-related market snapshots
@@ -133,6 +134,10 @@ It does **not**:
 19. **`web_api.py`**
     - local FastAPI server
     - exposes information endpoints for local use only
+
+20. **`position_manager.py`**
+    - manages open and closed paper positions
+    - tracks mark-to-market changes and simulated exit reasons
 
 ## 🚀 Installation
 
@@ -235,16 +240,19 @@ python backtester.py
 
 Generated in `logs/`:
 
-- `signals.csv` — ranked paper-trading opportunities + grouped feature values
-- `daily_summary.txt` — simulated paper-trade ledger
-- `markets.csv` — BTC market snapshots
-- `whales.csv` — public whale activity summaries
-- `alerts.csv` — public-data alerts
-- `trader_analytics.csv` — trader / wallet analytics
-- `backtest_summary.csv` — backtest summary metrics
-- `historical_dataset.csv` — ML-friendly consolidated dataset
-- `model_status.csv` — retraining / model progress
-- `system_health.csv` — monitoring status
+- `signals.csv` - ranked paper-trading opportunities + grouped feature values
+- `daily_summary.txt` - simulated paper-trade ledger
+- `markets.csv` - BTC market snapshots
+- `whales.csv` - public whale activity summaries
+- `market_distribution.csv` - distribution of monitored wallet activity across markets
+- `alerts.csv` - public-data alerts
+- `positions.csv` - currently open simulated positions
+- `closed_positions.csv` - simulated closes and exit reasons
+- `trader_analytics.csv` - trader / wallet analytics
+- `backtest_summary.csv` - backtest summary metrics
+- `historical_dataset.csv` - ML-friendly consolidated dataset
+- `model_status.csv` - retraining / model progress
+- `system_health.csv` - monitoring status
 
 ## 📁 Repository Structure
 
