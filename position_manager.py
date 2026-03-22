@@ -4,6 +4,8 @@ from datetime import datetime
 
 import pandas as pd
 
+from pnl_engine import PNLEngine
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 
@@ -33,19 +35,23 @@ class PositionManager:
     def open_position(self, signal_row: dict, size_usdc: float, fill_price: float):
         df = self._read_positions()
         market = signal_row.get("market_title", signal_row.get("market", "Unknown Market"))
-        side = signal_row.get("side", "UNKNOWN")
+        outcome_side = str(signal_row.get("side", signal_row.get("outcome_side", "UNKNOWN"))).upper()
         wallet = signal_row.get("trader_wallet", signal_row.get("wallet_copied", "Unknown"))
+        shares = PNLEngine.shares_from_capital(size_usdc, fill_price)
 
         record = {
             "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "market": market,
             "wallet_copied": wallet,
-            "side": side,
+            "outcome_side": outcome_side,
+            "position_action": "ENTER",
             "signal_label": signal_row.get("signal_label", "UNKNOWN"),
             "confidence": signal_row.get("confidence", 0.0),
             "size_usdc": size_usdc,
+            "shares": shares,
             "entry_price": fill_price,
             "current_price": fill_price,
+            "fees_paid": 0.0,
             "unrealized_pnl": 0.0,
             "status": "OPEN",
         }
@@ -72,13 +78,16 @@ class PositionManager:
                 continue
             current_price = latest_prices[market]
             entry_price = float(row.get("entry_price", current_price))
-            side = str(row.get("side", "BUY")).upper()
+            outcome_side = str(row.get("outcome_side", row.get("side", "YES"))).upper()
             size = float(row.get("size_usdc", 0.0))
+            fees_paid = float(row.get("fees_paid", 0.0))
 
-            if side == "BUY":
-                pnl = (current_price - entry_price) * size
-            else:
-                pnl = (entry_price - current_price) * size
+            pnl = PNLEngine.mark_to_market_pnl(
+                capital_usdc=size,
+                entry_price=entry_price,
+                current_price=current_price,
+                side="BUY" if outcome_side == "YES" else "SELL",
+            ) - fees_paid
 
             positions.at[idx, "current_price"] = current_price
             positions.at[idx, "unrealized_pnl"] = round(float(pnl), 4)
@@ -119,6 +128,7 @@ class PositionManager:
             if close_reason:
                 closed_row = row.to_dict()
                 closed_row["closed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                closed_row["position_action"] = "EXIT"
                 closed_row["close_reason"] = close_reason
                 closed_row["status"] = "CLOSED"
                 closed.append(closed_row)
