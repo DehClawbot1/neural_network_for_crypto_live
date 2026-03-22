@@ -57,6 +57,37 @@ class OrderManager:
         response = self.client.get_order(order_id)
         return response
 
+    def place_target_exit_order(self, token_id, target_price, size, condition_id=None, outcome_side=None):
+        row, response = self.submit_entry(
+            token_id=token_id,
+            price=target_price,
+            size=size,
+            side="SELL",
+            condition_id=condition_id,
+            outcome_side=outcome_side,
+        )
+        return row, response
+
+    def monitor_and_trigger_exit(self, token_id, target_price, size, condition_id=None, outcome_side=None):
+        quote = None
+        try:
+            from market_price_service import MarketPriceService
+            quote = MarketPriceService().get_quote(token_id)
+        except Exception:
+            quote = None
+
+        executable_sell = (quote or {}).get("best_bid")
+        if executable_sell is not None and float(executable_sell) >= float(target_price):
+            return self.submit_entry(
+                token_id=token_id,
+                price=executable_sell,
+                size=size,
+                side="SELL",
+                condition_id=condition_id,
+                outcome_side=outcome_side,
+            )
+        return {"status": "WAITING", "reason": "target_not_hit", "best_bid": executable_sell}, None
+
     def cancel_stale_order(self, order_id):
         response = self.client.cancel_order(order_id)
         self._append(self.orders_file, {"timestamp": datetime.utcnow().isoformat(), "order_id": order_id, "status": "CANCELED"})
