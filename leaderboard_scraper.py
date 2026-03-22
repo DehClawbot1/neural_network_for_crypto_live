@@ -1,10 +1,27 @@
-import requests
-import pandas as pd
 import time
 import logging
 
+import pandas as pd
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
 # Configure logging for zero-intervention monitoring
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+def _build_session():
+    session = requests.Session()
+    retries = Retry(
+        total=3,
+        backoff_factor=1.0,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
+    )
+    adapter = HTTPAdapter(max_retries=retries)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
 
 
 def get_top_crypto_traders(limit=100):
@@ -18,11 +35,11 @@ def get_top_crypto_traders(limit=100):
     }
 
     try:
-        response = requests.get(url, params=params)
+        session = _build_session()
+        response = session.get(url, params=params, timeout=20)
         response.raise_for_status()
         data = response.json()
 
-        # PolyMarket proxy wallets actually execute the trades
         top_wallets = [user.get("proxyWallet") for user in data if user.get("proxyWallet")]
         logging.info(f"Successfully fetched {len(top_wallets)} top traders from the leaderboard.")
         return top_wallets
@@ -41,23 +58,22 @@ def get_recent_btc_trades(wallet_address, limit=15):
     }
 
     try:
-        response = requests.get(url, params=params)
+        session = _build_session()
+        response = session.get(url, params=params, timeout=20)
         response.raise_for_status()
         trades = response.json()
 
         signals = []
         for trade in trades:
-            # Safely extract title and normalize to lowercase for filtering
             title = trade.get("title", "").lower()
 
-            # Filter strictly for Bitcoin markets
             if "bitcoin" in title or "btc" in title:
                 signals.append(
                     {
                         "trader_wallet": wallet_address,
                         "market_title": trade.get("title"),
                         "condition_id": trade.get("conditionId"),
-                        "side": trade.get("side"),  # e.g., BUY / SELL
+                        "side": trade.get("side"),
                         "price": float(trade.get("price", 0)),
                         "size": float(trade.get("size", 0)),
                         "timestamp": trade.get("timestamp"),
@@ -79,13 +95,10 @@ def run_scraper_cycle():
         logging.info(f"Scanning recent trades for wallet: {trader[:8]}...")
         trades = get_recent_btc_trades(trader, limit=15)
         all_signals.extend(trades)
-
-        # Respect PolyMarket's Data API rate limits (1,000 req / 10s)
-        time.sleep(0.5)
+        time.sleep(0.25)
 
     if all_signals:
         df = pd.DataFrame(all_signals)
-        # Sort by most recent trades
         df = df.sort_values(by="timestamp", ascending=False).reset_index(drop=True)
         logging.info(f"Extracted {len(df)} relevant BTC trade signals.")
         return df
@@ -95,7 +108,6 @@ def run_scraper_cycle():
 
 
 if __name__ == "__main__":
-    # Execute a test run when you run this file directly
     signals_df = run_scraper_cycle()
     if not signals_df.empty:
         print("\n--- Latest Alpha Signals ---")

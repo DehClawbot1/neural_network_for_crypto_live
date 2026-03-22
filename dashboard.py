@@ -20,6 +20,7 @@ BACKTEST_FILE = LOGS_DIR / "backtest_summary.csv"
 DATASET_FILE = LOGS_DIR / "historical_dataset.csv"
 POSITIONS_FILE = LOGS_DIR / "positions.csv"
 CLOSED_POSITIONS_FILE = LOGS_DIR / "closed_positions.csv"
+MARKET_DISTRIBUTION_FILE = LOGS_DIR / "market_distribution.csv"
 
 st.set_page_config(page_title="Neural Network for Crypto", page_icon="📈", layout="wide")
 
@@ -245,6 +246,20 @@ def render_whale_tracker(whales_df):
     st.dataframe(whales_df.head(15), width="stretch")
 
 
+def render_market_distribution(distribution_df):
+    st.markdown('<div class="section-title">Whale Market Distribution</div>', unsafe_allow_html=True)
+    if distribution_df.empty:
+        st.info("No market distribution data yet.")
+        return
+
+    st.dataframe(distribution_df.head(15), width="stretch")
+    if "unique_wallets" in distribution_df.columns and "market_title" in distribution_df.columns:
+        chart_df = distribution_df.head(10)
+        fig = px.bar(chart_df, x="unique_wallets", y="market_title", orientation="h", title="Where the watched wallets are clustering")
+        fig.update_layout(height=380, yaxis={"categoryorder": "total ascending"})
+        st.plotly_chart(fig, width="stretch")
+
+
 def render_alerts(alerts_df):
     st.markdown('<div class="section-title">Alerts</div>', unsafe_allow_html=True)
     if alerts_df.empty:
@@ -353,6 +368,7 @@ def main():
     trades_df = load_csv(SUMMARY_FILE)
     markets_df = load_csv(MARKETS_FILE)
     whales_df = load_csv(WHALES_FILE)
+    distribution_df = load_csv(MARKET_DISTRIBUTION_FILE)
     alerts_df = load_csv(ALERTS_FILE)
     model_status_df = load_csv(MODEL_STATUS_FILE)
     positions_df = load_csv(POSITIONS_FILE)
@@ -384,7 +400,11 @@ def main():
             render_market_tracker(markets_df)
         with top_right:
             render_alerts(alerts_df)
-        render_whale_tracker(whales_df)
+        lower_left, lower_right = st.columns([1, 1])
+        with lower_left:
+            render_whale_tracker(whales_df)
+        with lower_right:
+            render_market_distribution(distribution_df)
 
     with tab3:
         render_model_status(model_status_df)

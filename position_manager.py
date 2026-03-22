@@ -109,6 +109,8 @@ class PositionManager:
                 close_reason = "take_profit"
             elif pnl <= -5.0:
                 close_reason = "stop_loss"
+            elif pnl > 1.0 and confidence < 0.55:
+                close_reason = "profit_protection"
             elif confidence < 0.45:
                 close_reason = "confidence_drop"
             elif market in alert_markets:
