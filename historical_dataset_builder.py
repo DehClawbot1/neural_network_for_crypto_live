@@ -31,32 +31,55 @@ class HistoricalDatasetBuilder:
         trades_df = self._safe_read("daily_summary.txt")
         markets_df = self._safe_read("markets.csv")
         alerts_df = self._safe_read("alerts.csv")
+        wallet_alpha_df = self._safe_read("wallet_alpha.csv")
 
         if signals_df.empty:
             return pd.DataFrame()
 
         dataset = signals_df.copy()
 
+        rename_map = {
+            "market": "market_title",
+            "wallet_copied": "trader_wallet",
+            "price": "entry_price",
+            "side": "outcome_side",
+        }
+        dataset = dataset.rename(columns={k: v for k, v in rename_map.items() if k in dataset.columns})
+
+        if "timestamp" not in dataset.columns:
+            dataset["timestamp"] = pd.NaT
+
         if not trades_df.empty:
             dataset = dataset.merge(
-                trades_df[[c for c in trades_df.columns if c in ["market", "wallet_copied", "fill_price", "size_usdc", "action_type"]]],
-                on=[c for c in ["market", "wallet_copied"] if c in dataset.columns and c in trades_df.columns],
+                trades_df[[c for c in trades_df.columns if c in ["market", "wallet_copied", "fill_price", "size_usdc", "action_type", "timestamp"]]],
+                left_on=[c for c in ["market_title", "trader_wallet"] if c in dataset.columns],
+                right_on=[c for c in ["market", "wallet_copied"] if c in trades_df.columns],
                 how="left",
             )
 
-        if not markets_df.empty and "market" in dataset.columns and "question" in markets_df.columns:
+        if not markets_df.empty and "market_title" in dataset.columns and "question" in markets_df.columns:
             latest_markets = markets_df.drop_duplicates(subset=["question"], keep="last")
             dataset = dataset.merge(
-                latest_markets[[c for c in latest_markets.columns if c in ["question", "liquidity", "volume", "last_trade_price", "url"]]],
-                left_on="market",
+                latest_markets[[c for c in latest_markets.columns if c in ["question", "liquidity", "volume", "last_trade_price", "url", "best_bid", "best_ask", "slug", "condition_id", "end_date"]]],
+                left_on="market_title",
                 right_on="question",
                 how="left",
             )
 
-        if not alerts_df.empty and "market" in dataset.columns and "market" in alerts_df.columns:
+        if not alerts_df.empty and "market_title" in dataset.columns and "market" in alerts_df.columns:
             alert_counts = alerts_df.groupby("market").size().reset_index(name="alert_count")
-            dataset = dataset.merge(alert_counts, on="market", how="left")
+            dataset = dataset.merge(alert_counts, left_on="market_title", right_on="market", how="left")
             dataset["alert_count"] = dataset["alert_count"].fillna(0).astype(int)
+
+        if not wallet_alpha_df.empty and "trader_wallet" in dataset.columns and "wallet_copied" in wallet_alpha_df.columns:
+            dataset = dataset.merge(wallet_alpha_df, left_on="trader_wallet", right_on="wallet_copied", how="left")
+
+        if "best_ask" in dataset.columns and "best_bid" in dataset.columns:
+            dataset["spread"] = (dataset["best_ask"].fillna(0) - dataset["best_bid"].fillna(0)).abs()
+        if "end_date" in dataset.columns and "timestamp" in dataset.columns:
+            dataset["timestamp"] = pd.to_datetime(dataset["timestamp"], utc=True, errors="coerce")
+            dataset["end_date"] = pd.to_datetime(dataset["end_date"], utc=True, errors="coerce")
+            dataset["time_to_close_minutes"] = (dataset["end_date"] - dataset["timestamp"]).dt.total_seconds().div(60)
 
         return dataset
 

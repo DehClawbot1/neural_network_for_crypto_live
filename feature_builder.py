@@ -31,16 +31,40 @@ class FeatureBuilder:
         if trades_df is None or trades_df.empty:
             return
 
-        grouped = trades_df.groupby("trader_wallet")
-        for wallet, group in grouped:
-            avg_size = _safe_float(group["size"].mean(), 1.0)
-            count = int(group["size"].count())
-            self.wallet_stats[wallet] = {
+        time_col = "timestamp" if "timestamp" in trades_df.columns else None
+        size_col = "size" if "size" in trades_df.columns else "size_usdc" if "size_usdc" in trades_df.columns else None
+        wallet_col = "trader_wallet" if "trader_wallet" in trades_df.columns else "wallet_copied" if "wallet_copied" in trades_df.columns else None
+        if wallet_col is None or size_col is None:
+            return
+
+        df = trades_df.copy()
+        if time_col:
+            df[time_col] = pd.to_datetime(df[time_col], utc=True, errors="coerce")
+            df = df.sort_values(time_col)
+
+        for wallet, group in df.groupby(wallet_col):
+            avg_size = _safe_float(group[size_col].mean(), 1.0)
+            count = int(group[size_col].count())
+            stats = {
                 "avg_size": max(avg_size, 1.0),
                 "trade_count": count,
-                # placeholder until real outcome-resolution tracking exists
-                "win_rate": 0.60 if count >= 10 else 0.55 if count >= 5 else 0.50,
+                "win_rate": np.nan,
+                "alpha_30d": np.nan,
+                "avg_forward_return_15m": np.nan,
+                "tp_precision": np.nan,
+                "recent_streak": 0,
+                "same_market_history": 0,
             }
+
+            if "future_return" in group.columns:
+                stats["avg_forward_return_15m"] = _safe_float(group["future_return"].mean(), np.nan)
+                stats["win_rate"] = _safe_float((group["future_return"] > 0).mean(), np.nan)
+            if "tp_before_sl" in group.columns:
+                stats["tp_precision"] = _safe_float(group["tp_before_sl"].mean(), np.nan)
+            if "alpha_30d" in group.columns:
+                stats["alpha_30d"] = _safe_float(group["alpha_30d"].iloc[-1], np.nan)
+
+            self.wallet_stats[wallet] = stats
 
     def _normalized_trade_size(self, wallet: str, size: float) -> float:
         wallet_info = self.wallet_stats.get(wallet, {"avg_size": 1.0})
@@ -49,7 +73,10 @@ class FeatureBuilder:
         return _clip01(ratio / 3.0)
 
     def _wallet_win_rate(self, wallet: str) -> float:
-        return _clip01(self.wallet_stats.get(wallet, {}).get("win_rate", 0.50))
+        value = self.wallet_stats.get(wallet, {}).get("win_rate", np.nan)
+        if pd.isna(value):
+            return 0.5
+        return _clip01(value)
 
     def _time_left_feature(self, end_date) -> float:
         if not end_date:
@@ -105,13 +132,28 @@ class FeatureBuilder:
         volatility_risk = volatility_score
         time_decay_score = _clip01(1.0 - time_left)
 
+        wallet_info = self.wallet_stats.get(wallet, {})
         feature_row = {
+            "timestamp": signal.get("timestamp"),
             "trader_wallet": wallet,
             "market_title": signal.get("market_title"),
             "condition_id": signal.get("condition_id"),
+            "market_slug": market_row.get("slug"),
             "side": signal.get("side"),
+            "entry_price": signal_price,
+            "best_bid": _safe_float(market_row.get("best_bid", signal_price), signal_price),
+            "best_ask": _safe_float(market_row.get("best_ask", signal_price), signal_price),
+            "spread": abs(_safe_float(market_row.get("best_ask", signal_price), signal_price) - _safe_float(market_row.get("best_bid", signal_price), signal_price)),
             # core normalized inputs
             "trader_win_rate": trader_win_rate,
+            "wallet_trade_count_30d": wallet_info.get("trade_count", 0),
+            "wallet_avg_size_30d": wallet_info.get("avg_size", np.nan),
+            "wallet_winrate_30d": wallet_info.get("win_rate", np.nan),
+            "wallet_alpha_30d": wallet_info.get("alpha_30d", np.nan),
+            "wallet_avg_forward_return_15m": wallet_info.get("avg_forward_return_15m", np.nan),
+            "wallet_signal_precision_tp": wallet_info.get("tp_precision", np.nan),
+            "wallet_recent_streak": wallet_info.get("recent_streak", 0),
+            "wallet_same_market_history": wallet_info.get("same_market_history", 0),
             "normalized_trade_size": normalized_trade_size,
             "current_price": signal_price,
             "time_left": time_left,
@@ -131,7 +173,6 @@ class FeatureBuilder:
             "time_decay_score": time_decay_score,
             # metadata
             "raw_size": size,
-            "market_slug": market_row.get("slug"),
             "market_url": market_row.get("url"),
         }
         return feature_row
