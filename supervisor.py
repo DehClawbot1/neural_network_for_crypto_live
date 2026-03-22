@@ -17,6 +17,7 @@ from historical_dataset_builder import HistoricalDatasetBuilder
 from backtester import StrategyBacktester
 from autonomous_monitor import AutonomousMonitor
 from retrainer import Retrainer
+from execution_client import ExecutionClient
 from position_manager import PositionManager
 from model_inference import ModelInference
 from stage1_inference import Stage1Inference
@@ -238,6 +239,8 @@ def main_loop():
     dataset_builder = HistoricalDatasetBuilder()
     backtester = StrategyBacktester()
     position_manager = PositionManager()
+    trading_mode = os.getenv("TRADING_MODE", "paper").strip().lower()
+    execution_client = ExecutionClient() if trading_mode == "live" else None
     autonomous_monitor = AutonomousMonitor()
     retrainer = Retrainer()
     previous_markets_df = None
@@ -332,7 +335,15 @@ def main_loop():
                 if action_val != 0:
                     size = 10 if action_val == 1 else 50
                     fill_price = quote_entry_price(signal_row)
-                    execute_paper_trade(action_val, signal_row, fill_price=fill_price)
+                    if trading_mode == "live" and execution_client is not None:
+                        execution_client.create_and_post_order(
+                            token_id=signal_row.get("token_id"),
+                            price=fill_price,
+                            size=size,
+                            side=signal_row.get("order_side", "BUY"),
+                        )
+                    else:
+                        execute_paper_trade(action_val, signal_row, fill_price=fill_price)
                     position_manager.open_position(signal_row, size_usdc=size, fill_price=fill_price)
 
             # 4B. Open-position management path for hold / reduce / exit

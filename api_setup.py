@@ -7,49 +7,53 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 def validate_environment():
     """
-    Validates the presence and structure of the .env file for paper-trading.
-    Strictly enforces simulation mode and ignores/warns about live cryptographic keys.
+    Validates the presence and structure of the .env file for paper or live-test mode.
     """
-    logging.info("Validating local environment setup for Paper Trading...")
+    logging.info("Validating local environment setup...")
 
     env_path = ".env"
 
-    # 1. Check if .env exists, create a safe template if it doesn't
     if not os.path.exists(env_path):
-        logging.warning("[-] .env file not found. Generating a safe simulation template...")
+        logging.warning("[-] .env file not found. Generating a starter template...")
         with open(env_path, "w", encoding="utf-8") as f:
-            f.write("# PolyMarket Bot - Paper Trading Configuration\n")
-            f.write("PAPER_TRADE_MODE=True\n")
+            f.write("# PolyMarket Bot Configuration\n")
+            f.write("TRADING_MODE=paper\n")
             f.write("SIMULATED_STARTING_BALANCE=1000\n")
             f.write("MAX_RISK_PER_TRADE=50\n")
-        logging.info("[+] Safe .env template created. Please review variables.")
+            f.write("# For live-test branch only:\n")
+            f.write("# PRIVATE_KEY=\n")
+            f.write("# POLYMARKET_FUNDER=\n")
+        logging.info("[+] Starter .env template created. Please review variables.")
         return False
 
-    # 2. Load and verify environment variables
     load_dotenv()
 
-    mode = os.getenv("PAPER_TRADE_MODE")
+    trading_mode = os.getenv("TRADING_MODE", "paper").strip().lower()
     balance = os.getenv("SIMULATED_STARTING_BALANCE")
 
-    # 3. Guardrail: Warn if live keys are accidentally present
-    if os.getenv("POLY_API_KEY") or os.getenv("PK_LEVEL_1"):
-        logging.warning(
-            "[!] WARNING: Live API keys detected in .env. This system is restricted to PAPER TRADING ONLY. Live keys will be ignored."
-        )
-
-    if str(mode).lower() == "true" and balance:
-        logging.info(f"[+] Environment validated. Running in PAPER_TRADE_MODE with ${balance} simulated balance.")
-        return True
-    else:
-        logging.error(
-            "[-] Invalid .env configuration. Please ensure PAPER_TRADE_MODE=True and SIMULATED_STARTING_BALANCE are set."
-        )
+    if trading_mode == "paper":
+        if balance:
+            logging.info(f"[+] Environment validated. Running in paper mode with ${balance} simulated balance.")
+            return True
+        logging.error("[-] Invalid paper config. Please set SIMULATED_STARTING_BALANCE.")
         return False
+
+    if trading_mode == "live":
+        private_key = os.getenv("PRIVATE_KEY")
+        funder = os.getenv("POLYMARKET_FUNDER")
+        if private_key and funder:
+            logging.info("[+] Environment validated for live-test mode.")
+            return True
+        logging.error("[-] Invalid live config. PRIVATE_KEY and POLYMARKET_FUNDER are required.")
+        return False
+
+    logging.error("[-] Invalid TRADING_MODE. Use paper or live.")
+    return False
 
 
 if __name__ == "__main__":
     is_valid = validate_environment()
     if is_valid:
-        print("\n[+] System is cleared for autonomous paper-trading execution. You may start supervisor.py.")
+        print("\n[+] Environment is valid. You may start run_bot.py.")
     else:
         print("\n[-] Validation failed or template generated. Please check your .env file and run again.")
