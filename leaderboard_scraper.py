@@ -7,7 +7,7 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-def get_top_crypto_traders(limit=50):
+def get_top_crypto_traders(limit=100):
     """Fetches the top proxy wallets by PnL in the CRYPTO category for the week."""
     url = "https://data-api.polymarket.com/v1/leaderboard"
     params = {
