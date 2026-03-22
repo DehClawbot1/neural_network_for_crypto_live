@@ -44,7 +44,7 @@ class PositionManager:
         df = self._read_positions()
         market = signal_row.get("market_title", signal_row.get("market", "Unknown Market"))
         outcome_side = str(signal_row.get("outcome_side", signal_row.get("side", "UNKNOWN"))).upper()
-        trade_side = str(signal_row.get("trade_side", "BUY")).upper()
+        order_side = str(signal_row.get("order_side", signal_row.get("trade_side", "BUY"))).upper()
         wallet = signal_row.get("trader_wallet", signal_row.get("wallet_copied", "Unknown"))
         token_id = str(signal_row.get("token_id", "") or "")
         condition_id = str(signal_row.get("condition_id", "") or "")
@@ -90,8 +90,10 @@ class PositionManager:
             "condition_id": signal_row.get("condition_id"),
             "token_id": signal_row.get("token_id"),
             "wallet_copied": wallet,
-            "trade_side": trade_side,
+            "order_side": order_side,
+            "trade_side": order_side,
             "outcome_side": outcome_side,
+            "entry_intent": signal_row.get("entry_intent", "OPEN_LONG"),
             "position_action": "ENTER",
             "signal_label": signal_row.get("signal_label", "UNKNOWN"),
             "confidence": signal_row.get("confidence", 0.0),
