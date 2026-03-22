@@ -346,10 +346,14 @@ def render_simulated_decisions(positions_df, closed_positions_df):
             rows.append(
                 {
                     "market": row.get("market"),
+                    "token_id": row.get("token_id"),
                     "status": "HOLDING",
                     "outcome_side": row.get("outcome_side", row.get("side")),
                     "entry_price": row.get("entry_price"),
                     "live_price": row.get("current_price"),
+                    "shares": row.get("shares"),
+                    "market_value": row.get("market_value"),
+                    "realized_pnl": row.get("realized_pnl", 0.0),
                     "profit_usdc": row.get("unrealized_pnl", 0.0),
                     "reason": row.get("signal_label", "paper_hold"),
                 }
@@ -360,10 +364,14 @@ def render_simulated_decisions(positions_df, closed_positions_df):
             rows.append(
                 {
                     "market": row.get("market"),
+                    "token_id": row.get("token_id"),
                     "status": "CLOSED",
                     "outcome_side": row.get("outcome_side", row.get("side")),
                     "entry_price": row.get("entry_price"),
                     "live_price": row.get("current_price", row.get("exit_price")),
+                    "shares": row.get("shares"),
+                    "market_value": row.get("market_value"),
+                    "realized_pnl": row.get("realized_pnl", row.get("net_pnl", 0.0)),
                     "profit_usdc": row.get("unrealized_pnl", row.get("net_pnl", 0.0)),
                     "reason": row.get("close_reason", row.get("exit_reason", "paper_exit")),
                 }
@@ -385,13 +393,15 @@ def render_positions(positions_df, closed_positions_df):
         if positions_df.empty:
             st.info("No open paper positions.")
         else:
-            st.dataframe(positions_df.tail(20), width="stretch")
+            cols = [c for c in ["position_id", "market", "token_id", "condition_id", "outcome_side", "entry_price", "current_price", "shares", "market_value", "unrealized_pnl", "realized_pnl", "opened_at"] if c in positions_df.columns]
+            st.dataframe(positions_df.tail(20)[cols] if cols else positions_df.tail(20), width="stretch")
     with c2:
         st.markdown("**Closed Positions**")
         if closed_positions_df.empty:
             st.info("No closed paper positions yet.")
         else:
-            st.dataframe(closed_positions_df.tail(20), width="stretch")
+            cols = [c for c in ["position_id", "market", "token_id", "condition_id", "outcome_side", "entry_price", "current_price", "shares", "market_value", "unrealized_pnl", "realized_pnl", "close_reason", "closed_at"] if c in closed_positions_df.columns]
+            st.dataframe(closed_positions_df.tail(20)[cols] if cols else closed_positions_df.tail(20), width="stretch")
 
 
 def render_paper_trades(trades_df):
