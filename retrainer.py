@@ -16,14 +16,18 @@ class Retrainer:
     Prefers closed trades and replay episodes over raw dataset size.
     """
 
-    def __init__(self, logs_dir="logs", closed_trade_threshold=100, replay_threshold=200):
+    def __init__(self, logs_dir="logs", closed_trade_threshold=100, replay_threshold=200, weights_dir="weights"):
         self.logs_dir = Path(logs_dir)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self.weights_dir = Path(weights_dir)
+        self.weights_dir.mkdir(parents=True, exist_ok=True)
         self.closed_file = self.logs_dir / "closed_positions.csv"
         self.replay_file = self.logs_dir / "path_replay_backtest.csv"
         self.backtest_summary_file = self.logs_dir / "backtest_summary.csv"
+        self.time_split_file = self.logs_dir / "time_split_eval.csv"
         self.status_file = self.logs_dir / "retrainer_status.txt"
         self.status_csv = self.logs_dir / "model_status.csv"
+        self.registry_file = self.weights_dir / "model_registry.csv"
         self.closed_trade_threshold = closed_trade_threshold
         self.replay_threshold = replay_threshold
 
@@ -51,6 +55,49 @@ class Retrainer:
                 }
             ]
         ).to_csv(self.status_csv, index=False)
+
+    def _current_registry_row(self):
+        registry = self._safe_read(self.registry_file)
+        if registry.empty:
+            return None
+        return registry.iloc[-1].to_dict()
+
+    def _promote_if_better(self, closed_rows, replay_rows):
+        backtest_df = self._safe_read(self.backtest_summary_file)
+        time_split_df = self._safe_read(self.time_split_file)
+        if backtest_df.empty:
+            return False, "Candidate metrics unavailable for promotion."
+
+        candidate = backtest_df.iloc[-1].to_dict()
+        if not time_split_df.empty:
+            candidate.update(time_split_df.iloc[-1].to_dict())
+        champion = self._current_registry_row()
+
+        if champion is None:
+            promoted = True
+        else:
+            promoted = (
+                float(candidate.get("average_pnl", 0.0) or 0.0) >= float(champion.get("average_pnl", -999.0) or -999.0)
+                and float(candidate.get("profit_factor", 0.0) or 0.0) >= float(champion.get("profit_factor", 0.0) or 0.0)
+                and float(candidate.get("max_drawdown", 0.0) or 0.0) >= float(champion.get("max_drawdown", -999.0) or -999.0)
+            )
+
+        if not promoted:
+            return False, "Candidate did not beat champion on promotion metrics."
+
+        row = {
+            "model_version": pd.Timestamp.utcnow().strftime("%Y%m%d%H%M%S"),
+            "training_data_window": "rolling_outcome_based",
+            "replay_rows_used": replay_rows,
+            "closed_trades_used": closed_rows,
+            "average_pnl": candidate.get("average_pnl"),
+            "profit_factor": candidate.get("profit_factor"),
+            "max_drawdown": candidate.get("max_drawdown"),
+            "test_accuracy": candidate.get("test_accuracy"),
+            "promoted_at": pd.Timestamp.utcnow().isoformat(),
+        }
+        pd.DataFrame([row]).to_csv(self.registry_file, mode="a", header=not self.registry_file.exists(), index=False)
+        return True, f"Promoted candidate model {row['model_version']}"
 
     def maybe_retrain(self):
         closed_df = self._safe_read(self.closed_file)
@@ -81,5 +128,6 @@ class Retrainer:
         Stage1Models(logs_dir=self.logs_dir).train()
         Stage2TemporalModels(logs_dir=self.logs_dir).train()
         train_model(timesteps=5000)
-        self._write_status(closed_rows, replay_rows, f"Outcome-based retraining triggered with closed={closed_rows}, replay={replay_rows}.")
-        return True
+        promoted, message = self._promote_if_better(closed_rows, replay_rows)
+        self._write_status(closed_rows, replay_rows, message)
+        return promoted
