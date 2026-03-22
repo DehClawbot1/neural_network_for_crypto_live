@@ -160,9 +160,27 @@ class PositionManager:
         idx = positions[mask].index[0]
         shares = float(positions.at[idx, "shares"] or 0.0)
         size_usdc = float(positions.at[idx, "size_usdc"] or 0.0)
-        positions.at[idx, "shares"] = shares * (1.0 - fraction)
+        entry_price = float(positions.at[idx, "entry_price"] or 0.0)
+        token_id = str(positions.at[idx, "token_id"] or "") if "token_id" in positions.columns else ""
+        exit_price = self.price_service.get_latest_price(token_id) if token_id else None
+        exit_price = float(exit_price if exit_price is not None else positions.at[idx, "current_price"] or entry_price)
+
+        shares_closed = shares * fraction
+        shares_remaining = shares - shares_closed
+        gross_realized_pnl = shares_closed * (exit_price - entry_price)
+        fees_paid_exit = shares_closed * exit_price * self.price_service.max_age_seconds * 0 + 0.0
+        net_realized_pnl = gross_realized_pnl - fees_paid_exit
+
+        positions.at[idx, "shares"] = shares_remaining
         positions.at[idx, "size_usdc"] = size_usdc * (1.0 - fraction)
+        positions.at[idx, "current_price"] = exit_price
+        positions.at[idx, "realized_pnl"] = float(positions.at[idx, "realized_pnl"] or 0.0) + net_realized_pnl
         positions.at[idx, "position_action"] = "REDUCE"
+        positions.at[idx, "shares_closed"] = shares_closed
+        positions.at[idx, "shares_remaining"] = shares_remaining
+        positions.at[idx, "gross_realized_pnl"] = gross_realized_pnl
+        positions.at[idx, "fees_paid_exit"] = fees_paid_exit
+        positions.at[idx, "net_realized_pnl"] = net_realized_pnl
         self._write_positions(positions)
         return positions
 
@@ -184,12 +202,22 @@ class PositionManager:
         fees_paid = float(row.get("fees_paid", 0.0) or 0.0)
         shares = float(row.get("shares", 0.0) or 0.0)
         market_value = shares * exit_price
-        realized_pnl = PNLEngine.mark_to_market_pnl(size_usdc, entry_price, exit_price, fees=fees_paid)
+        gross_realized_pnl = shares * (exit_price - entry_price)
+        fees_paid_exit = 0.0
+        net_realized_pnl = gross_realized_pnl - fees_paid_exit - fees_paid
 
         row["current_price"] = exit_price
+        row["exit_price"] = exit_price
         row["market_value"] = round(float(market_value), 4)
-        row["realized_pnl"] = round(float(realized_pnl), 4)
+        row["gross_realized_pnl"] = round(float(gross_realized_pnl), 4)
+        row["fees_paid_exit"] = round(float(fees_paid_exit), 4)
+        row["net_realized_pnl"] = round(float(net_realized_pnl), 4)
+        row["realized_pnl"] = round(float(net_realized_pnl), 4)
         row["unrealized_pnl"] = 0.0
+        row["shares_closed"] = shares
+        row["shares_remaining"] = 0.0
+        row["exit_order_side"] = "SELL"
+        row["filled_shares"] = shares
         row["closed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         row["position_action"] = "EXIT"
         row["close_reason"] = reason
@@ -233,6 +261,21 @@ class PositionManager:
 
             if close_reason:
                 closed_row = row.to_dict()
+                shares = float(closed_row.get("shares", 0.0) or 0.0)
+                entry_price = float(closed_row.get("entry_price", 0.0) or 0.0)
+                exit_price = float(closed_row.get("current_price", entry_price) or entry_price)
+                gross_realized_pnl = shares * (exit_price - entry_price)
+                fees_paid_exit = 0.0
+                net_realized_pnl = gross_realized_pnl - fees_paid_exit - float(closed_row.get("fees_paid", 0.0) or 0.0)
+                closed_row["exit_price"] = exit_price
+                closed_row["gross_realized_pnl"] = gross_realized_pnl
+                closed_row["fees_paid_exit"] = fees_paid_exit
+                closed_row["net_realized_pnl"] = net_realized_pnl
+                closed_row["realized_pnl"] = net_realized_pnl
+                closed_row["shares_closed"] = shares
+                closed_row["shares_remaining"] = 0.0
+                closed_row["filled_shares"] = shares
+                closed_row["exit_order_side"] = "SELL"
                 closed_row["closed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 closed_row["position_action"] = "EXIT"
                 closed_row["close_reason"] = close_reason
