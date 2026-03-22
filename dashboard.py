@@ -26,6 +26,8 @@ MARKET_DISTRIBUTION_FILE = LOGS_DIR / "market_distribution.csv"
 SUPERVISED_EVAL_FILE = LOGS_DIR / "supervised_eval.csv"
 TIME_SPLIT_EVAL_FILE = LOGS_DIR / "time_split_eval.csv"
 PATH_REPLAY_FILE = LOGS_DIR / "path_replay_backtest.csv"
+BACKTEST_BY_WALLET_FILE = LOGS_DIR / "backtest_by_wallet.csv"
+MODEL_REGISTRY_FILE = BASE_DIR / "weights" / "model_registry.csv"
 
 st.set_page_config(page_title="Neural Network for Crypto", page_icon="📈", layout="wide")
 
@@ -395,14 +397,14 @@ def render_positions(positions_df, closed_positions_df):
         if positions_df.empty:
             st.info("No open paper positions.")
         else:
-            cols = [c for c in ["position_id", "market", "token_id", "condition_id", "outcome_side", "entry_price", "current_price", "shares", "market_value", "unrealized_pnl", "realized_pnl", "opened_at"] if c in positions_df.columns]
+            cols = [c for c in ["position_id", "market", "token_id", "condition_id", "outcome_side", "entry_price", "current_price", "shares", "market_value", "unrealized_pnl", "realized_pnl", "confidence", "position_action", "opened_at"] if c in positions_df.columns]
             st.dataframe(positions_df.tail(20)[cols] if cols else positions_df.tail(20), width="stretch")
     with c2:
         st.markdown("**Closed Positions**")
         if closed_positions_df.empty:
             st.info("No closed paper positions yet.")
         else:
-            cols = [c for c in ["position_id", "market", "token_id", "condition_id", "outcome_side", "entry_price", "current_price", "shares", "market_value", "unrealized_pnl", "realized_pnl", "close_reason", "closed_at"] if c in closed_positions_df.columns]
+            cols = [c for c in ["position_id", "market", "token_id", "condition_id", "outcome_side", "entry_price", "current_price", "shares", "market_value", "unrealized_pnl", "realized_pnl", "fees_paid", "close_reason", "max_drawdown", "mfe", "mae", "wallet_copied", "closed_at"] if c in closed_positions_df.columns]
             st.dataframe(closed_positions_df.tail(20)[cols] if cols else closed_positions_df.tail(20), width="stretch")
 
 
@@ -523,7 +525,7 @@ def render_action_board(signals_df, positions_df):
     st.dataframe(board_df, width="stretch")
 
 
-def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df, path_replay_df):
+def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df, path_replay_df, backtest_wallet_df, model_registry_df):
     st.markdown('<div class="section-title">Model / Learning Status</div>', unsafe_allow_html=True)
     st.caption("This tab shows whether the paper-trading system has enough historical rows to train/evaluate the newer supervised models.")
     weights_status = "🟢 current" if WEIGHTS_FILE.exists() else "🔴 missing"
@@ -580,12 +582,32 @@ def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df,
     if supervised_eval_df.empty and time_split_eval_df.empty and path_replay_df.empty:
         st.info("Learning outputs are still empty because the newer supervised / replay pipeline does not have enough built history yet. This is expected on early runs.")
 
+    if not model_registry_df.empty:
+        latest_model = model_registry_df.iloc[-1].to_dict()
+        st.markdown("**Current Champion Model**")
+        st.code(str(latest_model), language="text")
+
     if not path_replay_df.empty:
         pnl_col = "net_pnl" if "net_pnl" in path_replay_df.columns else "gross_pnl" if "gross_pnl" in path_replay_df.columns else None
         if pnl_col:
             fig = px.histogram(path_replay_df, x=pnl_col, title="Replay PnL Distribution")
             fig.update_layout(height=320)
             st.plotly_chart(fig, width="stretch")
+
+            equity_df = path_replay_df.copy()
+            equity_df["equity_curve"] = equity_df[pnl_col].astype(float).cumsum()
+            equity_df["rolling_win_rate"] = (equity_df[pnl_col].astype(float) > 0).rolling(20, min_periods=1).mean()
+            equity_df["rolling_drawdown"] = equity_df["equity_curve"] - equity_df["equity_curve"].cummax()
+            c1, c2 = st.columns(2)
+            with c1:
+                st.plotly_chart(px.line(equity_df, y="equity_curve", title="Equity Curve"), width="stretch")
+            with c2:
+                st.plotly_chart(px.line(equity_df, y="rolling_win_rate", title="Rolling Win Rate"), width="stretch")
+            st.plotly_chart(px.line(equity_df, y="rolling_drawdown", title="Rolling Drawdown"), width="stretch")
+
+    if not backtest_wallet_df.empty:
+        st.markdown("**Wallet Alpha Evolution / Leaders**")
+        st.dataframe(backtest_wallet_df.head(15), width="stretch")
 
 
 def render_raw_data(signals_df, trades_df, episode_log_df, markets_df, whales_df, alerts_df, model_status_df, positions_df, closed_positions_df):
@@ -639,6 +661,8 @@ def main():
     supervised_eval_df = load_csv(SUPERVISED_EVAL_FILE)
     time_split_eval_df = load_csv(TIME_SPLIT_EVAL_FILE)
     path_replay_df = load_csv(PATH_REPLAY_FILE)
+    backtest_wallet_df = load_csv(BACKTEST_BY_WALLET_FILE)
+    model_registry_df = load_csv(MODEL_REGISTRY_FILE)
 
     render_overview(signals_df, trades_df, markets_df, alerts_df)
 
@@ -679,7 +703,7 @@ def main():
             render_market_distribution(distribution_df)
 
     with tab3:
-        render_model_status(model_status_df, supervised_eval_df, time_split_eval_df, path_replay_df)
+        render_model_status(model_status_df, supervised_eval_df, time_split_eval_df, path_replay_df, backtest_wallet_df, model_registry_df)
 
     with tab4:
         render_raw_data(signals_df, trades_df, episode_log_df, markets_df, whales_df, alerts_df, model_status_df, positions_df, closed_positions_df)
