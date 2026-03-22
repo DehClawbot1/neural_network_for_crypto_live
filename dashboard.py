@@ -866,8 +866,23 @@ def render_positions(positions_df, closed_positions_df):
         if closed_positions_df.empty:
             st.info("No closed paper positions yet.")
         else:
-            cols = [c for c in ["position_id", "market", "token_id", "condition_id", "outcome_side", "entry_price", "current_price", "shares", "market_value", "unrealized_pnl", "realized_pnl", "fees_paid", "close_reason", "max_drawdown", "mfe", "mae", "wallet_copied", "closed_at"] if c in closed_positions_df.columns]
-            st.dataframe(closed_positions_df.tail(20)[cols] if cols else closed_positions_df.tail(20), width="stretch")
+            closed_view = closed_positions_df.copy().tail(20)
+            if "opened_at" in closed_view.columns and "closed_at" in closed_view.columns:
+                opened_ts = pd.to_datetime(closed_view["opened_at"], errors="coerce", utc=True)
+                closed_ts = pd.to_datetime(closed_view["closed_at"], errors="coerce", utc=True)
+                closed_view["hold_duration"] = (((closed_ts - opened_ts).dt.total_seconds()) / 60).round(1)
+            if "net_pnl" not in closed_view.columns:
+                if "net_realized_pnl" in closed_view.columns:
+                    closed_view["net_pnl"] = closed_view["net_realized_pnl"]
+                elif "realized_pnl" in closed_view.columns:
+                    closed_view["net_pnl"] = closed_view["realized_pnl"]
+            if "fees" not in closed_view.columns and "fees_paid" in closed_view.columns:
+                closed_view["fees"] = closed_view["fees_paid"]
+            if "signal_label_at_entry" not in closed_view.columns and "signal_label" in closed_view.columns:
+                closed_view["signal_label_at_entry"] = closed_view["signal_label"]
+            display_cols = [c for c in ["market", "outcome_side", "entry_price", "exit_price", "opened_at", "closed_at", "hold_duration", "close_reason", "fees", "net_pnl", "wallet_copied", "signal_label_at_entry"] if c in closed_view.columns]
+            closed_view = closed_view[display_cols].rename(columns={"outcome_side": "side", "opened_at": "entry time", "closed_at": "exit time", "close_reason": "exit reason", "wallet_copied": "copied wallet", "net_pnl": "net PnL", "signal_label_at_entry": "signal label at entry"}).fillna("N/A")
+            st.dataframe(closed_view, width="stretch", hide_index=True)
 
 
 def render_paper_trades(trades_df):
