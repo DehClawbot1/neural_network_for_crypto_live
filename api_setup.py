@@ -1,8 +1,23 @@
 import os
 import logging
+from getpass import getpass
 from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+def prompt_runtime_config():
+    trading_mode = os.getenv("TRADING_MODE", "").strip().lower()
+    if not trading_mode:
+        trading_mode = input("TRADING_MODE [paper/live]: ").strip().lower() or "paper"
+        os.environ["TRADING_MODE"] = trading_mode
+
+    if trading_mode == "live":
+        if not os.getenv("POLYMARKET_FUNDER"):
+            os.environ["POLYMARKET_FUNDER"] = input("POLYMARKET_FUNDER: ").strip()
+        if not os.getenv("PRIVATE_KEY"):
+            os.environ["PRIVATE_KEY"] = getpass("PRIVATE_KEY: ").strip()
+    return trading_mode
 
 
 def validate_environment():
@@ -28,7 +43,7 @@ def validate_environment():
 
     load_dotenv()
 
-    trading_mode = os.getenv("TRADING_MODE", "paper").strip().lower()
+    trading_mode = prompt_runtime_config()
     balance = os.getenv("SIMULATED_STARTING_BALANCE")
 
     if trading_mode == "paper":
