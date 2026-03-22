@@ -80,8 +80,7 @@ class PolyTradeEnv(gym.Env):
     def _unrealized_pnl(self, price):
         if not self.position_open:
             return 0.0
-        side = "BUY" if self.position_side == "YES" else "SELL"
-        return PNLEngine.mark_to_market_pnl(self.capital_usdc, self.entry_price, price, side=side)
+        return PNLEngine.mark_to_market_pnl(self.capital_usdc, self.entry_price, price)
 
     def _build_state(self):
         row = self.episode_row or {}

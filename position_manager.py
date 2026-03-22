@@ -93,7 +93,7 @@ class PositionManager:
             shares = float(row.get("shares", 0.0))
             fees_paid = float(row.get("fees_paid", 0.0))
             market_value = shares * float(current_price)
-            unrealized_pnl = market_value - (shares * entry_price) - fees_paid
+            unrealized_pnl = PNLEngine.mark_to_market_pnl(float(row.get("size_usdc", 0.0)), entry_price, current_price, fees=fees_paid)
 
             positions.at[idx, "current_price"] = current_price
             positions.at[idx, "market_value"] = round(float(market_value), 4)

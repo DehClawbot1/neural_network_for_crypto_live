@@ -46,7 +46,7 @@ class TradeLifecycle:
 
     def update_market(self, live_price: float):
         self.current_price = live_price
-        self.unrealized_pnl = self.shares * (live_price - self.entry_price)
+        self.unrealized_pnl = PNLEngine.mark_to_market_pnl(self.size_usdc, self.entry_price, live_price)
         if self.state in [TradeState.ENTERED, TradeState.PARTIAL_EXIT]:
             self.state = TradeState.OPEN
         self.ledger.append({"event": "mark", "timestamp": datetime.now().isoformat(), "live_price": live_price, "unrealized_pnl": self.unrealized_pnl})
@@ -55,7 +55,7 @@ class TradeLifecycle:
     def partial_exit(self, fraction: float, exit_price: float):
         fraction = max(0.0, min(1.0, fraction))
         exited_shares = self.shares * fraction
-        pnl = exited_shares * (exit_price - self.entry_price)
+        pnl = exited_shares * (float(exit_price) - float(self.entry_price))
         self.realized_pnl += pnl
         self.shares -= exited_shares
         self.size_usdc *= (1.0 - fraction)
@@ -65,7 +65,7 @@ class TradeLifecycle:
         return pnl
 
     def close(self, exit_price: float):
-        pnl = self.shares * (exit_price - self.entry_price)
+        pnl = self.shares * (float(exit_price) - float(self.entry_price))
         self.realized_pnl += pnl
         self.current_price = exit_price
         self.unrealized_pnl = 0.0
@@ -75,7 +75,9 @@ class TradeLifecycle:
         self.ledger.append({"event": "close", "timestamp": self.closed_at, "exit_price": exit_price, "realized_pnl": pnl})
         return pnl
 
-    def resolve(self):
+    def resolve(self, token_won: bool):
+        pnl = PNLEngine.resolution_pnl(self.size_usdc, self.entry_price, token_won)
+        self.realized_pnl = pnl
         self.state = TradeState.RESOLVED
-        self.ledger.append({"event": "resolve", "timestamp": datetime.now().isoformat(), "realized_pnl": self.realized_pnl})
+        self.ledger.append({"event": "resolve", "timestamp": datetime.now().isoformat(), "token_won": token_won, "realized_pnl": self.realized_pnl})
         return self.realized_pnl
