@@ -33,18 +33,32 @@ MODEL_REGISTRY_FILE = BASE_DIR / "weights" / "model_registry.csv"
 st.set_page_config(page_title="Neural Network for Crypto", page_icon="📈", layout="wide")
 
 
-def load_csv(path):
-    path = Path(path)
-    if not path.exists():
-        return pd.DataFrame()
+@st.cache_data(show_spinner=False)
+def _cached_csv_read(path_str, mtime):
     try:
-        return pd.read_csv(path, engine="python", on_bad_lines="skip")
+        return pd.read_csv(path_str, engine="python", on_bad_lines="skip")
     except Exception:
         return pd.DataFrame()
 
 
+def load_csv(path):
+    path = Path(path)
+    if not path.exists():
+        return pd.DataFrame()
+    return _cached_csv_read(str(path), path.stat().st_mtime)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_execution_history(logs_dir_str, execution_mtime, legacy_mtime):
+    return shared_load_execution_history(logs_dir_str)
+
+
 def load_execution_history():
-    return shared_load_execution_history(LOGS_DIR)
+    execution_path = LOGS_DIR / "execution_log.csv"
+    legacy_path = LOGS_DIR / "daily_summary.txt"
+    execution_mtime = execution_path.stat().st_mtime if execution_path.exists() else 0
+    legacy_mtime = legacy_path.stat().st_mtime if legacy_path.exists() else 0
+    return _cached_execution_history(str(LOGS_DIR), execution_mtime, legacy_mtime)
 
 
 def apply_dashboard_filters(df, market_search="", wallet_search="", min_confidence=0.0, signal_label="All", position_status="All"):
