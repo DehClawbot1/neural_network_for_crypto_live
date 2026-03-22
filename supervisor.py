@@ -29,7 +29,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # Ensure logging directory exists
 os.makedirs("logs", exist_ok=True)
-SUMMARY_FILE = "logs/daily_summary.txt"
+EXECUTION_FILE = "logs/execution_log.csv"
 SIGNALS_FILE = "logs/signals.csv"
 MARKETS_FILE = "logs/markets.csv"
 
@@ -196,9 +196,9 @@ def execute_paper_trade(action, signal_row):
     )
 
     try:
-        append_csv_record(SUMMARY_FILE, trade_record)
+        append_csv_record(EXECUTION_FILE, trade_record)
     except Exception as e:
-        logging.error(f"[-] Failed to write to {SUMMARY_FILE}: {e}")
+        logging.error(f"[-] Failed to write to {EXECUTION_FILE}: {e}")
 
 
 def main_loop():
@@ -328,7 +328,7 @@ def main_loop():
                         position_manager.close_position(pos_row.to_dict(), reason="rl_exit")
 
             # 5. Phase 2 analytics outputs
-            trades_df = safe_read_csv(SUMMARY_FILE)
+            trades_df = safe_read_csv(EXECUTION_FILE)
             trader_signals_df = scored_df.rename(columns={"trader_wallet": "wallet_copied", "market_title": "market"})
             trader_analytics.write(trader_signals_df, trades_df)
             backtester.write(trader_signals_df)

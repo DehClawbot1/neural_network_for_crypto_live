@@ -21,6 +21,7 @@ class PositionManager:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.positions_file = self.logs_dir / "positions.csv"
         self.closed_file = self.logs_dir / "closed_positions.csv"
+        self.episode_file = self.logs_dir / "episode_log.csv"
         self.price_service = MarketPriceService()
 
     def _read_positions(self):
@@ -141,6 +142,7 @@ class PositionManager:
         self._write_positions(remaining)
         closed_df = pd.DataFrame([row])
         closed_df.to_csv(self.closed_file, mode="a", header=not self.closed_file.exists(), index=False)
+        closed_df.to_csv(self.episode_file, mode="a", header=not self.episode_file.exists(), index=False)
         return closed_df
 
     def apply_exit_rules(self, alerts_df: pd.DataFrame | None = None):
@@ -187,6 +189,7 @@ class PositionManager:
         if closed:
             closed_df = pd.DataFrame(closed)
             closed_df.to_csv(self.closed_file, mode="a", header=not self.closed_file.exists(), index=False)
+            closed_df.to_csv(self.episode_file, mode="a", header=not self.episode_file.exists(), index=False)
             logging.info("Closed %s paper positions.", len(closed_df))
             return closed_df
 

@@ -9,7 +9,9 @@ import streamlit as st
 BASE_DIR = Path(__file__).resolve().parent
 LOGS_DIR = BASE_DIR / "logs"
 SIGNALS_FILE = LOGS_DIR / "signals.csv"
-SUMMARY_FILE = LOGS_DIR / "daily_summary.txt"
+EXECUTION_FILE = LOGS_DIR / "execution_log.csv"
+LEGACY_SUMMARY_FILE = LOGS_DIR / "execution_log.csv"
+EPISODE_LOG_FILE = LOGS_DIR / "episode_log.csv"
 MARKETS_FILE = LOGS_DIR / "markets.csv"
 WHALES_FILE = LOGS_DIR / "whales.csv"
 ALERTS_FILE = LOGS_DIR / "alerts.csv"
@@ -586,23 +588,25 @@ def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df,
             st.plotly_chart(fig, width="stretch")
 
 
-def render_raw_data(signals_df, trades_df, markets_df, whales_df, alerts_df, model_status_df, positions_df, closed_positions_df):
+def render_raw_data(signals_df, trades_df, episode_log_df, markets_df, whales_df, alerts_df, model_status_df, positions_df, closed_positions_df):
     st.caption("Raw data is split into sub-tabs for faster inspection and export-oriented review.")
-    raw_tabs = st.tabs(["Signals", "Trades", "Markets", "Whales", "Alerts", "Learning", "Positions"])
+    raw_tabs = st.tabs(["Signals", "Execution", "Episodes", "Markets", "Whales", "Alerts", "Learning", "Positions"])
 
     with raw_tabs[0]:
         st.dataframe(signals_df, width="stretch")
     with raw_tabs[1]:
         st.dataframe(trades_df, width="stretch")
     with raw_tabs[2]:
-        st.dataframe(markets_df, width="stretch")
+        st.dataframe(episode_log_df, width="stretch")
     with raw_tabs[3]:
-        st.dataframe(whales_df, width="stretch")
+        st.dataframe(markets_df, width="stretch")
     with raw_tabs[4]:
-        st.dataframe(alerts_df, width="stretch")
+        st.dataframe(whales_df, width="stretch")
     with raw_tabs[5]:
-        st.dataframe(model_status_df, width="stretch")
+        st.dataframe(alerts_df, width="stretch")
     with raw_tabs[6]:
+        st.dataframe(model_status_df, width="stretch")
+    with raw_tabs[7]:
         st.markdown("**Open Positions**")
         st.dataframe(positions_df, width="stretch")
         st.markdown("**Closed Positions**")
@@ -624,6 +628,7 @@ def main():
 
     signals_df = load_csv(SIGNALS_FILE)
     trades_df = load_csv(SUMMARY_FILE)
+    episode_log_df = load_csv(EPISODE_LOG_FILE)
     markets_df = load_csv(MARKETS_FILE)
     whales_df = load_csv(WHALES_FILE)
     distribution_df = load_csv(MARKET_DISTRIBUTION_FILE)
@@ -652,6 +657,9 @@ def main():
         render_simulated_decisions(positions_df, closed_positions_df)
         render_positions(positions_df, closed_positions_df)
         render_best_trades(closed_positions_df, path_replay_df)
+        if not episode_log_df.empty:
+            st.markdown('<div class="section-title">Episode Log</div>', unsafe_allow_html=True)
+            st.dataframe(episode_log_df.tail(20), width="stretch")
         bottom_left, bottom_right = st.columns([1, 1])
         with bottom_left:
             render_paper_trades(trades_df)
@@ -674,7 +682,7 @@ def main():
         render_model_status(model_status_df, supervised_eval_df, time_split_eval_df, path_replay_df)
 
     with tab4:
-        render_raw_data(signals_df, trades_df, markets_df, whales_df, alerts_df, model_status_df, positions_df, closed_positions_df)
+        render_raw_data(signals_df, trades_df, episode_log_df, markets_df, whales_df, alerts_df, model_status_df, positions_df, closed_positions_df)
 
 
 if __name__ == "__main__":

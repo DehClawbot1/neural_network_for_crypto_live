@@ -81,6 +81,7 @@ def start_supervisor():
     print("    - fetch public BTC-related market/account activity")
     print("    - rank paper-trading opportunities")
     print("    - simulate paper trades")
+    print("    - write execution and episode logs")
     print("    - sleep 60 seconds and repeat")
     print("\n[+] Open the dashboard in another terminal with:")
     print("    streamlit run dashboard.py\n")
