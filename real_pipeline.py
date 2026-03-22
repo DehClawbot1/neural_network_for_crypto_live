@@ -8,6 +8,8 @@ from evaluator import Evaluator
 from contract_target_builder import ContractTargetBuilder
 from wallet_alpha_builder import WalletAlphaBuilder
 from walk_forward_evaluator import WalkForwardEvaluator
+from time_split_trainer import TimeSplitTrainer
+from path_replay_simulator import PathReplaySimulator
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -28,6 +30,8 @@ def run_research_pipeline():
     ContractTargetBuilder().write(horizon_rows=5)
     WalletAlphaBuilder().write()
     WalkForwardEvaluator().evaluate()
+    TimeSplitTrainer().run()
+    PathReplaySimulator().write()
 
     logging.info("Research pipeline complete.")
 
