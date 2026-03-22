@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pandas as pd
+from schema import ALIASES
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import accuracy_score, mean_squared_error
@@ -81,7 +82,7 @@ class TimeSplitTrainer:
             "test_rows": len(test_df),
         }
 
-        target_return_col = "forward_return_15m" if "forward_return_15m" in df.columns else None
+        target_return_col = next((c for c in ALIASES["forward_return_15m"] if c in df.columns), None)
         if target_return_col is not None:
             reg = Pipeline([
                 ("imputer", SimpleImputer(strategy="median")),

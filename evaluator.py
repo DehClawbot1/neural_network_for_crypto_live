@@ -3,6 +3,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+from schema import ALIASES
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
 
@@ -47,7 +48,7 @@ class Evaluator:
         y = eval_df["target_up"].astype(int)
         preds = model.predict(X)
 
-        return_col = "future_return" if "future_return" in eval_df.columns else None
+        return_col = next((c for c in ALIASES["forward_return_15m"] if c in eval_df.columns), None)
         strategy_returns = np.where(preds == 1, eval_df[return_col], -eval_df[return_col]) if return_col else np.zeros(len(eval_df))
         sharpe = 0.0
         if np.std(strategy_returns) > 0:
