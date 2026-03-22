@@ -12,11 +12,12 @@ class PolyTradeEnv(gym.Env):
     """
     Replay-based Gymnasium environment for paper-trading research.
     One episode = one trade lifecycle replayed over real token price history.
+    Reward is based on portfolio value transitions, not ad-hoc realized/unrealized bonuses.
     """
 
-    FEATURE_DIM = 9
+    FEATURE_DIM = 10
 
-    def __init__(self, logs_dir="logs", max_hold_steps=60, fee_rate=0.0, slippage_penalty=0.002, risk_penalty=0.001):
+    def __init__(self, logs_dir="logs", max_hold_steps=60, fee_rate=0.001, slippage_penalty=0.002, risk_penalty=0.001):
         super().__init__()
         self.logs_dir = Path(logs_dir)
         self.contract_targets_file = self.logs_dir / "contract_targets.csv"
@@ -36,10 +37,12 @@ class PolyTradeEnv(gym.Env):
         self.step_idx = 0
         self.position_open = False
         self.position_side = "YES"
-        self.capital_usdc = 0.0
+        self.inventory_fraction = 0.0
+        self.cash_usdc = 0.0
+        self.committed_capital = 0.0
         self.shares = 0.0
         self.entry_price = 0.0
-        self.prev_unrealized = 0.0
+        self.position_age = 0
         self.state = np.zeros(self.FEATURE_DIM, dtype=np.float32)
 
     def _safe_read(self, path):
@@ -77,27 +80,34 @@ class PolyTradeEnv(gym.Env):
             return 0.5
         return float(self.episode_prices[min(self.step_idx, len(self.episode_prices) - 1)])
 
-    def _unrealized_pnl(self, price):
-        if not self.position_open:
-            return 0.0
-        return PNLEngine.mark_to_market_pnl(self.capital_usdc, self.entry_price, price)
+    def _position_value(self, price):
+        return self.shares * float(price)
+
+    def _portfolio_value(self, price):
+        return float(self.cash_usdc) + self._position_value(price)
 
     def _build_state(self):
         row = self.episode_row or {}
         price = self._current_price()
-        unrealized = self._unrealized_pnl(price)
-        time_in_trade = self.step_idx / max(1, self.max_hold_steps)
+        position_value = self._position_value(price)
+        unrealized = position_value - (self.shares * self.entry_price if self.position_open else 0.0)
+        spread = float(row.get("spread", 0.0) or 0.0)
+        realized_vol = float(row.get("btc_realized_vol_15m", row.get("volatility_score", 0.0)) or 0.0)
+        time_to_close = float(row.get("time_to_close_minutes", 0.0) or 0.0)
+        liquidity = float(row.get("liquidity_score", 0.0) or 0.0)
+        drawdown = min(0.0, unrealized)
         state = np.array(
             [
                 float(price),
                 float(self.entry_price if self.position_open else price),
-                1.0 if self.position_side == "YES" else 0.0,
+                float(self.inventory_fraction),
                 float(self.shares),
                 float(row.get("confidence", 0.0) or 0.0),
                 float(row.get("edge_score", 0.0) or 0.0),
-                float(row.get("volatility_score", 0.0) or 0.0),
-                float(time_in_trade),
-                float(unrealized),
+                float(realized_vol),
+                float(self.position_age / max(1, self.max_hold_steps)),
+                float(drawdown),
+                float(spread + liquidity + (time_to_close / max(1.0, time_to_close + 1.0))),
             ],
             dtype=np.float32,
         )
@@ -117,59 +127,73 @@ class PolyTradeEnv(gym.Env):
 
         self.step_idx = 0
         self.position_open = False
-        self.position_side = str(self.episode_row.get("side", self.episode_row.get("outcome_side", "YES"))).upper()
-        self.capital_usdc = 0.0
+        self.position_side = str(self.episode_row.get("outcome_side", self.episode_row.get("side", "YES"))).upper()
+        self.inventory_fraction = 0.0
+        self.cash_usdc = 0.0
+        self.committed_capital = 0.0
         self.shares = 0.0
         self.entry_price = 0.0
-        self.prev_unrealized = 0.0
+        self.position_age = 0
         return self._build_state(), {}
 
     def step(self, action):
         current_price = self._current_price()
-        reward = 0.0
-        realized_component = 0.0
+        valid_actions = [0, 1, 2] if not self.position_open else [3, 4, 5]
+        fee_cost = 0.0
+        slippage_cost = 0.0
+
+        portfolio_before = self._portfolio_value(current_price)
+
+        if action not in valid_actions:
+            action = valid_actions[0]
 
         if action in [1, 2] and not self.position_open:
-            self.capital_usdc = 10.0 if action == 1 else 50.0
+            self.committed_capital = 10.0 if action == 1 else 50.0
+            self.cash_usdc = 0.0
             self.entry_price = current_price
             self.position_open = True
-            self.shares = PNLEngine.shares_from_capital(self.capital_usdc, self.entry_price)
-            reward -= self.slippage_penalty
+            self.inventory_fraction = 1.0
+            self.shares = PNLEngine.shares_from_capital(self.committed_capital, self.entry_price)
+            slippage_cost = self.slippage_penalty
+            fee_cost = self.committed_capital * self.fee_rate
         elif action == 4 and self.position_open:
-            self.capital_usdc *= 0.5
-            self.shares *= 0.5
-            reward -= self.fee_rate
+            exited_fraction = 0.5
+            exited_shares = self.shares * exited_fraction
+            exit_value = exited_shares * current_price
+            self.cash_usdc += exit_value
+            self.shares -= exited_shares
+            self.inventory_fraction = 0.5
+            fee_cost = exit_value * self.fee_rate
         elif action == 5 and self.position_open:
-            realized_component = self._unrealized_pnl(current_price)
-            reward += realized_component - self.fee_rate
-            self.position_open = False
-            self.capital_usdc = 0.0
+            exit_value = self.shares * current_price
+            self.cash_usdc += exit_value
+            fee_cost = exit_value * self.fee_rate
             self.shares = 0.0
+            self.inventory_fraction = 0.0
+            self.position_open = False
 
         next_idx = min(self.step_idx + 1, len(self.episode_prices) - 1)
-        next_price = float(self.episode_prices[next_idx])
-        new_unrealized = self._unrealized_pnl(next_price)
-        unrealized_delta = new_unrealized - self.prev_unrealized
-        reward += unrealized_delta - self.risk_penalty * abs(new_unrealized)
-
-        self.prev_unrealized = new_unrealized
         self.step_idx = next_idx
+        self.position_age += 1 if self.position_open else 0
+        next_price = float(self.episode_prices[next_idx])
+        portfolio_after = self._portfolio_value(next_price)
+
+        inventory_penalty = self.risk_penalty * abs(self.shares * next_price)
+        reward = (portfolio_after - portfolio_before) - fee_cost - slippage_cost - inventory_penalty
+
         terminated = self.step_idx >= len(self.episode_prices) - 1
         truncated = False
 
-        if terminated and self.position_open:
-            final_realized = self._unrealized_pnl(next_price)
-            reward += final_realized - self.fee_rate
-            self.position_open = False
-            self.capital_usdc = 0.0
-            self.shares = 0.0
-
         info = {
             "action_taken": int(action),
+            "valid_actions": valid_actions,
             "current_price": current_price,
             "next_price": next_price,
-            "realized_component": realized_component,
-            "unrealized_delta": unrealized_delta,
+            "portfolio_before": portfolio_before,
+            "portfolio_after": portfolio_after,
+            "fee_cost": fee_cost,
+            "slippage_cost": slippage_cost,
+            "inventory_penalty": inventory_penalty,
         }
         return self._build_state(), float(reward), terminated, truncated, info
 
