@@ -2,6 +2,7 @@ from pathlib import Path
 from datetime import datetime
 
 import gymnasium as gym
+import requests
 from gymnasium import spaces
 import numpy as np
 import pandas as pd
@@ -207,7 +208,7 @@ class LivePolyTradeEnv(gym.Env):
     toward shadow-mode / live experience collection safely.
     """
 
-    FEATURE_DIM = 12
+    FEATURE_DIM = 16
 
     def __init__(self, execution_client, market_price_service, token_id=None, outcome_side="YES", max_hold_steps=120, order_manager=None, logs_dir="logs"):
         super().__init__()
@@ -228,19 +229,21 @@ class LivePolyTradeEnv(gym.Env):
         self.entry_price = 0.0
         self.shares = 0.0
         self.position_age = 0
+        self.resolution_time = None
         self.last_quote = {}
         self.state = np.zeros(self.FEATURE_DIM, dtype=np.float32)
 
     def attach_order_manager(self, order_manager):
         self.order_manager = order_manager
 
-    def set_market_context(self, token_id, outcome_side="YES", entry_price=None, shares=None, position_open=False, position_age=0):
+    def set_market_context(self, token_id, outcome_side="YES", entry_price=None, shares=None, position_open=False, position_age=0, resolution_time=None):
         self.current_token_id = str(token_id) if token_id else None
         self.outcome_side = str(outcome_side).upper()
         self.entry_price = float(entry_price or 0.0)
         self.shares = float(shares or 0.0)
         self.position_open = bool(position_open)
         self.position_age = int(position_age or 0)
+        self.resolution_time = resolution_time
 
     def _safe_balance(self):
         try:
@@ -261,6 +264,43 @@ class LivePolyTradeEnv(gym.Env):
         except Exception:
             return {}
 
+    def _safe_orderbook_imbalance(self):
+        if not self.current_token_id:
+            return 0.0
+        try:
+            orderbook = self.execution_client.client.get_order_book(self.current_token_id)
+            bids = getattr(orderbook, "bids", [])[:5]
+            asks = getattr(orderbook, "asks", [])[:5]
+            bid_vol = sum(float(getattr(level, "size", 0.0) or 0.0) for level in bids)
+            ask_vol = sum(float(getattr(level, "size", 0.0) or 0.0) for level in asks)
+            total = bid_vol + ask_vol
+            if total <= 0:
+                return 0.0
+            return float((bid_vol - ask_vol) / total)
+        except Exception:
+            return 0.0
+
+    def _safe_time_decay(self):
+        if not self.resolution_time:
+            return 0.0
+        try:
+            resolution_ts = pd.to_datetime(self.resolution_time, utc=True, errors="coerce")
+            if pd.isna(resolution_ts):
+                return 0.0
+            minutes_left = max((resolution_ts - pd.Timestamp.utcnow()).total_seconds() / 60.0, 0.0)
+            return float(minutes_left / (minutes_left + 60.0))
+        except Exception:
+            return 0.0
+
+    def _safe_correlated_price(self):
+        try:
+            response = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": "BTCUSDT"}, timeout=5)
+            if response.ok:
+                return float(response.json().get("price") or 0.0)
+        except Exception:
+            pass
+        return 0.0
+
     def _build_state(self):
         quote = self._safe_quote()
         self.last_quote = quote
@@ -272,6 +312,10 @@ class LivePolyTradeEnv(gym.Env):
         position_value = float(self.shares * midpoint)
         unrealized = float(position_value - (self.shares * self.entry_price if self.position_open else 0.0))
         side_flag = 1.0 if self.outcome_side == "YES" else -1.0
+        orderbook_imbalance = float(self._safe_orderbook_imbalance())
+        time_decay = float(self._safe_time_decay())
+        correlated_btc_price = float(self._safe_correlated_price())
+        correlated_btc_scaled = correlated_btc_price / 100000.0 if correlated_btc_price else 0.0
 
         state = np.array(
             [
@@ -287,6 +331,10 @@ class LivePolyTradeEnv(gym.Env):
                 float(self.position_age / max(1, self.max_hold_steps)),
                 float(side_flag),
                 float(1.0 if self.position_open else 0.0),
+                orderbook_imbalance,
+                time_decay,
+                correlated_btc_scaled,
+                float((best_bid + best_ask) / 2.0 - midpoint if best_bid or best_ask else 0.0),
             ],
             dtype=np.float32,
         )
