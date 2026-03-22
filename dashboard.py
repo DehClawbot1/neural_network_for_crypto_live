@@ -513,6 +513,7 @@ def render_action_board(signals_df, positions_df):
 
 def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df, path_replay_df):
     st.markdown('<div class="section-title">Model / Learning Status</div>', unsafe_allow_html=True)
+    st.caption("This tab shows whether the paper-trading system has enough historical rows to train/evaluate the newer supervised models.")
     weights_status = "🟢 current" if WEIGHTS_FILE.exists() else "🔴 missing"
     st.write(f"**Weights file:** {weights_status}")
 
@@ -550,7 +551,18 @@ def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df,
             st.metric("Progress Ratio", f"{progress_ratio:.2f}")
 
         st.progress(max(0.0, min(1.0, progress_ratio)))
+        if dataset_rows < retrain_threshold:
+            st.warning(
+                f"Not enough historical rows yet for a stronger supervised retrain: {dataset_rows} / {retrain_threshold}. Keep the bot running so it collects more signal history."
+            )
+        else:
+            st.success("Enough rows collected for stronger supervised training/evaluation passes.")
         st.code(last_action, language="text")
+    else:
+        st.info("No model status rows yet. Run `python run_bot.py` for a while so the system can collect signals, markets, and replay data.")
+
+    if supervised_eval_df.empty and time_split_eval_df.empty and path_replay_df.empty:
+        st.info("Learning outputs are still empty because the newer supervised / replay pipeline does not have enough built history yet. This is expected on early runs.")
 
     if not path_replay_df.empty:
         pnl_col = "net_pnl" if "net_pnl" in path_replay_df.columns else "gross_pnl" if "gross_pnl" in path_replay_df.columns else None
