@@ -1,118 +1,71 @@
-from dataclasses import dataclass, asdict
-from datetime import datetime
-from pathlib import Path
-from uuid import uuid4
-
-import pandas as pd
-
-
-@dataclass
-class PaperOrder:
-    order_id: str
-    token_id: str | None
-    condition_id: str | None
-    outcome_side: str | None
-    order_side: str
-    price: float
-    size: float
-    status: str
-    created_at: str
-    note: str | None = None
+import os
+from dataclasses import asdict
 
 
 class ExecutionClient:
     """
-    Paper-only execution client abstraction.
-    Keeps the interface shape clean without enabling live trading.
+    Live-test execution wrapper around Polymarket's py-clob-client.
+    Intended only for the isolated live-test branch.
     """
 
-    def __init__(self, logs_dir="logs"):
-        self.logs_dir = Path(logs_dir)
-        self.logs_dir.mkdir(parents=True, exist_ok=True)
-        self.orders_file = self.logs_dir / "paper_orders.csv"
-        self.trades_file = self.logs_dir / "paper_execution_trades.csv"
+    def __init__(self, host=None, chain_id=None, private_key=None, funder=None, signature_type=None):
+        try:
+            from py_clob_client.client import ClobClient
+            from py_clob_client.clob_types import OrderArgs, OrderType
+            from py_clob_client.order_builder.constants import BUY, SELL
+        except Exception as exc:
+            raise ImportError("py-clob-client is required for live-test execution_client.py") from exc
 
-    def _append(self, path: Path, row: dict):
-        pd.DataFrame([row]).to_csv(path, mode="a", header=not path.exists(), index=False)
+        self.ClobClient = ClobClient
+        self.OrderArgs = OrderArgs
+        self.OrderType = OrderType
+        self.BUY = BUY
+        self.SELL = SELL
 
-    def quote_order(self, token_id=None, condition_id=None, outcome_side=None, order_side="BUY", price=0.5, size=0.0):
-        return {
-            "token_id": token_id,
-            "condition_id": condition_id,
-            "outcome_side": outcome_side,
-            "order_side": order_side,
-            "price": float(price),
-            "size": float(size),
-            "quoted_at": datetime.utcnow().isoformat(),
-            "mode": "paper_only",
-        }
+        self.host = host or os.getenv("POLYMARKET_HOST", "https://clob.polymarket.com")
+        self.chain_id = int(chain_id or os.getenv("POLYMARKET_CHAIN_ID", "137"))
+        self.private_key = private_key or os.getenv("PRIVATE_KEY")
+        self.funder = funder or os.getenv("POLYMARKET_FUNDER")
+        self.signature_type = int(signature_type or os.getenv("POLYMARKET_SIGNATURE_TYPE", "0"))
 
-    def simulate_post_order(self, token_id=None, condition_id=None, outcome_side=None, order_side="BUY", price=0.5, size=0.0, note=None):
-        order = PaperOrder(
-            order_id=str(uuid4()),
-            token_id=token_id,
-            condition_id=condition_id,
-            outcome_side=outcome_side,
-            order_side=order_side,
-            price=float(price),
-            size=float(size),
-            status="OPEN",
-            created_at=datetime.utcnow().isoformat(),
-            note=note,
+        if not self.private_key:
+            raise ValueError("PRIVATE_KEY is required for live-test execution client")
+
+        temp_client = self.ClobClient(self.host, key=self.private_key, chain_id=self.chain_id)
+        self.api_creds = temp_client.create_or_derive_api_creds()
+        self.client = self.ClobClient(
+            self.host,
+            key=self.private_key,
+            chain_id=self.chain_id,
+            creds=self.api_creds,
+            signature_type=self.signature_type,
+            funder=self.funder,
         )
-        self._append(self.orders_file, asdict(order))
-        return asdict(order)
 
-    def simulate_fill_order(self, order_id, fill_price=None):
-        orders = self.list_open_paper_orders()
-        if orders.empty or "order_id" not in orders.columns:
-            return None
-        match = orders[orders["order_id"].astype(str) == str(order_id)]
-        if match.empty:
-            return None
-        order = match.iloc[0].to_dict()
-        fill = {
-            "trade_id": str(uuid4()),
-            "order_id": order_id,
-            "token_id": order.get("token_id"),
-            "condition_id": order.get("condition_id"),
-            "outcome_side": order.get("outcome_side"),
-            "order_side": order.get("order_side"),
-            "price": float(fill_price if fill_price is not None else order.get("price", 0.0)),
-            "size": float(order.get("size", 0.0)),
-            "filled_at": datetime.utcnow().isoformat(),
-            "mode": "paper_only",
-        }
-        self._append(self.trades_file, fill)
-        return fill
+    def create_and_post_order(self, token_id, price, size, side="BUY", order_type="GTC", options=None):
+        side_const = self.BUY if str(side).upper() == "BUY" else self.SELL
+        order_type_const = getattr(self.OrderType, str(order_type).upper())
+        args = self.OrderArgs(token_id=token_id, price=float(price), size=float(size), side=side_const, order_type=order_type_const)
+        return self.client.create_and_post_order(args, options=options or {})
 
-    def simulate_cancel_order(self, order_id):
-        return {
-            "order_id": str(order_id),
-            "status": "CANCELED",
-            "canceled_at": datetime.utcnow().isoformat(),
-            "mode": "paper_only",
-        }
+    def create_and_post_market_order(self, token_id, amount, side="BUY"):
+        side_const = self.BUY if str(side).upper() == "BUY" else self.SELL
+        return self.client.create_and_post_market_order(token_id=token_id, amount=float(amount), side=side_const)
+
+    def cancel_order(self, order_id):
+        return self.client.cancel(order_id)
 
     def get_order(self, order_id):
-        orders = self.list_open_paper_orders()
-        if orders.empty or "order_id" not in orders.columns:
-            return None
-        match = orders[orders["order_id"].astype(str) == str(order_id)]
-        return match.iloc[0].to_dict() if not match.empty else None
+        return self.client.get_order(order_id)
 
-    def list_open_paper_orders(self):
-        if not self.orders_file.exists():
-            return pd.DataFrame()
-        try:
-            return pd.read_csv(self.orders_file, engine="python", on_bad_lines="skip")
-        except Exception:
-            return pd.DataFrame()
+    def get_open_orders(self):
+        return self.client.get_orders()
 
-    def list_paper_trades(self):
-        if not self.trades_file.exists():
-            return pd.DataFrame()
-        try:
-            return pd.read_csv(self.trades_file, engine="python", on_bad_lines="skip")
-        except Exception:
-            return pd.DataFrame()
+    def get_trades(self):
+        return self.client.get_trades()
+
+    def get_balance_allowance(self, asset_type=None):
+        kwargs = {}
+        if asset_type is not None:
+            kwargs["asset_type"] = asset_type
+        return self.client.get_balance_allowance(**kwargs)
