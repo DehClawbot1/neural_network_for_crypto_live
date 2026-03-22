@@ -618,6 +618,45 @@ def render_top_opportunities(signals_df):
                 st.link_button("Open market on Polymarket", market_url, width="stretch")
 
 
+def render_opportunity_table(signals_df):
+    st.markdown('<div class="section-title">Opportunity Ranking Table</div>', unsafe_allow_html=True)
+    if signals_df is None or signals_df.empty:
+        st.info("No signal candidates available yet.")
+        return
+
+    view = signals_df.copy()
+    if "timestamp" in view.columns:
+        ts = pd.to_datetime(view["timestamp"], errors="coerce", utc=True)
+        now = pd.Timestamp.utcnow()
+        view["freshness_age"] = ((now - ts).dt.total_seconds() / 60).round(1)
+
+    rename_map = {
+        "market_title": "market",
+        "outcome_side": "side",
+        "signal_label": "signal label",
+        "confidence": "confidence",
+        "p_tp_before_sl": "p_tp_before_sl",
+        "edge_score": "edge score",
+        "expected_return": "expected return",
+        "wallet_copied": "wallet",
+        "market_last_trade_price": "current price",
+        "recommended_action": "action",
+        "timestamp": "timestamp",
+        "freshness_age": "freshness age",
+    }
+    display = view.rename(columns=rename_map)
+    preferred = ["market", "side", "signal label", "confidence", "p_tp_before_sl", "edge score", "expected return", "wallet", "current price", "action", "timestamp", "freshness age"]
+    cols = [c for c in preferred if c in display.columns]
+    display = display[cols].copy()
+    st.dataframe(display, width="stretch", hide_index=True)
+    st.download_button(
+        "Export opportunity table CSV",
+        data=display.to_csv(index=False).encode("utf-8"),
+        file_name="opportunity_ranking_table.csv",
+        mime="text/csv",
+    )
+
+
 def render_market_tracker(markets_df):
     st.markdown('<div class="section-title">BTC Market Tracker</div>', unsafe_allow_html=True)
     st.caption("Sortable market coverage view for BTC-related markets being tracked by the system.")
@@ -1101,6 +1140,7 @@ def main():
             render_top_opportunities(signals_df)
         with top_right:
             render_factor_matrix(signals_df)
+        render_opportunity_table(signals_df)
         render_action_board(signals_df, positions_df)
 
     with tab3:
