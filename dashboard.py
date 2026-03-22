@@ -424,6 +424,9 @@ def render_action_board(signals_df, positions_df):
         p_tp = float(row.get("p_tp_before_sl", 0.0) or 0.0)
         expected_return = float(row.get("expected_return", 0.0) or 0.0)
         edge = float(row.get("edge_score", 0.0) or 0.0)
+        entry_price_now = float(row.get("current_price", row.get("entry_price", 0.0)) or 0.0)
+        live_market_price = float(row.get("market_last_trade_price", row.get("current_price", 0.0)) or 0.0)
+        price_delta = live_market_price - entry_price_now
         already_open = market in open_markets
 
         if already_open and confidence < 0.50:
@@ -444,6 +447,9 @@ def render_action_board(signals_df, positions_df):
                 "market": market,
                 "side": row.get("side"),
                 "signal": row.get("signal_label"),
+                "entry_price_now": round(entry_price_now, 4),
+                "live_market_price": round(live_market_price, 4),
+                "price_delta": round(price_delta, 4),
                 "p_tp_before_sl": round(p_tp, 3),
                 "expected_return": round(expected_return, 4),
                 "edge_score": round(edge, 4),
