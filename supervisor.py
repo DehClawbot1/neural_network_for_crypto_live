@@ -21,6 +21,7 @@ from retrainer import Retrainer
 from position_manager import PositionManager
 from model_inference import ModelInference
 from stage1_inference import Stage1Inference
+from stage2_temporal_inference import Stage2TemporalInference
 from strategy_layers import EntryRuleLayer
 
 # Configure logging for zero-intervention monitoring
@@ -181,6 +182,7 @@ def main_loop():
     signal_engine = SignalEngine()
     model_inference = ModelInference()
     stage1_inference = Stage1Inference()
+    stage2_inference = Stage2TemporalInference()
     entry_rule = EntryRuleLayer()
     whale_tracker = WhaleTracker()
     alerts_engine = AlertsEngine()
@@ -217,6 +219,12 @@ def main_loop():
             features_df = feature_builder.build_features(signals_df, markets_df)
             inferred_df = model_inference.run(features_df)
             inferred_df = stage1_inference.run(inferred_df)
+            inferred_df = stage2_inference.run(inferred_df)
+            if "temporal_p_tp_before_sl" in inferred_df.columns:
+                inferred_df["p_tp_before_sl"] = inferred_df[["p_tp_before_sl", "temporal_p_tp_before_sl"]].max(axis=1)
+            if "temporal_expected_return" in inferred_df.columns:
+                inferred_df["expected_return"] = inferred_df[["expected_return", "temporal_expected_return"]].mean(axis=1)
+                inferred_df["edge_score"] = inferred_df["p_tp_before_sl"].astype(float) * inferred_df["expected_return"].astype(float)
             scored_df = signal_engine.score_features(inferred_df)
 
             if scored_df.empty:

@@ -7,6 +7,8 @@ from supervised_trainer import SupervisedTrainer
 from evaluator import Evaluator
 from supervised_models import SupervisedModels
 from stage1_models import Stage1Models
+from sequence_feature_builder import SequenceFeatureBuilder
+from stage2_temporal_models import Stage2TemporalModels
 from contract_target_builder import ContractTargetBuilder
 from wallet_alpha_builder import WalletAlphaBuilder
 from walk_forward_evaluator import WalkForwardEvaluator
@@ -45,6 +47,8 @@ def run_research_pipeline():
     WalletAlphaBuilder().write()
     SupervisedModels().train()
     Stage1Models().train()
+    SequenceFeatureBuilder().write()
+    Stage2TemporalModels().train()
     WalkForwardEvaluator().evaluate()
     TimeSplitTrainer().run()
     PathReplaySimulator().write()
