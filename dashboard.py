@@ -649,7 +649,7 @@ def main():
     st.sidebar.caption(f"Alerts file: {ALERTS_FILE}")
 
     signals_df = load_csv(SIGNALS_FILE)
-    trades_df = load_csv(SUMMARY_FILE)
+    trades_df = load_csv(EXECUTION_FILE)
     episode_log_df = load_csv(EPISODE_LOG_FILE)
     markets_df = load_csv(MARKETS_FILE)
     whales_df = load_csv(WHALES_FILE)
