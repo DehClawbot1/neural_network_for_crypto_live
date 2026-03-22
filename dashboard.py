@@ -696,13 +696,57 @@ def render_market_tracker(markets_df):
         st.info("No BTC market snapshots yet.")
         return
 
-    view = markets_df.copy().tail(20)
-    st.dataframe(view[[c for c in ["question", "last_trade_price", "liquidity", "volume", "url"] if c in view.columns]], width="stretch")
+    search_text = st.text_input("Search markets", "", key="markets_search")
+    min_volume = st.number_input("Volume minimum", min_value=0.0, value=0.0, step=100.0)
+    min_liquidity = st.number_input("Liquidity minimum", min_value=0.0, value=0.0, step=100.0)
+    price_min, price_max = st.slider("Price range", 0.0, 1.0, (0.0, 1.0), 0.01)
+    sort_by = st.selectbox("Sort markets by", ["recent movement", "liquidity", "volume"])
 
-    if "last_trade_price" in view.columns and "question" in view.columns:
-        chart_df = view.dropna(subset=["last_trade_price"]).tail(12)
+    view = markets_df.copy()
+    market_col = "question" if "question" in view.columns else "market" if "market" in view.columns else None
+    price_col = "last_trade_price" if "last_trade_price" in view.columns else "current_price" if "current_price" in view.columns else None
+    if search_text and market_col:
+        view = view[view[market_col].astype(str).str.contains(search_text, case=False, na=False)]
+    if "volume" in view.columns:
+        view = view[pd.to_numeric(view["volume"], errors="coerce").fillna(0) >= min_volume]
+    if "liquidity" in view.columns:
+        view = view[pd.to_numeric(view["liquidity"], errors="coerce").fillna(0) >= min_liquidity]
+    if price_col:
+        prices = pd.to_numeric(view[price_col], errors="coerce")
+        view = view[(prices >= price_min) & (prices <= price_max)]
+
+    if sort_by == "liquidity" and "liquidity" in view.columns:
+        view = view.sort_values("liquidity", ascending=False)
+    elif sort_by == "volume" and "volume" in view.columns:
+        view = view.sort_values("volume", ascending=False)
+    elif sort_by == "recent movement":
+        movement_col = "price_change" if "price_change" in view.columns else price_col
+        if movement_col:
+            view = view.sort_values(movement_col, ascending=False)
+
+    tracked_markets = len(view)
+    avg_liquidity = float(pd.to_numeric(view["liquidity"], errors="coerce").fillna(0).mean()) if "liquidity" in view.columns and not view.empty else 0.0
+    highest_volume_market = "-"
+    if "volume" in view.columns and market_col and not view.empty:
+        top_idx = pd.to_numeric(view["volume"], errors="coerce").fillna(0).idxmax()
+        highest_volume_market = str(view.loc[top_idx, market_col]) if top_idx in view.index else "-"
+    recently_updated = 0
+    if "timestamp" in view.columns:
+        ts = pd.to_datetime(view["timestamp"], errors="coerce", utc=True)
+        recently_updated = int((ts >= (pd.Timestamp.utcnow() - pd.Timedelta(minutes=10))).fillna(False).sum())
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Tracked Markets", tracked_markets)
+    c2.metric("Average Liquidity", f"{avg_liquidity:.2f}")
+    c3.metric("Highest Volume Market", highest_volume_market)
+    c4.metric("Price-updated Recently", recently_updated)
+
+    st.dataframe(view[[c for c in [market_col, price_col, "liquidity", "volume", "url"] if c and c in view.columns]], width="stretch", hide_index=True)
+
+    if price_col and market_col:
+        chart_df = view.dropna(subset=[price_col]).head(12)
         if not chart_df.empty:
-            fig = px.bar(chart_df, x="last_trade_price", y="question", orientation="h", title="Current BTC Market Prices")
+            fig = px.bar(chart_df, x=price_col, y=market_col, orientation="h", title="Current BTC Market Prices")
             fig.update_layout(height=420, yaxis={"categoryorder": "total ascending"})
             st.plotly_chart(fig, width="stretch")
 
