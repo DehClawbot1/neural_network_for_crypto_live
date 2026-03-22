@@ -16,7 +16,7 @@ class PositionManager:
     Research/paper-trading only.
     """
 
-    def __init__(self, logs_dir="logs", max_open_positions=10, max_positions_per_token=1, max_positions_per_condition=2, max_positions_per_wallet=2, cooldown_minutes=30):
+    def __init__(self, logs_dir="logs", max_open_positions=10, max_positions_per_token=1, max_positions_per_condition=2, max_positions_per_wallet=2, cooldown_minutes=30, take_profit_price_move=0.25, take_profit_roi_pct=0.25, trailing_stop_pct=0.08, time_stop_minutes=180, max_spread_to_exit=0.05, min_bid_size_to_exit=0):
         self.logs_dir = Path(logs_dir)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.positions_file = self.logs_dir / "positions.csv"
@@ -28,6 +28,12 @@ class PositionManager:
         self.max_positions_per_condition = max_positions_per_condition
         self.max_positions_per_wallet = max_positions_per_wallet
         self.cooldown_minutes = cooldown_minutes
+        self.take_profit_price_move = take_profit_price_move
+        self.take_profit_roi_pct = take_profit_roi_pct
+        self.trailing_stop_pct = trailing_stop_pct
+        self.time_stop_minutes = time_stop_minutes
+        self.max_spread_to_exit = max_spread_to_exit
+        self.min_bid_size_to_exit = min_bid_size_to_exit
 
     def _read_positions(self):
         if not self.positions_file.exists():
@@ -102,6 +108,7 @@ class PositionManager:
             "entry_price": fill_price,
             "current_price": fill_price,
             "market_value": size_usdc,
+            "peak_price": fill_price,
             "fees_paid": 0.0,
             "realized_pnl": 0.0,
             "unrealized_pnl": 0.0,
@@ -142,6 +149,8 @@ class PositionManager:
             positions.at[idx, "current_price"] = current_price
             positions.at[idx, "market_value"] = round(float(market_value), 4)
             positions.at[idx, "unrealized_pnl"] = round(float(unrealized_pnl), 4)
+            prior_peak = float(row.get("peak_price", entry_price) or entry_price)
+            positions.at[idx, "peak_price"] = max(prior_peak, float(current_price))
             if token_id in latest_conf:
                 positions.at[idx, "confidence"] = latest_conf[token_id]
 
@@ -246,14 +255,29 @@ class PositionManager:
             confidence = float(row.get("confidence", 0.0))
             pnl = float(row.get("unrealized_pnl", 0.0))
             market = str(row.get("market", ""))
+            entry_price = float(row.get("entry_price", 0.0) or 0.0)
+            current_price = float(row.get("current_price", entry_price) or entry_price)
+            peak_price = float(row.get("peak_price", entry_price) or entry_price)
+            roi_pct = ((current_price - entry_price) / entry_price) if entry_price else 0.0
+            trailing_floor = peak_price * (1.0 - self.trailing_stop_pct)
+            opened_at = pd.to_datetime(row.get("opened_at"), errors="coerce")
+            minutes_open = (pd.Timestamp.now() - opened_at).total_seconds() / 60.0 if pd.notna(opened_at) else 0.0
+            spread = float(row.get("spread", 0.0) or 0.0)
+            bid_size = float(row.get("bid_size", self.min_bid_size_to_exit) or self.min_bid_size_to_exit)
 
             close_reason = None
-            if pnl >= 5.0:
-                close_reason = "take_profit"
-            elif pnl <= -5.0:
-                close_reason = "stop_loss"
-            elif pnl > 1.0 and confidence < 0.55:
-                close_reason = "profit_protection"
+            if (current_price - entry_price) >= self.take_profit_price_move:
+                close_reason = "take_profit_price_move"
+            elif roi_pct >= self.take_profit_roi_pct:
+                close_reason = "take_profit_roi"
+            elif peak_price > entry_price and current_price <= trailing_floor:
+                close_reason = "trailing_stop"
+            elif minutes_open >= self.time_stop_minutes:
+                close_reason = "time_stop"
+            elif spread > self.max_spread_to_exit:
+                close_reason = None
+            elif bid_size < self.min_bid_size_to_exit:
+                close_reason = None
             elif confidence < 0.45:
                 close_reason = "confidence_drop"
             elif market in alert_markets:
