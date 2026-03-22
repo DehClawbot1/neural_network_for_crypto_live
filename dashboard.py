@@ -1449,6 +1449,18 @@ def render_data_quality_panel(signals_df, trades_df, markets_df, whales_df, aler
     c2.metric("Replay Readiness", replay_ready)
     c3.metric("Target Availability", target_available)
 
+    checklist = [
+        ("contract targets present", Path(LOGS_DIR / "contract_targets.csv").exists()),
+        ("CLOB history present", Path(LOGS_DIR / "clob_price_history.csv").exists()),
+        ("enough closed positions", len(closed_positions_df) > 0),
+        ("enough replay rows", len(path_replay_df) > 0),
+        ("supervised eval present", Path(SUPERVISED_EVAL_FILE).exists()),
+        ("time-split eval present", Path(TIME_SPLIT_EVAL_FILE).exists()),
+    ]
+    st.markdown("**Pipeline Readiness Checklist**")
+    for label, ok in checklist:
+        st.write(f"{'✅' if ok else '❌'} {label}")
+
 
 def render_raw_data(signals_df, trades_df, episode_log_df, markets_df, whales_df, alerts_df, model_status_df, positions_df, closed_positions_df):
     st.caption("Raw data is split into sub-tabs for faster inspection and export-oriented review.")
