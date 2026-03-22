@@ -1286,24 +1286,32 @@ def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df,
     weights_status = "🟢 current" if WEIGHTS_FILE.exists() else "🔴 missing"
     st.write(f"**Weights file:** {weights_status}")
 
-    top1, top2, top3, top4 = st.columns(4)
-    with top1:
-        st.metric("Replay Trades", len(path_replay_df))
-    with top2:
-        acc = "-"
-        if not supervised_eval_df.empty and "accuracy" in supervised_eval_df.columns:
-            acc = f"{float(supervised_eval_df.iloc[-1]['accuracy']):.3f}"
-        st.metric("Supervised Accuracy", acc)
-    with top3:
-        test_acc = "-"
-        if not time_split_eval_df.empty and "test_accuracy" in time_split_eval_df.columns:
-            test_acc = f"{float(time_split_eval_df.iloc[-1]['test_accuracy']):.3f}"
-        st.metric("Time-Split Test Acc", test_acc)
-    with top4:
-        sharpe = "-"
-        if not supervised_eval_df.empty and "sharpe" in supervised_eval_df.columns:
-            sharpe = f"{float(supervised_eval_df.iloc[-1]['sharpe']):.3f}"
-        st.metric("Sharpe-like", sharpe)
+    acc = "-"
+    if not supervised_eval_df.empty and "accuracy" in supervised_eval_df.columns:
+        acc = f"{float(supervised_eval_df.iloc[-1]['accuracy']):.3f}"
+    test_acc = "-"
+    if not time_split_eval_df.empty and "test_accuracy" in time_split_eval_df.columns:
+        test_acc = f"{float(time_split_eval_df.iloc[-1]['test_accuracy']):.3f}"
+    sharpe = "-"
+    if not supervised_eval_df.empty and "sharpe" in supervised_eval_df.columns:
+        sharpe = f"{float(supervised_eval_df.iloc[-1]['sharpe']):.3f}"
+    latest_champion = "-"
+    last_training_date = "-"
+    if not model_registry_df.empty:
+        name_col = "model_name" if "model_name" in model_registry_df.columns else "name" if "name" in model_registry_df.columns else None
+        date_col = "promoted_at" if "promoted_at" in model_registry_df.columns else "trained_at" if "trained_at" in model_registry_df.columns else None
+        if name_col:
+            latest_champion = str(model_registry_df.iloc[-1][name_col])
+        if date_col:
+            last_training_date = str(model_registry_df.iloc[-1][date_col])
+
+    top1, top2, top3, top4, top5, top6 = st.columns(6)
+    top1.metric("Supervised Accuracy", acc)
+    top2.metric("Time-Split Test Acc", test_acc)
+    top3.metric("Sharpe-like", sharpe)
+    top4.metric("Replay Trades", len(path_replay_df))
+    top5.metric("Latest Champion Model", latest_champion)
+    top6.metric("Last Training Date", last_training_date)
 
     if not model_status_df.empty:
         latest = model_status_df.iloc[-1].to_dict()
@@ -1341,6 +1349,16 @@ def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df,
         latest_model = model_registry_df.iloc[-1].to_dict()
         st.markdown("**Current Champion Model**")
         st.code(str(latest_model), language="text")
+
+        date_col = "promoted_at" if "promoted_at" in model_registry_df.columns else "trained_at" if "trained_at" in model_registry_df.columns else None
+        metric_cols = [c for c in ["average_pnl", "score", "accuracy", "sharpe"] if c in model_registry_df.columns]
+        if date_col and metric_cols:
+            history_df = model_registry_df.copy()
+            history_df[date_col] = pd.to_datetime(history_df[date_col], errors="coerce")
+            history_df = history_df.dropna(subset=[date_col])
+            if not history_df.empty:
+                for metric_col in metric_cols[:2]:
+                    st.plotly_chart(px.line(history_df, x=date_col, y=metric_col, title=f"{metric_col} History Over Retrains"), width="stretch")
 
     if not path_replay_df.empty:
         pnl_col = "net_pnl" if "net_pnl" in path_replay_df.columns else "gross_pnl" if "gross_pnl" in path_replay_df.columns else None
