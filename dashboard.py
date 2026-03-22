@@ -61,7 +61,7 @@ def load_execution_history():
     return _cached_execution_history(str(LOGS_DIR), execution_mtime, legacy_mtime)
 
 
-def apply_dashboard_filters(df, market_search="", wallet_search="", min_confidence=0.0, signal_label="All", position_status="All"):
+def apply_dashboard_filters(df, market_search="", wallet_search="", min_confidence=0.0, signal_label="All", position_status="All", side_filter="All", min_edge_score=None, only_open_positions=False, only_actionable=False, time_range_hours=None):
     if df is None or df.empty:
         return df
     out = df.copy()
@@ -74,11 +74,31 @@ def apply_dashboard_filters(df, market_search="", wallet_search="", min_confiden
         if wallet_col:
             out = out[out[wallet_col].astype(str).str.contains(wallet_search, case=False, na=False)]
     if "confidence" in out.columns:
-        out = out[out["confidence"].fillna(0).astype(float) >= float(min_confidence)]
+        out = out[pd.to_numeric(out["confidence"], errors="coerce").fillna(0) >= float(min_confidence)]
+    if min_edge_score is not None and "edge_score" in out.columns:
+        out = out[pd.to_numeric(out["edge_score"], errors="coerce").fillna(0) >= float(min_edge_score)]
     if signal_label != "All" and "signal_label" in out.columns:
         out = out[out["signal_label"].astype(str) == signal_label]
     if position_status != "All" and "status" in out.columns:
         out = out[out["status"].astype(str) == position_status]
+    if side_filter != "All":
+        side_col = "outcome_side" if "outcome_side" in out.columns else "side" if "side" in out.columns else None
+        if side_col:
+            if side_filter == "unknown":
+                out = out[out[side_col].isna() | ~out[side_col].astype(str).str.upper().isin(["YES", "NO"])]
+            else:
+                out = out[out[side_col].astype(str).str.upper() == side_filter]
+    if only_open_positions and "status" in out.columns:
+        out = out[out["status"].astype(str).str.upper() == "OPEN"]
+    if only_actionable and "signal_label" in out.columns:
+        out = out[~out["signal_label"].astype(str).str.upper().isin(["IGNORE", "NO_ACTION"])]
+    if time_range_hours is not None:
+        for col in ["timestamp", "created_at", "updated_at", "opened_at"]:
+            if col in out.columns:
+                ts = pd.to_datetime(out[col], errors="coerce", utc=True)
+                cutoff = pd.Timestamp.utcnow() - pd.Timedelta(hours=float(time_range_hours))
+                out = out[ts >= cutoff]
+                break
     return out
 
 
@@ -974,6 +994,15 @@ def main():
     refresh_seconds = st.sidebar.slider("Auto-refresh hint (seconds)", min_value=5, max_value=120, value=15)
     st.sidebar.caption("Tip: rerun/refresh after a supervisor cycle completes.")
     st.sidebar.write(f"Suggested refresh interval: {refresh_seconds}s")
+    market_search = st.sidebar.text_input("Market search", "")
+    wallet_search = st.sidebar.text_input("Wallet search", "")
+    side_filter = st.sidebar.selectbox("Side filter", ["All", "YES", "NO", "unknown"])
+    signal_label_filter = st.sidebar.selectbox("Signal label filter", ["All", "IGNORE", "LOW-CONFIDENCE WATCH", "STRONG PAPER OPPORTUNITY", "HIGHEST-RANKED PAPER SIGNAL"])
+    min_confidence = st.sidebar.slider("Minimum confidence", 0.0, 1.0, 0.0, 0.01)
+    min_edge_score = st.sidebar.slider("Minimum edge score", -1.0, 1.0, -1.0, 0.01)
+    only_open_positions = st.sidebar.checkbox("Only open positions", value=False)
+    only_actionable = st.sidebar.checkbox("Only actionable signals", value=False)
+    time_range_hours = st.sidebar.selectbox("Time range", [1, 6, 12, 24, 72, 168], index=3)
     st.sidebar.caption(f"Signals file: {SIGNALS_FILE}")
     st.sidebar.caption(f"Execution file: {EXECUTION_FILE}")
     st.sidebar.caption(f"Markets file: {MARKETS_FILE}")
@@ -995,6 +1024,11 @@ def main():
     path_replay_df = load_csv(PATH_REPLAY_FILE)
     backtest_wallet_df = load_csv(BACKTEST_BY_WALLET_FILE)
     model_registry_df = load_csv(MODEL_REGISTRY_FILE)
+
+    signals_df = apply_dashboard_filters(signals_df, market_search=market_search, wallet_search=wallet_search, min_confidence=min_confidence, signal_label=signal_label_filter, side_filter=side_filter, min_edge_score=min_edge_score, only_actionable=only_actionable, time_range_hours=time_range_hours)
+    trades_df = apply_dashboard_filters(trades_df, market_search=market_search, wallet_search=wallet_search, min_confidence=min_confidence, signal_label=signal_label_filter, side_filter=side_filter, min_edge_score=min_edge_score, only_actionable=only_actionable, time_range_hours=time_range_hours)
+    positions_df = apply_dashboard_filters(positions_df, market_search=market_search, wallet_search=wallet_search, min_confidence=min_confidence, signal_label=signal_label_filter, position_status="OPEN" if only_open_positions else "All", side_filter=side_filter, min_edge_score=min_edge_score, only_open_positions=only_open_positions, only_actionable=only_actionable, time_range_hours=time_range_hours)
+    closed_positions_df = apply_dashboard_filters(closed_positions_df, market_search=market_search, wallet_search=wallet_search, min_confidence=min_confidence, signal_label=signal_label_filter, side_filter=side_filter, min_edge_score=min_edge_score, only_actionable=only_actionable, time_range_hours=time_range_hours)
 
     st.caption("Quick guide: System Status = health and performance, Signals = ranked opportunities, Positions = paper trade state and PnL, Markets = market, whale, and alert context, Models = learning outputs and raw data.")
 
