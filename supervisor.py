@@ -299,6 +299,15 @@ def main_loop():
             for _, row in scored_df.iterrows():
                 signal_row = row.to_dict()
                 token_id = str(signal_row.get("token_id", "") or "")
+                entry_intent = str(signal_row.get("entry_intent", "OPEN_LONG") or "OPEN_LONG").upper()
+
+                if entry_intent == "CLOSE_LONG":
+                    if token_id and token_id in open_token_ids:
+                        matching = open_positions_df[open_positions_df.get("token_id", pd.Series(dtype=str)).astype(str) == token_id]
+                        if not matching.empty:
+                            position_manager.close_position(matching.iloc[0].to_dict(), reason="whale_sell_exit")
+                    continue
+
                 if token_id and token_id in open_token_ids:
                     continue
 

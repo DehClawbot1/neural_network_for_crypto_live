@@ -101,6 +101,8 @@ def get_recent_btc_trades(wallet_address, limit=50, market_universe=None):
             if not mapped_to_btc and not keyword_fallback:
                 continue
 
+            order_side = str(trade.get("side", "BUY") or "BUY").upper()
+            entry_intent = "OPEN_LONG" if order_side == "BUY" else "CLOSE_LONG"
             signals.append(
                 {
                     "trade_id": trade.get("id"),
@@ -110,10 +112,10 @@ def get_recent_btc_trades(wallet_address, limit=50, market_universe=None):
                     "market_slug": slug,
                     "token_id": trade.get("tokenId"),
                     "condition_id": trade.get("conditionId"),
-                    "order_side": trade.get("side"),
-                    "trade_side": trade.get("side"),
+                    "order_side": order_side,
+                    "trade_side": order_side,
                     "outcome_side": trade.get("outcome"),
-                    "entry_intent": "OPEN_LONG",
+                    "entry_intent": entry_intent,
                     "side": trade.get("outcome"),
                     "price": float(trade.get("price", 0)),
                     "size": float(trade.get("size", 0)),
