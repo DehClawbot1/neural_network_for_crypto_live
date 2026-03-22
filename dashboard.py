@@ -790,6 +790,38 @@ def render_simulated_decisions(positions_df, closed_positions_df):
     st.dataframe(decisions_df.sort_values(by="profit_usdc", ascending=False), width="stretch")
 
 
+def render_positions_pnl_summary(positions_df, closed_positions_df):
+    st.markdown('<div class="section-title">PnL Summary</div>', unsafe_allow_html=True)
+
+    open_positions = len(positions_df) if positions_df is not None else 0
+    closed_positions = len(closed_positions_df) if closed_positions_df is not None else 0
+    realized_col = "net_realized_pnl" if "net_realized_pnl" in closed_positions_df.columns else "realized_pnl" if "realized_pnl" in closed_positions_df.columns else None
+    unrealized_col = "unrealized_pnl" if "unrealized_pnl" in positions_df.columns else None
+
+    realized_pnl = float(pd.to_numeric(closed_positions_df[realized_col], errors="coerce").fillna(0).sum()) if realized_col and not closed_positions_df.empty else 0.0
+    unrealized_pnl = float(pd.to_numeric(positions_df[unrealized_col], errors="coerce").fillna(0).sum()) if unrealized_col and not positions_df.empty else 0.0
+    win_rate = "-"
+    avg_trade_return = "-"
+    if realized_col and not closed_positions_df.empty:
+        pnl = pd.to_numeric(closed_positions_df[realized_col], errors="coerce").fillna(0)
+        if len(pnl) > 0:
+            win_rate = f"{float((pnl > 0).mean() * 100):.1f}%"
+            avg_trade_return = f"{float(pnl.mean()):.2f}"
+
+    cols = st.columns(6)
+    metrics = [
+        ("Open Positions", open_positions),
+        ("Closed Positions", closed_positions),
+        ("Realized PnL", f"{realized_pnl:.2f}"),
+        ("Unrealized PnL", f"{unrealized_pnl:.2f}"),
+        ("Win Rate", win_rate),
+        ("Average Trade Return", avg_trade_return),
+    ]
+    for idx, (label, value) in enumerate(metrics):
+        with cols[idx]:
+            st.metric(label, value)
+
+
 def render_positions(positions_df, closed_positions_df):
     st.markdown('<div class="section-title">Paper Positions</div>', unsafe_allow_html=True)
     c1, c2 = st.columns(2)
@@ -1164,6 +1196,7 @@ def main():
         render_action_board(signals_df, positions_df)
 
     with tab3:
+        render_positions_pnl_summary(positions_df, closed_positions_df)
         render_simulated_decisions(positions_df, closed_positions_df)
         render_positions(positions_df, closed_positions_df)
         render_best_trades(closed_positions_df, path_replay_df)
