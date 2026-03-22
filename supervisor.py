@@ -249,8 +249,12 @@ def main_loop():
                 time.sleep(60)
                 continue
 
-            sort_cols = [c for c in ["edge_score", "p_tp_before_sl", "confidence", "normalized_trade_size"] if c in scored_df.columns]
+            sort_cols = [c for c in ["risk_adjusted_ev", "entry_ev", "execution_quality_score", "edge_score", "p_tp_before_sl", "confidence", "normalized_trade_size"] if c in scored_df.columns]
             scored_df = scored_df.sort_values(by=sort_cols, ascending=[False] * len(sort_cols))
+
+            # Suppress duplicate entries / repeated token spam
+            if "token_id" in scored_df.columns:
+                scored_df = scored_df.drop_duplicates(subset=["token_id"], keep="first")
 
             # 3. Log top-ranked paper opportunities (research output, not betting advice)
             top_n = min(5, len(scored_df))
