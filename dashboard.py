@@ -373,6 +373,7 @@ def render_simulated_decisions(positions_df, closed_positions_df):
                     "entry_price": row.get("entry_price"),
                     "live_price": row.get("current_price"),
                     "shares": row.get("shares"),
+                    "cost_basis_usdc": (float(row.get("shares", 0.0) or 0.0) * float(row.get("entry_price", 0.0) or 0.0)),
                     "market_value": row.get("market_value"),
                     "realized_pnl": row.get("realized_pnl", 0.0),
                     "profit_usdc": row.get("unrealized_pnl", 0.0),
@@ -503,6 +504,8 @@ def render_action_board(signals_df, positions_df):
         position_row = positions_lookup.get(market, {})
         open_pnl = float(position_row.get("unrealized_pnl", 0.0) or 0.0) if position_row else 0.0
         shares = float(position_row.get("shares", 0.0) or 0.0) if position_row else 0.0
+        cost_basis = shares * entry_price_now if shares else 0.0
+        market_value = shares * live_market_price if shares else 0.0
         already_open = market in open_markets
 
         if already_open and confidence < 0.50:
@@ -527,6 +530,8 @@ def render_action_board(signals_df, positions_df):
                 "live_market_price": round(live_market_price, 4),
                 "price_delta": round(price_delta, 4),
                 "shares": round(shares, 4),
+                "cost_basis_usdc": round(cost_basis, 4),
+                "market_value_usdc": round(market_value, 4),
                 "paper_profit_usdc": round(open_pnl, 4),
                 "p_tp_before_sl": round(p_tp, 3),
                 "expected_return": round(expected_return, 4),
