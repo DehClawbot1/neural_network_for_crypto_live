@@ -17,6 +17,12 @@ def prompt_runtime_config():
             os.environ["POLYMARKET_FUNDER"] = input("POLYMARKET_FUNDER: ").strip()
         if not os.getenv("PRIVATE_KEY"):
             os.environ["PRIVATE_KEY"] = getpass("PRIVATE_KEY: ").strip()
+        if not os.getenv("POLYMARKET_API_KEY"):
+            os.environ["POLYMARKET_API_KEY"] = input("POLYMARKET_API_KEY (optional, press enter to skip): ").strip()
+        if not os.getenv("POLYMARKET_API_SECRET"):
+            os.environ["POLYMARKET_API_SECRET"] = getpass("POLYMARKET_API_SECRET (optional): ").strip()
+        if not os.getenv("POLYMARKET_API_PASSPHRASE"):
+            os.environ["POLYMARKET_API_PASSPHRASE"] = getpass("POLYMARKET_API_PASSPHRASE (optional): ").strip()
     return trading_mode
 
 
@@ -38,6 +44,9 @@ def validate_environment():
             f.write("# For live-test branch only:\n")
             f.write("# PRIVATE_KEY=\n")
             f.write("# POLYMARKET_FUNDER=\n")
+            f.write("# POLYMARKET_API_KEY=\n")
+            f.write("# POLYMARKET_API_SECRET=\n")
+            f.write("# POLYMARKET_API_PASSPHRASE=\n")
         logging.info("[+] Starter .env template created. Please review variables.")
         return False
 
@@ -56,8 +65,14 @@ def validate_environment():
     if trading_mode == "live":
         private_key = os.getenv("PRIVATE_KEY")
         funder = os.getenv("POLYMARKET_FUNDER")
+        api_key = os.getenv("POLYMARKET_API_KEY")
+        api_secret = os.getenv("POLYMARKET_API_SECRET")
+        api_passphrase = os.getenv("POLYMARKET_API_PASSPHRASE")
         if private_key and funder:
-            logging.info("[+] Environment validated for live-test mode.")
+            if api_key and api_secret and api_passphrase:
+                logging.info("[+] Environment validated for live-test mode with stored L2 API credentials.")
+            else:
+                logging.warning("[!] Live-test config is missing stored L2 API credentials. The client may derive them at startup as a fallback.")
             return True
         logging.error("[-] Invalid live config. PRIVATE_KEY and POLYMARKET_FUNDER are required.")
         return False

@@ -27,12 +27,23 @@ class ExecutionClient:
         self.private_key = private_key or os.getenv("PRIVATE_KEY")
         self.funder = funder or os.getenv("POLYMARKET_FUNDER")
         self.signature_type = int(signature_type or os.getenv("POLYMARKET_SIGNATURE_TYPE", "0"))
+        self.api_key = os.getenv("POLYMARKET_API_KEY")
+        self.api_secret = os.getenv("POLYMARKET_API_SECRET")
+        self.api_passphrase = os.getenv("POLYMARKET_API_PASSPHRASE")
 
         if not self.private_key:
             raise ValueError("PRIVATE_KEY is required for live-test execution client")
 
-        temp_client = self.ClobClient(self.host, key=self.private_key, chain_id=self.chain_id)
-        self.api_creds = temp_client.create_or_derive_api_creds()
+        if self.api_key and self.api_secret and self.api_passphrase:
+            self.api_creds = {
+                "key": self.api_key,
+                "secret": self.api_secret,
+                "passphrase": self.api_passphrase,
+            }
+        else:
+            temp_client = self.ClobClient(self.host, key=self.private_key, chain_id=self.chain_id)
+            self.api_creds = temp_client.create_or_derive_api_creds()
+
         self.client = self.ClobClient(
             self.host,
             key=self.private_key,
