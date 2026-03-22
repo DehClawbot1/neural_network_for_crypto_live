@@ -16,13 +16,18 @@ class PositionManager:
     Research/paper-trading only.
     """
 
-    def __init__(self, logs_dir="logs"):
+    def __init__(self, logs_dir="logs", max_open_positions=10, max_positions_per_token=1, max_positions_per_condition=2, max_positions_per_wallet=2, cooldown_minutes=30):
         self.logs_dir = Path(logs_dir)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.positions_file = self.logs_dir / "positions.csv"
         self.closed_file = self.logs_dir / "closed_positions.csv"
         self.episode_file = self.logs_dir / "episode_log.csv"
         self.price_service = MarketPriceService()
+        self.max_open_positions = max_open_positions
+        self.max_positions_per_token = max_positions_per_token
+        self.max_positions_per_condition = max_positions_per_condition
+        self.max_positions_per_wallet = max_positions_per_wallet
+        self.cooldown_minutes = cooldown_minutes
 
     def _read_positions(self):
         if not self.positions_file.exists():
@@ -41,11 +46,46 @@ class PositionManager:
         outcome_side = str(signal_row.get("outcome_side", signal_row.get("side", "UNKNOWN"))).upper()
         trade_side = str(signal_row.get("trade_side", "BUY")).upper()
         wallet = signal_row.get("trader_wallet", signal_row.get("wallet_copied", "Unknown"))
+        token_id = str(signal_row.get("token_id", "") or "")
+        condition_id = str(signal_row.get("condition_id", "") or "")
         shares = PNLEngine.shares_from_capital(size_usdc, fill_price)
 
+        if len(df) >= self.max_open_positions:
+            logging.info("Position rejected: max open positions reached.")
+            return False
+        if token_id and "token_id" in df.columns and (df["token_id"].astype(str) == token_id).sum() >= self.max_positions_per_token:
+            logging.info("Position rejected: token exposure cap reached for %s", token_id)
+            return False
+        if condition_id and "condition_id" in df.columns and (df["condition_id"].astype(str) == condition_id).sum() >= self.max_positions_per_condition:
+            logging.info("Position rejected: condition exposure cap reached for %s", condition_id)
+            return False
+        if "wallet_copied" in df.columns and (df["wallet_copied"].astype(str) == str(wallet)).sum() >= self.max_positions_per_wallet:
+            logging.info("Position rejected: wallet exposure cap reached for %s", wallet)
+            return False
+
+        signal_bucket = str(signal_row.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M")))[:16]
+        idempotency_key = f"{signal_bucket}|{token_id}|{wallet}|ENTER"
+        if "idempotency_key" in df.columns and (df["idempotency_key"].astype(str) == idempotency_key).any():
+            logging.info("Position rejected: duplicate signal idempotency key %s", idempotency_key)
+            return False
+
+        recent_closed = self.get_closed_positions()
+        if not recent_closed.empty and token_id and "token_id" in recent_closed.columns and "closed_at" in recent_closed.columns:
+            recent_closed["closed_at"] = pd.to_datetime(recent_closed["closed_at"], errors="coerce")
+            recent_token = recent_closed[recent_closed["token_id"].astype(str) == token_id].sort_values("closed_at")
+            if not recent_token.empty:
+                last_closed = recent_token.iloc[-1].get("closed_at")
+                if pd.notna(last_closed):
+                    minutes_since = (pd.Timestamp.now() - last_closed).total_seconds() / 60.0
+                    if minutes_since < self.cooldown_minutes:
+                        logging.info("Position rejected: token cooldown active for %s", token_id)
+                        return False
+
+        opened_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         record = {
             "position_id": f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
-            "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "idempotency_key": idempotency_key,
+            "opened_at": opened_at,
             "market": market,
             "condition_id": signal_row.get("condition_id"),
             "token_id": signal_row.get("token_id"),
@@ -69,6 +109,7 @@ class PositionManager:
         df = pd.concat([df, pd.DataFrame([record])], ignore_index=True)
         self._write_positions(df)
         logging.info("Opened paper position on %s", market)
+        return True
 
     def update_mark_to_market(self, scored_df: pd.DataFrame | None = None):
         positions = self._read_positions()
