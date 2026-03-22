@@ -223,63 +223,141 @@ def render_header():
 
 def render_overview(signals_df, trades_df, markets_df, alerts_df, positions_df, closed_positions_df):
     st.markdown('<div class="section-title">Overview</div>', unsafe_allow_html=True)
-    c1, c2, c3, c4 = st.columns(4)
 
-    top_conf = "-"
-    avg_top10_conf = "-"
-    signals_above_threshold = 0
-    if not signals_df.empty and "confidence" in signals_df.columns:
+    now = pd.Timestamp.utcnow()
+    stale_threshold_seconds = 120
+
+    def _find_timestamp_col(df):
+        for col in ["timestamp", "created_at", "updated_at", "logged_at", "closed_at", "opened_at"]:
+            if col in df.columns:
+                return col
+        return None
+
+    def _series_datetime(df, preferred=None):
+        if df is None or df.empty:
+            return pd.Series(dtype="datetime64[ns, UTC]")
+        candidates = []
+        if preferred:
+            candidates.extend(preferred)
+        candidates.extend(["timestamp", "created_at", "updated_at", "logged_at", "closed_at", "opened_at"])
+        seen = set()
+        for col in candidates:
+            if col in seen:
+                continue
+            seen.add(col)
+            if col in df.columns:
+                series = pd.to_datetime(df[col], errors="coerce", utc=True)
+                if series.notna().any():
+                    return series
+        return pd.Series(dtype="datetime64[ns, UTC]")
+
+    def _last_age_seconds(df, preferred=None):
+        ts = _series_datetime(df, preferred)
+        if ts.empty or not ts.notna().any():
+            return None
+        latest = ts.dropna().max()
+        age = (now - latest).total_seconds()
+        return max(0, int(age))
+
+    signal_ts = _series_datetime(signals_df)
+    signals_last_60m = 0
+    latest_conf_max = "-"
+    if not signals_df.empty and signal_ts.notna().any():
+        recent_mask = signal_ts >= (now - pd.Timedelta(minutes=60))
+        signals_last_60m = int(recent_mask.fillna(False).sum())
+        if "confidence" in signals_df.columns:
+            try:
+                conf_series = pd.to_numeric(signals_df.loc[recent_mask, "confidence"], errors="coerce").dropna()
+                if conf_series.empty:
+                    conf_series = pd.to_numeric(signals_df["confidence"], errors="coerce").dropna()
+                if not conf_series.empty:
+                    latest_conf_max = f"{float(conf_series.max()):.2f}"
+            except Exception:
+                pass
+    elif not signals_df.empty and "confidence" in signals_df.columns:
         try:
-            top_conf = f"{float(signals_df['confidence'].max()):.2f}"
-            avg_top10_conf = f"{float(signals_df['confidence'].astype(float).nlargest(min(10, len(signals_df))).mean()):.2f}"
-            signals_above_threshold = int((signals_df['confidence'].astype(float) >= 0.62).sum())
+            conf_series = pd.to_numeric(signals_df["confidence"], errors="coerce").dropna()
+            if not conf_series.empty:
+                latest_conf_max = f"{float(conf_series.max()):.2f}"
         except Exception:
             pass
 
-    tracked_market_count = len(markets_df)
-    if not markets_df.empty and "market_id" in markets_df.columns:
-        tracked_market_count = markets_df["market_id"].nunique()
-
-    open_positions = len(positions_df)
-    closed_positions = len(closed_positions_df)
-    realized_pnl = 0.0
+    open_positions = len(positions_df) if positions_df is not None else 0
     unrealized_pnl = 0.0
-    win_rate = "-"
     if not positions_df.empty and "unrealized_pnl" in positions_df.columns:
         unrealized_pnl = float(pd.to_numeric(positions_df["unrealized_pnl"], errors="coerce").fillna(0).sum())
+
+    realized_pnl_today = 0.0
+    win_rate_today = "-"
     if not closed_positions_df.empty:
         pnl_col = "net_realized_pnl" if "net_realized_pnl" in closed_positions_df.columns else "realized_pnl" if "realized_pnl" in closed_positions_df.columns else None
-        if pnl_col:
-            pnl_series = pd.to_numeric(closed_positions_df[pnl_col], errors="coerce").fillna(0)
-            realized_pnl = float(pnl_series.sum())
+        closed_ts = _series_datetime(closed_positions_df, preferred=["closed_at", "timestamp", "updated_at"])
+        closed_today = closed_positions_df.copy()
+        if not closed_ts.empty and closed_ts.notna().any():
+            today_mask = closed_ts.dt.date == now.date()
+            closed_today = closed_positions_df.loc[today_mask.fillna(False)].copy()
+        if pnl_col and not closed_today.empty:
+            pnl_series = pd.to_numeric(closed_today[pnl_col], errors="coerce").fillna(0)
+            realized_pnl_today = float(pnl_series.sum())
             if len(pnl_series) > 0:
-                win_rate = f"{float((pnl_series > 0).mean() * 100):.1f}%"
+                win_rate_today = f"{float((pnl_series > 0).mean() * 100):.1f}%"
 
-    with c1:
-        st.markdown('<div class="overview-card">', unsafe_allow_html=True)
-        st.metric("Open Positions", open_positions)
-        st.metric("Closed Trades", closed_positions)
-        st.markdown('</div>', unsafe_allow_html=True)
-    with c2:
-        st.markdown('<div class="overview-card">', unsafe_allow_html=True)
-        st.metric("Unrealized PnL", f"{unrealized_pnl:.2f}")
-        st.metric("Realized PnL", f"{realized_pnl:.2f}")
-        st.markdown('</div>', unsafe_allow_html=True)
-    with c3:
-        st.markdown('<div class="overview-card">', unsafe_allow_html=True)
-        st.metric("Win Rate", win_rate)
-        st.metric("Avg Top-10 Confidence", avg_top10_conf)
-        st.markdown('</div>', unsafe_allow_html=True)
-    with c4:
-        st.markdown('<div class="overview-card">', unsafe_allow_html=True)
-        st.metric("Tracked BTC Markets", tracked_market_count)
-        st.metric("Signals ≥ 0.62", signals_above_threshold)
-        st.markdown('</div>', unsafe_allow_html=True)
+    critical_alerts_open = 0
+    if not alerts_df.empty:
+        severity_col = next((c for c in ["severity", "level", "priority", "alert_level"] if c in alerts_df.columns), None)
+        status_col = next((c for c in ["status", "state", "resolved"] if c in alerts_df.columns), None)
+        alert_view = alerts_df.copy()
+        if severity_col:
+            sev = alert_view[severity_col].astype(str).str.lower()
+            alert_view = alert_view[sev.str.contains("critical", na=False)]
+        if status_col and not alert_view.empty:
+            if status_col == "resolved":
+                resolved = alert_view[status_col].astype(str).str.lower().isin(["true", "1", "yes"])
+                alert_view = alert_view[~resolved]
+            else:
+                status = alert_view[status_col].astype(str).str.lower()
+                alert_view = alert_view[~status.isin(["closed", "resolved", "done"])]
+        critical_alerts_open = len(alert_view)
 
-    latest_signal_ts = signals_df["timestamp"].dropna().iloc[-1] if (not signals_df.empty and "timestamp" in signals_df.columns and not signals_df["timestamp"].dropna().empty) else "-"
-    latest_market_ts = markets_df["timestamp"].dropna().iloc[-1] if (not markets_df.empty and "timestamp" in markets_df.columns and not markets_df["timestamp"].dropna().empty) else "-"
-    latest_alert_ts = alerts_df["timestamp"].dropna().iloc[-1] if (not alerts_df.empty and "timestamp" in alerts_df.columns and not alerts_df["timestamp"].dropna().empty) else "-"
-    st.caption(f"Highest confidence: {top_conf} | Signals: {latest_signal_ts} | Markets: {latest_market_ts} | Alerts: {latest_alert_ts}")
+    markets_actively_watched = len(markets_df)
+    if not markets_df.empty and "market_id" in markets_df.columns:
+        markets_actively_watched = int(markets_df["market_id"].nunique())
+
+    feed_ages = {
+        "signals": _last_age_seconds(signals_df),
+        "markets": _last_age_seconds(markets_df),
+        "alerts": _last_age_seconds(alerts_df),
+        "positions": _last_age_seconds(positions_df, preferred=["updated_at", "timestamp", "opened_at"]),
+    }
+    available_feed_ages = [age for age in feed_ages.values() if age is not None]
+    freshness_age_max = max(available_feed_ages) if available_feed_ages else None
+    stale_feeds = sum(1 for age in available_feed_ages if age > stale_threshold_seconds)
+
+    rows = [
+        ("Signals generated (last 60 min)", signals_last_60m),
+        ("Open paper positions", open_positions),
+        ("Realized PnL today", f"{realized_pnl_today:.2f}"),
+        ("Unrealized PnL now", f"{unrealized_pnl:.2f}"),
+        ("Critical alerts open", critical_alerts_open),
+        ("Freshness age (max seconds)", freshness_age_max if freshness_age_max is not None else "-"),
+        ("Win rate today", win_rate_today),
+        ("Number of stale feeds", stale_feeds),
+        ("Latest confidence max", latest_conf_max),
+        ("Markets actively watched", markets_actively_watched),
+    ]
+
+    cols = st.columns(5)
+    for idx, (label, value) in enumerate(rows):
+        with cols[idx % 5]:
+            st.markdown('<div class="overview-card">', unsafe_allow_html=True)
+            st.metric(label, value)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+    freshness_bits = " | ".join(
+        f"{name}: {age}s" if age is not None else f"{name}: -"
+        for name, age in feed_ages.items()
+    )
+    st.caption(f"Feed freshness — {freshness_bits} | stale threshold: {stale_threshold_seconds}s")
 
 
 def badge_class(label: str) -> str:
