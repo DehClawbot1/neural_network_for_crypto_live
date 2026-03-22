@@ -18,6 +18,8 @@ WEIGHTS_FILE = BASE_DIR / "weights" / "ppo_polytrader.zip"
 TRADER_ANALYTICS_FILE = LOGS_DIR / "trader_analytics.csv"
 BACKTEST_FILE = LOGS_DIR / "backtest_summary.csv"
 DATASET_FILE = LOGS_DIR / "historical_dataset.csv"
+POSITIONS_FILE = LOGS_DIR / "positions.csv"
+CLOSED_POSITIONS_FILE = LOGS_DIR / "closed_positions.csv"
 
 st.set_page_config(page_title="Neural Network for Crypto", page_icon="📈", layout="wide")
 
@@ -252,6 +254,23 @@ def render_alerts(alerts_df):
     st.dataframe(alerts_df.tail(20), width="stretch")
 
 
+def render_positions(positions_df, closed_positions_df):
+    st.markdown('<div class="section-title">Paper Positions</div>', unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Open Positions**")
+        if positions_df.empty:
+            st.info("No open paper positions.")
+        else:
+            st.dataframe(positions_df.tail(20), width="stretch")
+    with c2:
+        st.markdown("**Closed Positions**")
+        if closed_positions_df.empty:
+            st.info("No closed paper positions yet.")
+        else:
+            st.dataframe(closed_positions_df.tail(20), width="stretch")
+
+
 def render_paper_trades(trades_df):
     st.markdown('<div class="section-title">Paper Trade Ledger</div>', unsafe_allow_html=True)
     if trades_df.empty:
@@ -297,7 +316,7 @@ def render_model_status(model_status_df):
     st.write(f"**Last action:** {latest.get('last_action', 'Unknown')}")
 
 
-def render_raw_data(signals_df, trades_df, markets_df, whales_df, alerts_df, model_status_df):
+def render_raw_data(signals_df, trades_df, markets_df, whales_df, alerts_df, model_status_df, positions_df, closed_positions_df):
     with st.expander("Raw data"):
         st.markdown("**Signals CSV**")
         st.dataframe(signals_df, width="stretch")
@@ -311,6 +330,10 @@ def render_raw_data(signals_df, trades_df, markets_df, whales_df, alerts_df, mod
         st.dataframe(alerts_df, width="stretch")
         st.markdown("**Model Status CSV**")
         st.dataframe(model_status_df, width="stretch")
+        st.markdown("**Open Positions CSV**")
+        st.dataframe(positions_df, width="stretch")
+        st.markdown("**Closed Positions CSV**")
+        st.dataframe(closed_positions_df, width="stretch")
 
 
 def main():
@@ -332,6 +355,8 @@ def main():
     whales_df = load_csv(WHALES_FILE)
     alerts_df = load_csv(ALERTS_FILE)
     model_status_df = load_csv(MODEL_STATUS_FILE)
+    positions_df = load_csv(POSITIONS_FILE)
+    closed_positions_df = load_csv(CLOSED_POSITIONS_FILE)
 
     render_overview(signals_df, trades_df, markets_df, alerts_df)
 
@@ -346,6 +371,7 @@ def main():
         with top_right:
             render_factor_matrix(signals_df)
 
+        render_positions(positions_df, closed_positions_df)
         bottom_left, bottom_right = st.columns([1, 1])
         with bottom_left:
             render_paper_trades(trades_df)
@@ -364,7 +390,7 @@ def main():
         render_model_status(model_status_df)
 
     with tab4:
-        render_raw_data(signals_df, trades_df, markets_df, whales_df, alerts_df, model_status_df)
+        render_raw_data(signals_df, trades_df, markets_df, whales_df, alerts_df, model_status_df, positions_df, closed_positions_df)
 
 
 if __name__ == "__main__":

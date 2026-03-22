@@ -18,6 +18,7 @@ from backtester import StrategyBacktester
 from simulation_engine import SimulationEngine
 from autonomous_monitor import AutonomousMonitor
 from retrainer import Retrainer
+from position_manager import PositionManager
 
 # Configure logging for zero-intervention monitoring
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -166,6 +167,7 @@ def main_loop():
     dataset_builder = HistoricalDatasetBuilder()
     backtester = StrategyBacktester()
     simulation_engine = SimulationEngine()
+    position_manager = PositionManager()
     autonomous_monitor = AutonomousMonitor()
     retrainer = Retrainer()
     previous_markets_df = None
@@ -239,6 +241,7 @@ def main_loop():
                     size = 10 if action_val == 1 else 50
                     fill_price = min(0.99, float(signal_row.get("current_price", 0.5)) + 0.01)
                     simulation_engine.open_position(signal_row, size_usdc=size, fill_price=fill_price)
+                    position_manager.open_position(signal_row, size_usdc=size, fill_price=fill_price)
 
             # 5. Phase 2 analytics outputs
             trades_df = pd.read_csv(SUMMARY_FILE) if os.path.exists(SUMMARY_FILE) else pd.DataFrame()
@@ -248,7 +251,9 @@ def main_loop():
             dataset_builder.write()
 
             alerts_df = pd.read_csv("logs/alerts.csv") if os.path.exists("logs/alerts.csv") else pd.DataFrame()
-            open_positions_df = simulation_engine.summarize_open_positions()
+            position_manager.update_mark_to_market(scored_df)
+            position_manager.apply_exit_rules(alerts_df)
+            open_positions_df = position_manager.get_open_positions()
             autonomous_monitor.write_status(trader_signals_df, trades_df, alerts_df, open_positions_df)
             retrainer.maybe_retrain()
 
