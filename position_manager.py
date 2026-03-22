@@ -35,7 +35,8 @@ class PositionManager:
     def open_position(self, signal_row: dict, size_usdc: float, fill_price: float):
         df = self._read_positions()
         market = signal_row.get("market_title", signal_row.get("market", "Unknown Market"))
-        outcome_side = str(signal_row.get("side", signal_row.get("outcome_side", "UNKNOWN"))).upper()
+        outcome_side = str(signal_row.get("outcome_side", signal_row.get("side", "UNKNOWN"))).upper()
+        trade_side = str(signal_row.get("trade_side", "BUY")).upper()
         wallet = signal_row.get("trader_wallet", signal_row.get("wallet_copied", "Unknown"))
         shares = PNLEngine.shares_from_capital(size_usdc, fill_price)
 
@@ -43,6 +44,7 @@ class PositionManager:
             "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "market": market,
             "wallet_copied": wallet,
+            "trade_side": trade_side,
             "outcome_side": outcome_side,
             "position_action": "ENTER",
             "signal_label": signal_row.get("signal_label", "UNKNOWN"),

@@ -78,9 +78,11 @@ def get_recent_btc_trades(wallet_address, limit=50):
                     {
                         "trader_wallet": wallet_address,
                         "market_title": title,
+                        "token_id": trade.get("tokenId"),
                         "condition_id": trade.get("conditionId"),
-                        "outcome": trade.get("outcome"),
-                        "side": trade.get("side"),
+                        "trade_side": trade.get("side"),
+                        "outcome_side": trade.get("outcome"),
+                        "side": trade.get("outcome"),
                         "price": float(trade.get("price", 0)),
                         "size": float(trade.get("size", 0)),
                         "timestamp": trade.get("timestamp"),
