@@ -174,6 +174,20 @@ class PositionManager:
             return pd.DataFrame()
 
         row = positions[mask].iloc[0].to_dict()
+        token_id = str(row.get("token_id", "") or "")
+        live_price = self.price_service.get_latest_price(token_id) if token_id else None
+        exit_price = float(live_price if live_price is not None else row.get("current_price", row.get("entry_price", 0.5)))
+        entry_price = float(row.get("entry_price", exit_price))
+        size_usdc = float(row.get("size_usdc", 0.0) or 0.0)
+        fees_paid = float(row.get("fees_paid", 0.0) or 0.0)
+        shares = float(row.get("shares", 0.0) or 0.0)
+        market_value = shares * exit_price
+        realized_pnl = PNLEngine.mark_to_market_pnl(size_usdc, entry_price, exit_price, fees=fees_paid)
+
+        row["current_price"] = exit_price
+        row["market_value"] = round(float(market_value), 4)
+        row["realized_pnl"] = round(float(realized_pnl), 4)
+        row["unrealized_pnl"] = 0.0
         row["closed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         row["position_action"] = "EXIT"
         row["close_reason"] = reason
