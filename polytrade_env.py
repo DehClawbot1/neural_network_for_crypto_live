@@ -400,11 +400,13 @@ class LivePolyTradeEnv(gym.Env):
         balance_before = float(self._safe_balance())
         order_result = self._submit_live_action(action)
         fill_result = None
+        filled = False
         if self.order_manager is not None and isinstance(order_result, dict) and order_result.get("order_id"):
-            fill_result = self.order_manager.wait_for_fill(order_result.get("order_id"))
+            fill_result = self.order_manager.wait_for_fill(order_result.get("order_id"), timeout_seconds=30, poll_seconds=2)
+            filled = bool((fill_result or {}).get("filled"))
         obs_after = self._build_state()
         balance_after = float(self._safe_balance())
-        reward = float(balance_after - balance_before)
+        reward = float(balance_after - balance_before) if filled else 0.0
         self._log_experience(action, reward, obs_before, obs_after, order_result)
         terminated = False
         truncated = self.position_age >= self.max_hold_steps
@@ -418,6 +420,7 @@ class LivePolyTradeEnv(gym.Env):
             "entry_price": self.entry_price,
             "order_result": order_result,
             "fill_result": fill_result,
+            "fill_confirmed": filled,
             "balance_before": balance_before,
             "balance_after": balance_after,
             "experience_file": str(self.experience_file),
