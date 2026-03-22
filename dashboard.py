@@ -811,24 +811,26 @@ def main():
     backtest_wallet_df = load_csv(BACKTEST_BY_WALLET_FILE)
     model_registry_df = load_csv(MODEL_REGISTRY_FILE)
 
-    render_overview(signals_df, trades_df, markets_df, alerts_df)
+    st.caption("Quick guide: System Status = health and performance, Signals = ranked opportunities, Positions = paper trade state and PnL, Markets = market, whale, and alert context, Models = learning outputs and raw data.")
 
-    st.caption("Quick guide: Overview = status, Opportunities = strongest paper signals, Markets = BTC tracker, Whales = public wallet summaries, Alerts = notable changes, Learning = model/retraining state.")
-
-    tab1, tab2, tab3, tab4 = st.tabs(["Opportunities", "Markets & Whales", "Learning", "Raw Data"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["System Status", "Signals & Opportunities", "Positions & PnL", "Markets, Whales & Alerts", "Models & Data Quality"])
 
     with tab1:
+        render_overview(signals_df, trades_df, markets_df, alerts_df, positions_df, closed_positions_df)
+        render_performance_charts(trades_df, closed_positions_df, alerts_df, backtest_wallet_df, model_registry_df, positions_df=positions_df)
+
+    with tab2:
         top_left, top_right = st.columns([1.2, 1])
         with top_left:
             render_top_opportunities(signals_df)
         with top_right:
             render_factor_matrix(signals_df)
-
         render_action_board(signals_df, positions_df)
+
+    with tab3:
         render_simulated_decisions(positions_df, closed_positions_df)
         render_positions(positions_df, closed_positions_df)
         render_best_trades(closed_positions_df, path_replay_df)
-        render_performance_charts(trades_df, closed_positions_df, alerts_df, backtest_wallet_df, model_registry_df, positions_df=positions_df)
         if not episode_log_df.empty:
             st.markdown('<div class="section-title">Episode Log</div>', unsafe_allow_html=True)
             st.dataframe(episode_log_df.tail(20), width="stretch")
@@ -838,7 +840,7 @@ def main():
         with bottom_right:
             render_trade_chart(trades_df)
 
-    with tab2:
+    with tab4:
         top_left, top_right = st.columns([1.1, 0.9])
         with top_left:
             render_market_tracker(markets_df)
@@ -850,10 +852,8 @@ def main():
         with lower_right:
             render_market_distribution(distribution_df)
 
-    with tab3:
+    with tab5:
         render_model_status(model_status_df, supervised_eval_df, time_split_eval_df, path_replay_df, backtest_wallet_df, model_registry_df)
-
-    with tab4:
         render_raw_data(signals_df, trades_df, episode_log_df, markets_df, whales_df, alerts_df, model_status_df, positions_df, closed_positions_df)
 
 
