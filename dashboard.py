@@ -850,24 +850,43 @@ def render_paper_trades(trades_df):
     st.dataframe(trades_df.sort_index(ascending=False).tail(30), width="stretch", height=420)
 
 
-def render_trade_chart(trades_df):
-    st.markdown('<div class="section-title">Simulated Fill Prices</div>', unsafe_allow_html=True)
-    if trades_df.empty or "fill_price" not in trades_df.columns:
-        st.info("No fill-price data yet.")
+def render_trade_chart(trades_df, positions_df=None, closed_positions_df=None):
+    st.markdown('<div class="section-title">Paper Equity Curves</div>', unsafe_allow_html=True)
+    if closed_positions_df is None or closed_positions_df.empty:
+        st.info("No closed-trade equity data yet.")
         return
 
-    chart_df = trades_df.copy().tail(30)
-    chart_df["trade_index"] = range(1, len(chart_df) + 1)
-    fig = px.line(
-        chart_df,
-        x="trade_index",
-        y="fill_price",
-        color="side" if "side" in chart_df.columns else None,
-        hover_data=[col for col in ["market", "signal_label", "confidence"] if col in chart_df.columns],
-        title="Recent Simulated Fill Prices",
-        markers=True,
-    )
-    st.plotly_chart(fig, width="stretch")
+    pnl_col = "net_realized_pnl" if "net_realized_pnl" in closed_positions_df.columns else "realized_pnl" if "realized_pnl" in closed_positions_df.columns else None
+    time_col = "closed_at" if "closed_at" in closed_positions_df.columns else "timestamp" if "timestamp" in closed_positions_df.columns else None
+    if pnl_col is None or time_col is None:
+        st.info("No realized PnL timeline available yet.")
+        return
+
+    curve_df = closed_positions_df.copy()
+    curve_df[time_col] = pd.to_datetime(curve_df[time_col], errors="coerce")
+    curve_df[pnl_col] = pd.to_numeric(curve_df[pnl_col], errors="coerce").fillna(0)
+    curve_df = curve_df.dropna(subset=[time_col]).sort_values(time_col)
+    curve_df["cumulative_realized_pnl"] = curve_df[pnl_col].cumsum()
+    curve_df["rolling_peak"] = curve_df["cumulative_realized_pnl"].cummax()
+    curve_df["drawdown"] = curve_df["cumulative_realized_pnl"] - curve_df["rolling_peak"]
+    curve_df["day"] = curve_df[time_col].dt.date.astype(str)
+    daily = curve_df.groupby("day")[pnl_col].sum().reset_index(name="daily_pnl")
+
+    unrealized_total = 0.0
+    if positions_df is not None and not positions_df.empty and "unrealized_pnl" in positions_df.columns:
+        unrealized_total = float(pd.to_numeric(positions_df["unrealized_pnl"], errors="coerce").fillna(0).sum())
+    curve_df["realized_plus_unrealized"] = curve_df["cumulative_realized_pnl"] + unrealized_total
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.plotly_chart(px.line(curve_df, x=time_col, y="cumulative_realized_pnl", title="Cumulative Realized PnL Over Time"), width="stretch")
+    with c2:
+        st.plotly_chart(px.line(curve_df, x=time_col, y="realized_plus_unrealized", title="Realized + Unrealized Equity Curve"), width="stretch")
+    c3, c4 = st.columns(2)
+    with c3:
+        st.plotly_chart(px.bar(daily, x="day", y="daily_pnl", title="Daily PnL"), width="stretch")
+    with c4:
+        st.plotly_chart(px.line(curve_df, x=time_col, y="drawdown", title="Drawdown Curve"), width="stretch")
 
 
 def render_performance_charts(trades_df, closed_positions_df, alerts_df, backtest_wallet_df, model_registry_df, positions_df=None):
@@ -1207,7 +1226,7 @@ def main():
         with bottom_left:
             render_paper_trades(trades_df)
         with bottom_right:
-            render_trade_chart(trades_df)
+            render_trade_chart(trades_df, positions_df=positions_df, closed_positions_df=closed_positions_df)
 
     with tab4:
         top_left, top_right = st.columns([1.1, 0.9])
