@@ -221,36 +221,59 @@ def render_header():
     )
 
 
-def render_overview(signals_df, trades_df, markets_df, alerts_df):
+def render_overview(signals_df, trades_df, markets_df, alerts_df, positions_df, closed_positions_df):
     st.markdown('<div class="section-title">Overview</div>', unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
 
     top_conf = "-"
+    avg_top10_conf = "-"
+    signals_above_threshold = 0
     if not signals_df.empty and "confidence" in signals_df.columns:
         try:
             top_conf = f"{float(signals_df['confidence'].max()):.2f}"
+            avg_top10_conf = f"{float(signals_df['confidence'].astype(float).nlargest(min(10, len(signals_df))).mean()):.2f}"
+            signals_above_threshold = int((signals_df['confidence'].astype(float) >= 0.62).sum())
         except Exception:
-            top_conf = "-"
+            pass
 
     tracked_market_count = len(markets_df)
     if not markets_df.empty and "market_id" in markets_df.columns:
         tracked_market_count = markets_df["market_id"].nunique()
 
+    open_positions = len(positions_df)
+    closed_positions = len(closed_positions_df)
+    realized_pnl = 0.0
+    unrealized_pnl = 0.0
+    win_rate = "-"
+    if not positions_df.empty and "unrealized_pnl" in positions_df.columns:
+        unrealized_pnl = float(pd.to_numeric(positions_df["unrealized_pnl"], errors="coerce").fillna(0).sum())
+    if not closed_positions_df.empty:
+        pnl_col = "net_realized_pnl" if "net_realized_pnl" in closed_positions_df.columns else "realized_pnl" if "realized_pnl" in closed_positions_df.columns else None
+        if pnl_col:
+            pnl_series = pd.to_numeric(closed_positions_df[pnl_col], errors="coerce").fillna(0)
+            realized_pnl = float(pnl_series.sum())
+            if len(pnl_series) > 0:
+                win_rate = f"{float((pnl_series > 0).mean() * 100):.1f}%"
+
     with c1:
         st.markdown('<div class="overview-card">', unsafe_allow_html=True)
-        st.metric("Ranked Signals", len(signals_df))
+        st.metric("Open Positions", open_positions)
+        st.metric("Closed Trades", closed_positions)
         st.markdown('</div>', unsafe_allow_html=True)
     with c2:
         st.markdown('<div class="overview-card">', unsafe_allow_html=True)
-        st.metric("Paper Trades", len(trades_df))
+        st.metric("Unrealized PnL", f"{unrealized_pnl:.2f}")
+        st.metric("Realized PnL", f"{realized_pnl:.2f}")
         st.markdown('</div>', unsafe_allow_html=True)
     with c3:
         st.markdown('<div class="overview-card">', unsafe_allow_html=True)
-        st.metric("Tracked BTC Markets", tracked_market_count)
+        st.metric("Win Rate", win_rate)
+        st.metric("Avg Top-10 Confidence", avg_top10_conf)
         st.markdown('</div>', unsafe_allow_html=True)
     with c4:
         st.markdown('<div class="overview-card">', unsafe_allow_html=True)
-        st.metric("Recent Alerts", len(alerts_df))
+        st.metric("Tracked BTC Markets", tracked_market_count)
+        st.metric("Signals ≥ 0.62", signals_above_threshold)
         st.markdown('</div>', unsafe_allow_html=True)
 
     latest_signal_ts = signals_df["timestamp"].dropna().iloc[-1] if (not signals_df.empty and "timestamp" in signals_df.columns and not signals_df["timestamp"].dropna().empty) else "-"
