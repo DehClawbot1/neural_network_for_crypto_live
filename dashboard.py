@@ -1348,7 +1348,27 @@ def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df,
     if not model_registry_df.empty:
         latest_model = model_registry_df.iloc[-1].to_dict()
         st.markdown("**Current Champion Model**")
-        st.code(str(latest_model), language="text")
+        name_val = latest_model.get("model_name", latest_model.get("name", "N/A"))
+        date_val = latest_model.get("promoted_at", latest_model.get("trained_at", latest_model.get("created_at", "N/A")))
+        dataset_rows_val = latest_model.get("dataset_rows", latest_model.get("closed_trade_rows", "N/A"))
+        metric_key = next((k for k in ["average_pnl", "score", "accuracy", "sharpe"] if k in latest_model), None)
+        metric_label = metric_key if metric_key else "key_metric"
+        metric_val = latest_model.get(metric_key, "N/A") if metric_key else "N/A"
+        path_val = latest_model.get("model_path", latest_model.get("path", "N/A"))
+        status_val = latest_model.get("status", latest_model.get("promotion_status", "current"))
+        st.markdown(
+            f"""
+            <div class="market-card">
+                <div class="market-title">{name_val}</div>
+                <div class="meta-line"><b>Created date:</b> {date_val}</div>
+                <div class="meta-line"><b>Dataset rows:</b> {dataset_rows_val}</div>
+                <div class="meta-line"><b>{metric_label}:</b> {metric_val}</div>
+                <div class="meta-line"><b>Model path:</b> {path_val}</div>
+                <div class="meta-line"><b>Status:</b> {status_val}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
         date_col = "promoted_at" if "promoted_at" in model_registry_df.columns else "trained_at" if "trained_at" in model_registry_df.columns else None
         metric_cols = [c for c in ["average_pnl", "score", "accuracy", "sharpe"] if c in model_registry_df.columns]
