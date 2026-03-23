@@ -27,6 +27,7 @@ class HistoricalDatasetBuilder:
             return pd.DataFrame()
 
     def build(self):
+        raw_candidates_df = self._safe_read("raw_candidates.csv")
         signals_df = self._safe_read("signals.csv")
         trades_df = self._safe_read("daily_summary.txt")
         markets_df = self._safe_read("markets.csv")
