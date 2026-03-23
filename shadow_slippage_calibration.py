@@ -1,6 +1,8 @@
 import os
 import pandas as pd
 
+from config import TradingConfig
+
 
 def run_slippage_calibration(log_path="logs/shadow_results.csv"):
     if not os.path.exists(log_path):
@@ -28,8 +30,7 @@ def run_slippage_calibration(log_path="logs/shadow_results.csv"):
     print(f"📏 Median Abs Error: {med_ae:.1f} BPS")
     print(f"⚖️ Mean Signed Error: {mse:+.1f} BPS")
 
-    bins = [0, 0.7, 0.85, 1.0]
-    active["prob_bucket"] = pd.cut(active["meta_prob"], bins=bins)
+    active["prob_bucket"] = pd.cut(active["meta_prob"], bins=TradingConfig.PROB_BUCKETS)
     bucket_bias = active.groupby("prob_bucket")["signed_error"].mean()
 
     print("\n--- 🪣 BUCKET-LEVEL BIAS (Actual - Predicted) ---")
@@ -43,12 +44,13 @@ def run_slippage_calibration(log_path="logs/shadow_results.csv"):
     print(f"Total Intents: {total_intents}")
     print(f"DOA (Vetoed): {doa_count} ({(doa_count / total_intents):.1%})" if total_intents else "DOA (Vetoed): 0 (0.0%)")
 
-    if mse > 20:
-        print("\n⚠️ CRITICAL: Systematic Underestimation. We are entering 'Toxic' trades.")
-    elif mse < -20:
-        print("\n⚠️ CAUTION: Systematic Overestimation. We are being too timid (Vetoing too much).")
+    threshold = TradingConfig.CALIBRATION_BIAS_THRESHOLD
+    if mse > threshold:
+        print(f"\n⚠️ CRITICAL: Systematic Underestimation (> {threshold} BPS).")
+    elif mse < -threshold:
+        print(f"\n⚠️ CAUTION: Systematic Overestimation (< -{threshold} BPS).")
     else:
-        print("\n✅ Healthy Calibration: Bias is within +/- 20 BPS.")
+        print(f"\n✅ Healthy Calibration: Bias is within +/- {threshold} BPS.")
 
 
 if __name__ == "__main__":

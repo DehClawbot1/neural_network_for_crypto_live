@@ -8,7 +8,12 @@ class TradingConfig:
     PAPER_TP_ROI = 0.25
     PAPER_TRAILING_STOP = 0.08
 
+    # Conviction Thresholds
+    MIN_CONVICTION_FOR_READY = 0.85
+
+    # Audit Probability Buckets for Calibration
+    PROB_BUCKETS = [0.0, 0.70, 0.85, 1.0]
+
     # Thresholds
     VETO_EV_THRESHOLD = 0.005
-    MIN_CONVICTION_FOR_READY = 0.85
     CALIBRATION_BIAS_THRESHOLD = 20.0
