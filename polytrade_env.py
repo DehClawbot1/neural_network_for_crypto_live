@@ -421,6 +421,28 @@ class LivePolyTradeEnv(gym.Env):
         if self.order_manager is not None and isinstance(order_result, dict) and order_result.get("order_id"):
             fill_result = self.order_manager.wait_for_fill(order_result.get("order_id"), timeout_seconds=30, poll_seconds=2)
             filled = bool((fill_result or {}).get("filled"))
+        if filled:
+            fill_response = (fill_result or {}).get("response") or {}
+            fill_price = fill_response.get("price", order_result.get("price")) if isinstance(order_result, dict) else fill_response.get("price")
+            fill_size = fill_response.get("size", order_result.get("size")) if isinstance(order_result, dict) else fill_response.get("size")
+            filled_price = float(fill_price) if fill_price is not None else 0.0
+            filled_size = float(fill_size) if fill_size is not None else 0.0
+            if logged_action in [1, 2] and not self.position_open:
+                self.position_open = True
+                self.entry_price = filled_price or float(order_result.get("price", 0.0))
+                self.shares += filled_size or float(order_result.get("size", 0.0))
+                self.position_age = 0
+            elif logged_action == 4 and self.position_open:
+                reduce_size = max(float(self.shares) * 0.5, 0.0)
+                self.shares = max(float(self.shares) - reduce_size, 0.0)
+                if self.shares <= 0:
+                    self.position_open = False
+                    self.entry_price = 0.0
+            elif logged_action == 5 and self.position_open:
+                self.position_open = False
+                self.shares = 0.0
+                self.entry_price = 0.0
+                self.position_age = 0
         obs_after = self._build_state()
         balance_after = float(self._safe_balance())
         reward = float(balance_after - balance_before) if filled else 0.0
@@ -451,3 +473,4 @@ if __name__ == "__main__":
     env = PolyTradeEnv()
     check_env(env, warn=True)
     print("\n[+] PolyTradeEnv initialized and passed Gymnasium compliance checks.")
+
