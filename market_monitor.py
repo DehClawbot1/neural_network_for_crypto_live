@@ -114,3 +114,4 @@ if __name__ == "__main__":
         print("No BTC-related markets found.")
     else:
         print(df.head()[["market_id", "question", "liquidity", "volume", "url"]])
+

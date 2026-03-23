@@ -123,3 +123,4 @@ class PathReplaySimulator:
         if not df.empty:
             df.to_csv(self.output_file, index=False)
         return df
+

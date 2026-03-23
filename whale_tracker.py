@@ -67,3 +67,4 @@ class WhaleTracker:
             logging.info("Saved market distribution to %s", self.distribution_file)
 
         return summary_df
+

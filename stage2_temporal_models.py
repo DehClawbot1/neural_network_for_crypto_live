@@ -133,3 +133,4 @@ class Stage2TemporalModels:
         if not result.empty:
             result.to_csv(self.metrics_file, index=False)
         return result
+

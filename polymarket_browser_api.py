@@ -144,3 +144,4 @@ def summary(user: str = Query(..., description="Wallet address")):
         }
     except Exception as exc:
         _raise_http_error(exc)
+

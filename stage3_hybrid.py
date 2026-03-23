@@ -82,3 +82,4 @@ class Stage3HybridScorer:
             out["ensemble_probability"] = out["rf_probability"]
             out["ensemble_live_candidate"] = 0
         return out
+

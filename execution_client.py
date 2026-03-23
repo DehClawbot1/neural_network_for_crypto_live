@@ -103,3 +103,4 @@ class ExecutionClient:
                 if payload.get(key) is not None:
                     return float(payload[key])
         return 0.0
+

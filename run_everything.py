@@ -40,3 +40,4 @@ if __name__ == "__main__":
         trading_process.join()
         training_process.join()
         print("[+] Shutdown complete.")
+

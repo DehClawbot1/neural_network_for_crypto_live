@@ -55,3 +55,4 @@ class TraderAnalytics:
         analytics_df.to_csv(self.output_file, index=False)
         logging.info("Saved trader analytics to %s", self.output_file)
         return analytics_df
+

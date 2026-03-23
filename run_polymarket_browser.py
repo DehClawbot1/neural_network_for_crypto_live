@@ -46,3 +46,4 @@ if __name__ == "__main__":
         api_process.join()
         dashboard_process.join()
         print("[+] Browser services stopped.")
+

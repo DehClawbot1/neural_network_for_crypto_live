@@ -84,3 +84,4 @@ class Database:
         cur = self.conn.cursor()
         cur.execute(query, params)
         return [dict(row) for row in cur.fetchall()]
+

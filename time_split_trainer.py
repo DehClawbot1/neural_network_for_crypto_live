@@ -97,3 +97,4 @@ class TimeSplitTrainer:
         output = pd.DataFrame([result])
         output.to_csv(self.output_file, index=False)
         return output
+

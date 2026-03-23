@@ -78,3 +78,4 @@ class AutonomousMonitor:
             "open_positions": record["open_positions"],
         })
         logging.info("Saved autonomous health status to %s", self.output_file)
+

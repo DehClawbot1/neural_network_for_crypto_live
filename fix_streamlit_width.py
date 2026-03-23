@@ -14,7 +14,7 @@ def main() -> None:
         except Exception:
             continue
 
-        new_text = text.replace('width="stretch"', 'use_container_width=True')
+        new_text = text.replace('use_container_width=True', 'use_container_width=True')
         if new_text != text:
             path.write_text(new_text, encoding='utf-8')
             changed.append(str(path))

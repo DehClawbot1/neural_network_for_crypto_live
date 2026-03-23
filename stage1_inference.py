@@ -42,3 +42,4 @@ class Stage1Inference:
         out["lower_confidence_bound"] = out["expected_return"].astype(float) - out["return_std"].astype(float)
         out["edge_score"] = out["p_tp_before_sl"].astype(float) * out["lower_confidence_bound"].astype(float)
         return out
+

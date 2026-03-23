@@ -105,6 +105,7 @@ class PositionManager:
             "position_action": "ENTER",
             "signal_label": signal_row.get("signal_label", "UNKNOWN"),
             "confidence": signal_row.get("confidence", 0.0),
+            "confidence_at_entry": signal_row.get("confidence", 0.0),
             "size_usdc": size_usdc,
             "shares": shares,
             "entry_price": fill_price,

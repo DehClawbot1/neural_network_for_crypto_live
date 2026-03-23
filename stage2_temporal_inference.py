@@ -33,3 +33,4 @@ class Stage2TemporalInference:
                 out["temporal_expected_return"] = reg_saved["model"].predict(out[feat_cols])
 
         return out
+

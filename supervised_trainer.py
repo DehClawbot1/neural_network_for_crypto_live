@@ -61,3 +61,4 @@ class SupervisedTrainer:
         model.fit(X, y)
         joblib.dump({"model": model, "features": usable_features}, self.model_file)
         return model, usable_features
+

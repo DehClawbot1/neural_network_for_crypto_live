@@ -45,3 +45,4 @@ class ModelInference:
         out["expected_return"] = out.get("expected_return", 0.0)
         out["edge_score"] = out["p_tp_before_sl"].astype(float) * out["expected_return"].astype(float)
         return out
+

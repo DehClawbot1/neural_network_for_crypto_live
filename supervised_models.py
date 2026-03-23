@@ -65,3 +65,4 @@ class SupervisedModels:
             joblib.dump({"model": reg, "features": usable}, self.regressor_file)
 
         return usable
+

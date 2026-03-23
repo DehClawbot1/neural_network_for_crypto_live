@@ -2,7 +2,7 @@
 
 This module is imported automatically by Python when present on sys.path.
 It patches Streamlit calls so older local Streamlit installs do not crash on
-newer keyword styles like width="stretch".
+newer keyword styles like use_container_width=True.
 """
 
 from __future__ import annotations
@@ -59,3 +59,4 @@ def _patch_streamlit() -> None:
 
 
 _patch_streamlit()
+

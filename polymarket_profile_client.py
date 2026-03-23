@@ -205,3 +205,4 @@ class PolymarketProfileClient:
                 "offset": offset,
             },
         )
+

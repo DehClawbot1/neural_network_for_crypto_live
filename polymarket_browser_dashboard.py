@@ -162,7 +162,7 @@ def main():
         if positions_df.empty:
             st.info("No open/current positions found.")
         else:
-            st.dataframe(positions_df, width="stretch", hide_index=True)
+            st.dataframe(positions_df, use_container_width=True, hide_index=True)
             numeric_cols = [c for c in ["currentValue", "cashPnl", "percentPnl", "size", "avgPrice", "curPrice"] if c in positions_df.columns]
             for col in numeric_cols:
                 positions_df[col] = pd.to_numeric(positions_df[col], errors="coerce")
@@ -175,7 +175,7 @@ def main():
         if closed_df.empty:
             st.info("No closed positions found.")
         else:
-            st.dataframe(closed_df, width="stretch", hide_index=True)
+            st.dataframe(closed_df, use_container_width=True, hide_index=True)
             if "realizedPnl" in closed_df.columns and "title" in closed_df.columns:
                 closed_df["realizedPnl"] = pd.to_numeric(closed_df["realizedPnl"], errors="coerce")
                 winners = closed_df.sort_values("realizedPnl", ascending=False).head(15)
@@ -186,7 +186,7 @@ def main():
         if activity_df.empty:
             st.info("No activity found.")
         else:
-            st.dataframe(activity_df, width="stretch", hide_index=True)
+            st.dataframe(activity_df, use_container_width=True, hide_index=True)
             if "type" in activity_df.columns:
                 st.bar_chart(activity_df["type"].astype(str).value_counts())
 
@@ -195,7 +195,7 @@ def main():
         if trades_df.empty:
             st.info("No trades found.")
         else:
-            st.dataframe(trades_df, width="stretch", hide_index=True)
+            st.dataframe(trades_df, use_container_width=True, hide_index=True)
             if "side" in trades_df.columns:
                 st.bar_chart(trades_df["side"].astype(str).value_counts())
 
@@ -213,7 +213,7 @@ def main():
         elif market_positions_df.empty:
             st.info("No market positions returned.")
         else:
-            st.dataframe(market_positions_df, width="stretch", hide_index=True)
+            st.dataframe(market_positions_df, use_container_width=True, hide_index=True)
             if "positions" in market_positions_df.columns:
                 st.caption("Nested market position arrays are shown in raw form below.")
                 st.json(market_positions_payload)
@@ -221,3 +221,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

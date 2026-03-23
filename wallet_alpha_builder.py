@@ -97,3 +97,4 @@ class WalletAlphaBuilder:
         if not history.empty:
             history.to_csv(self.history_file, index=False)
         return alpha
+

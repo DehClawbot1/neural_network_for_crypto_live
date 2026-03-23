@@ -156,3 +156,4 @@ if __name__ == "__main__":
     if not signals_df.empty:
         print("\n--- Latest Alpha Signals ---")
         print(signals_df[["trader_wallet", "side", "price", "size", "market_title"]].head())
+

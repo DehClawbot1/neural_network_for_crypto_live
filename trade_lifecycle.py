@@ -95,3 +95,4 @@ class TradeLifecycle:
         self.state = TradeState.RESOLVED
         self.ledger.append({"event": "resolve", "timestamp": datetime.now().isoformat(), "token_won": token_won, "realized_pnl": self.realized_pnl})
         return self.realized_pnl
+

@@ -106,3 +106,4 @@ if __name__ == "__main__":
 
     # 2. Run a quick sanity check to ensure the model outputs valid actions
     test_inference(trained_model, eval_env)
+

@@ -131,3 +131,4 @@ class Retrainer:
         promoted, message = self._promote_if_better(closed_rows, replay_rows)
         self._write_status(closed_rows, replay_rows, message)
         return promoted
+

@@ -879,8 +879,6 @@ def render_positions(positions_df, closed_positions_df):
             if "opened_at" in open_view.columns:
                 opened_ts = pd.to_datetime(open_view["opened_at"], errors="coerce", utc=True)
                 open_view["position_age"] = (((pd.Timestamp.utcnow() - opened_ts).dt.total_seconds()) / 60).round(1)
-            if "confidence_at_entry" not in open_view.columns and "confidence" in open_view.columns:
-                open_view["confidence_at_entry"] = open_view["confidence"]
             if "max_favorable_excursion" not in open_view.columns and "mfe" in open_view.columns:
                 open_view["max_favorable_excursion"] = open_view["mfe"]
             if "max_adverse_excursion" not in open_view.columns and "mae" in open_view.columns:

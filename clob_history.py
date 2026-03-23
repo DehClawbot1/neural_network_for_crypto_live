@@ -56,3 +56,4 @@ class CLOBHistoryClient:
         if not df.empty:
             df.to_csv(self.output_file, mode="a", header=not self.output_file.exists(), index=False)
         return df
+

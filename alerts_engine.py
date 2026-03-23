@@ -146,3 +146,4 @@ class AlertsEngine:
             logging.info("ALERT -> %s", alert)
 
         return pd.DataFrame(alerts)
+

@@ -39,3 +39,4 @@ def train_recurrent_model(timesteps=10000):
 
 if __name__ == "__main__":
     train_recurrent_model(timesteps=5000)
+

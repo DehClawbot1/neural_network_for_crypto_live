@@ -90,3 +90,4 @@ if __name__ == "__main__":
     )
     engine = SignalEngine()
     print(engine.score_features(sample)[["market_title", "signal_label", "confidence", "reason"]])
+

@@ -43,3 +43,4 @@ class DatasetAligner:
         if not aligned.empty:
             aligned.to_csv(self.output_file, index=False)
         return aligned
+

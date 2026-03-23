@@ -53,3 +53,4 @@ class LiveRiskManager:
     def deactivate_kill_switch(self):
         self.kill_switch = False
         self.failed_orders = 0
+

@@ -49,3 +49,4 @@ class IncidentManager:
             df.loc[mask, "status"] = "resolved"
             df.loc[mask, "last_seen"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
             self.incidents_file.write_text(df.to_csv(index=False), encoding="utf-8")
+
