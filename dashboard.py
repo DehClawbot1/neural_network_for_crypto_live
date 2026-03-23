@@ -170,7 +170,7 @@ def render_data_freshness_panel(source_frames):
                 "status": f"{badge} {status}",
             }
         )
-    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 def render_pipeline_health_strip(signals_df, markets_df, positions_df, model_status_df, path_replay_df, system_health_df=None):
@@ -265,6 +265,20 @@ def render_header():
         "This interface shows ranked paper-trading opportunities, public market tracking, whale activity, and alerts only. "
         "It does not place real bets or connect to a live account."
     )
+
+
+def optional_number(value, digits=3):
+    if value is None:
+        return "N/A"
+    try:
+        if pd.isna(value):
+            return "N/A"
+    except Exception:
+        pass
+    try:
+        return round(float(value), digits)
+    except Exception:
+        return "N/A"
 
 
 def render_overview(signals_df, trades_df, markets_df, alerts_df, positions_df, closed_positions_df):
@@ -456,7 +470,7 @@ def render_factor_matrix(signals_df):
         missing = pd.isna(value)
         rows.append({
             "factor": label,
-            "score": value if not missing else "N/A",
+            "score": optional_number(value),
             "direction_meaning": desc,
             "missing": "⚠ missing" if missing else "",
         })
@@ -464,6 +478,7 @@ def render_factor_matrix(signals_df):
     factor_df = pd.DataFrame(rows)
     numeric_plot = factor_df.copy()
     numeric_plot["numeric_score"] = pd.to_numeric(numeric_plot["score"], errors="coerce")
+    factor_df["score"] = factor_df["score"].astype(str)
 
     st.caption(f"Explaining: {selected_row.get('market_title', selected_row.get('market', 'Unknown Market'))}")
     fig = px.bar(numeric_plot, x="numeric_score", y="factor", orientation="h", title="Signal Factor Breakdown")
@@ -683,20 +698,20 @@ def render_alerts(alerts_df):
         chart_df = chart_df.dropna(subset=[time_col])
         if not chart_df.empty:
             over_time = chart_df.groupby(chart_df[time_col].dt.floor("H")).size().reset_index(name="count")
-            st.plotly_chart(px.line(over_time, x=time_col, y="count", title="Alerts Over Time"), width="stretch")
+            st.plotly_chart(px.line(over_time, x=time_col, y="count", title="Alerts Over Time"), use_container_width=True)
     if alert_col and not view.empty:
         type_counts = view[alert_col].astype(str).value_counts().reset_index()
         type_counts.columns = [alert_col, "count"]
-        st.plotly_chart(px.bar(type_counts, x=alert_col, y="count", title="Alerts by Type"), width="stretch")
+        st.plotly_chart(px.bar(type_counts, x=alert_col, y="count", title="Alerts by Type"), use_container_width=True)
     if market_col and not view.empty:
         market_counts = view[market_col].astype(str).value_counts().head(15).reset_index()
         market_counts.columns = [market_col, "count"]
-        st.plotly_chart(px.bar(market_counts, x=market_col, y="count", title="Alerts by Market"), width="stretch")
+        st.plotly_chart(px.bar(market_counts, x=market_col, y="count", title="Alerts by Market"), use_container_width=True)
 
     source_col = "source_module" if "source_module" in view.columns else "source" if "source" in view.columns else None
     status_col = "status" if "status" in view.columns else None
     display_cols = [c for c in [time_col, severity_col, alert_col, market_col, "message", source_col, status_col] if c and c in view.columns]
-    st.dataframe(view.sort_index(ascending=False).tail(50)[display_cols] if display_cols else view.tail(50), width="stretch", hide_index=True)
+    st.dataframe(view.sort_index(ascending=False).tail(50)[display_cols] if display_cols else view.tail(50), use_container_width=True, hide_index=True)
 
     missing_schema_bits = []
     if severity_col is None:
@@ -857,7 +872,7 @@ def render_paper_trades(trades_df):
         st.warning("No paper trades yet. Run supervisor.py first.")
         return
 
-    st.dataframe(trades_df.sort_index(ascending=False).tail(30), width="stretch", height=420)
+    st.dataframe(trades_df.sort_index(ascending=False).tail(30), use_container_width=True, height=420)
 
 
 def render_trade_chart(trades_df, positions_df=None, closed_positions_df=None):
@@ -889,14 +904,14 @@ def render_trade_chart(trades_df, positions_df=None, closed_positions_df=None):
 
     c1, c2 = st.columns(2)
     with c1:
-        st.plotly_chart(px.line(curve_df, x=time_col, y="cumulative_realized_pnl", title="Cumulative Realized PnL Over Time"), width="stretch")
+        st.plotly_chart(px.line(curve_df, x=time_col, y="cumulative_realized_pnl", title="Cumulative Realized PnL Over Time"), use_container_width=True)
     with c2:
-        st.plotly_chart(px.line(curve_df, x=time_col, y="realized_plus_unrealized", title="Realized + Unrealized Equity Curve"), width="stretch")
+        st.plotly_chart(px.line(curve_df, x=time_col, y="realized_plus_unrealized", title="Realized + Unrealized Equity Curve"), use_container_width=True)
     c3, c4 = st.columns(2)
     with c3:
-        st.plotly_chart(px.bar(daily, x="day", y="daily_pnl", title="Daily PnL"), width="stretch")
+        st.plotly_chart(px.bar(daily, x="day", y="daily_pnl", title="Daily PnL"), use_container_width=True)
     with c4:
-        st.plotly_chart(px.line(curve_df, x=time_col, y="drawdown", title="Drawdown Curve"), width="stretch")
+        st.plotly_chart(px.line(curve_df, x=time_col, y="drawdown", title="Drawdown Curve"), use_container_width=True)
 
 
 def render_performance_charts(trades_df, closed_positions_df, alerts_df, backtest_wallet_df, model_registry_df, positions_df=None):
@@ -914,31 +929,31 @@ def render_performance_charts(trades_df, closed_positions_df, alerts_df, backtes
             pnl_source["day"] = pnl_source[time_col].dt.date.astype(str)
             daily = pnl_source.groupby("day")[pnl_col].agg(win_rate=lambda s: float((s > 0).mean() * 100), pnl="sum").reset_index()
             with chart_cols[0]:
-                st.plotly_chart(px.line(pnl_source, x=time_col, y="cumulative_pnl", title="Cumulative Paper PnL"), width="stretch")
+                st.plotly_chart(px.line(pnl_source, x=time_col, y="cumulative_pnl", title="Cumulative Paper PnL"), use_container_width=True)
             with chart_cols[1]:
-                st.plotly_chart(px.bar(daily, x="day", y="pnl", title="Win/Loss by Day"), width="stretch")
+                st.plotly_chart(px.bar(daily, x="day", y="pnl", title="Win/Loss by Day"), use_container_width=True)
 
     if not trades_df.empty and "confidence" in trades_df.columns:
         outcome_col = "net_realized_pnl" if "net_realized_pnl" in trades_df.columns else "realized_pnl" if "realized_pnl" in trades_df.columns else None
         if outcome_col:
             plot_df = trades_df.copy()
             plot_df[outcome_col] = pd.to_numeric(plot_df[outcome_col], errors="coerce")
-            st.plotly_chart(px.scatter(plot_df, x="confidence", y=outcome_col, title="Signal Confidence vs Realized Outcome"), width="stretch")
+            st.plotly_chart(px.scatter(plot_df, x="confidence", y=outcome_col, title="Signal Confidence vs Realized Outcome"), use_container_width=True)
 
     if not alerts_df.empty:
         alert_col = "close_reason" if "close_reason" in alerts_df.columns else "alert_type" if "alert_type" in alerts_df.columns else None
         if alert_col:
             counts = alerts_df[alert_col].astype(str).value_counts().reset_index()
             counts.columns = [alert_col, "count"]
-            st.plotly_chart(px.bar(counts, x=alert_col, y="count", title="Alert Counts by Type"), width="stretch")
+            st.plotly_chart(px.bar(counts, x=alert_col, y="count", title="Alert Counts by Type"), use_container_width=True)
 
     if not backtest_wallet_df.empty and "total_pnl" in backtest_wallet_df.columns:
-        st.plotly_chart(px.bar(backtest_wallet_df.head(10), x="wallet_copied", y="total_pnl", title="Top Wallets by Profitability"), width="stretch")
+        st.plotly_chart(px.bar(backtest_wallet_df.head(10), x="wallet_copied", y="total_pnl", title="Top Wallets by Profitability"), use_container_width=True)
 
     if positions_df is not None and not positions_df.empty and "market" in positions_df.columns:
         active = positions_df["market"].astype(str).value_counts().reset_index()
         active.columns = ["market", "count"]
-        st.plotly_chart(px.bar(active, x="market", y="count", title="Active Positions by Market"), width="stretch")
+        st.plotly_chart(px.bar(active, x="market", y="count", title="Active Positions by Market"), use_container_width=True)
 
     if not model_registry_df.empty:
         reg = model_registry_df.copy()
@@ -946,7 +961,7 @@ def render_performance_charts(trades_df, closed_positions_df, alerts_df, backtes
             reg["promoted_at"] = pd.to_datetime(reg["promoted_at"], errors="coerce")
         metric_col = "average_pnl" if "average_pnl" in reg.columns else None
         if metric_col and "promoted_at" in reg.columns:
-            st.plotly_chart(px.line(reg, x="promoted_at", y=metric_col, title="Model Performance Over Retrains"), width="stretch")
+            st.plotly_chart(px.line(reg, x="promoted_at", y=metric_col, title="Model Performance Over Retrains"), use_container_width=True)
 
 
 def render_best_trades(closed_positions_df, path_replay_df):
@@ -1148,7 +1163,7 @@ def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df,
             history_df = history_df.dropna(subset=[date_col])
             if not history_df.empty:
                 for metric_col in metric_cols[:2]:
-                    st.plotly_chart(px.line(history_df, x=date_col, y=metric_col, title=f"{metric_col} History Over Retrains"), width="stretch")
+                    st.plotly_chart(px.line(history_df, x=date_col, y=metric_col, title=f"{metric_col} History Over Retrains"), use_container_width=True)
 
     if not path_replay_df.empty:
         pnl_col = "net_pnl" if "net_pnl" in path_replay_df.columns else "gross_pnl" if "gross_pnl" in path_replay_df.columns else None
@@ -1163,10 +1178,10 @@ def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df,
             equity_df["rolling_drawdown"] = equity_df["equity_curve"] - equity_df["equity_curve"].cummax()
             c1, c2 = st.columns(2)
             with c1:
-                st.plotly_chart(px.line(equity_df, y="equity_curve", title="Equity Curve"), width="stretch")
+                st.plotly_chart(px.line(equity_df, y="equity_curve", title="Equity Curve"), use_container_width=True)
             with c2:
-                st.plotly_chart(px.line(equity_df, y="rolling_win_rate", title="Rolling Win Rate"), width="stretch")
-            st.plotly_chart(px.line(equity_df, y="rolling_drawdown", title="Rolling Drawdown"), width="stretch")
+                st.plotly_chart(px.line(equity_df, y="rolling_win_rate", title="Rolling Win Rate"), use_container_width=True)
+            st.plotly_chart(px.line(equity_df, y="rolling_drawdown", title="Rolling Drawdown"), use_container_width=True)
 
     if not backtest_wallet_df.empty:
         st.markdown("**Wallet Alpha Evolution / Leaders**")
@@ -1179,13 +1194,13 @@ def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df,
             conf_df["confidence"] = pd.to_numeric(conf_df["confidence"], errors="coerce")
             conf_df = conf_df.dropna(subset=["confidence"])
             if not conf_df.empty:
-                st.plotly_chart(px.histogram(conf_df, x="confidence", nbins=20, title="Confidence Distribution"), width="stretch")
+                st.plotly_chart(px.histogram(conf_df, x="confidence", nbins=20, title="Confidence Distribution"), use_container_width=True)
                 if "timestamp" in conf_df.columns:
                     conf_df["timestamp"] = pd.to_datetime(conf_df["timestamp"], errors="coerce")
                     conf_df = conf_df.dropna(subset=["timestamp"]).sort_values("timestamp")
                     if not conf_df.empty:
                         roll = conf_df.set_index("timestamp")["confidence"].rolling("6H").mean().reset_index(name="rolling_confidence")
-                        st.plotly_chart(px.line(roll, x="timestamp", y="rolling_confidence", title="Rolling Confidence Drift"), width="stretch")
+                        st.plotly_chart(px.line(roll, x="timestamp", y="rolling_confidence", title="Rolling Confidence Drift"), use_container_width=True)
         availability_checks = {
             "confidence": "confidence" in signals_df.columns,
             "edge_score": "edge_score" in signals_df.columns,
@@ -1288,7 +1303,7 @@ def render_data_quality_panel(signals_df, trades_df, markets_df, whales_df, aler
         signal_tokens = set(signals_df["token_id"].dropna().astype(str))
         position_tokens = set(positions_df["token_id"].dropna().astype(str))
         reconciliation_rows.append({"check": "open position tokens seen in signals", "status": "ok" if position_tokens.issubset(signal_tokens | position_tokens) else "warning", "details": f"positions_without_signal_tokens={len(position_tokens - signal_tokens)}"})
-    st.dataframe(pd.DataFrame(reconciliation_rows), width="stretch", hide_index=True)
+    st.dataframe(pd.DataFrame(reconciliation_rows), use_container_width=True, hide_index=True)
 
     st.markdown("**Monitoring-Grade Anomaly Detection**")
     anomaly_flags = []
@@ -1341,7 +1356,7 @@ def render_data_quality_panel(signals_df, trades_df, markets_df, whales_df, aler
                 timestamp_regression = "Yes"
         status = "warning" if dup_count > 0 or timestamp_regression == "Yes" else "ok"
         anomaly_rows.append({"dataset": name, "duplicates": dup_count, "timestamp_regression": timestamp_regression, "status": status})
-    st.dataframe(pd.DataFrame(anomaly_rows), width="stretch", hide_index=True)
+    st.dataframe(pd.DataFrame(anomaly_rows), use_container_width=True, hide_index=True)
 
 
 def render_raw_data(signals_df, trades_df, episode_log_df, markets_df, whales_df, alerts_df, model_status_df, positions_df, closed_positions_df):
@@ -1506,4 +1521,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
