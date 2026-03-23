@@ -31,7 +31,7 @@ class SequenceGRU(nn.Module):
         return self.head(last)
 
 
-class WeightedBCELoss(nn.Module):
+class WeightedBCELoss(_BaseModule):
     def forward(self, logits, targets, sample_weights):
         base = nn.functional.binary_cross_entropy_with_logits(logits, targets, reduction="none")
         return (base * sample_weights).mean()
@@ -153,3 +153,4 @@ class Stage2SequenceModels:
                 loss = criterion(pred, yb, wb)
                 loss.backward()
                 optimizer.step()
+

@@ -12,9 +12,12 @@ except Exception:
     nn = None
     DataLoader = None
     TensorDataset = None
+    _BaseModule = object
+else:
+    _BaseModule = nn.Module
 
 
-class TimeSeriesTransformer(nn.Module):
+class TimeSeriesTransformer(_BaseModule):
     def __init__(self, input_dim, d_model=64, nhead=4, num_layers=2, output_dim=1):
         super().__init__()
         self.input_proj = nn.Linear(input_dim, d_model)
@@ -108,3 +111,4 @@ class Stage2TransformerModels:
 
         torch.save(model.state_dict(), self.model_file)
         return self.model_file
+
