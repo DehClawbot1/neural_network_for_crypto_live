@@ -11,7 +11,7 @@ class ExecutionClient:
     def __init__(self, host=None, chain_id=None, private_key=None, funder=None, signature_type=None):
         try:
             from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import OrderArgs, OrderType
+            from py_clob_client.clob_types import OrderArgs, OrderType, MarketOrderArgs
             from py_clob_client.order_builder.constants import BUY, SELL
             from py_clob_client.credentials import ApiCreds
         except Exception as exc:
@@ -19,6 +19,7 @@ class ExecutionClient:
 
         self.ClobClient = ClobClient
         self.OrderArgs = OrderArgs
+        self.MarketOrderArgs = MarketOrderArgs
         self.OrderType = OrderType
         self.BUY = BUY
         self.SELL = SELL
@@ -65,7 +66,8 @@ class ExecutionClient:
 
     def create_and_post_market_order(self, token_id, amount, side="BUY"):
         side_const = self.BUY if str(side).upper() == "BUY" else self.SELL
-        return self.client.create_and_post_market_order(token_id=token_id, amount=float(amount), side=side_const)
+        args = self.MarketOrderArgs(token_id=token_id, amount=float(amount), side=side_const)
+        return self.client.create_and_post_market_order(args)
 
     def cancel_order(self, order_id):
         return self.client.cancel(order_id)
