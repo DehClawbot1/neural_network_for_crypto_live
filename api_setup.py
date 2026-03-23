@@ -9,6 +9,14 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 def prompt_runtime_config():
     trading_mode = os.getenv("TRADING_MODE", "").strip().lower()
+    interactive = sys.stdin.isatty()
+
+    if not interactive:
+        if not trading_mode:
+            trading_mode = "paper"
+            os.environ["TRADING_MODE"] = trading_mode
+        return trading_mode
+
     if not trading_mode:
         trading_mode = input("TRADING_MODE [paper/live]: ").strip().lower() or "paper"
         os.environ["TRADING_MODE"] = trading_mode
@@ -90,16 +98,20 @@ if __name__ == "__main__":
     is_valid = validate_environment()
     if is_valid:
         print("\n[+] Environment is valid.")
-        start_bot = input("Start run_bot.py now? [y/N]: ").strip().lower()
-        start_dashboard = input("Start dashboard.py now? [y/N]: ").strip().lower()
-
-        if start_bot in {"y", "yes"} and start_dashboard in {"y", "yes"}:
-            subprocess.run([sys.executable, "run_bot_and_dashboard.py"], check=False)
-        elif start_bot in {"y", "yes"}:
-            subprocess.run([sys.executable, "run_bot.py"], check=False)
-        elif start_dashboard in {"y", "yes"}:
-            subprocess.run([sys.executable, "-m", "streamlit", "run", "dashboard.py"], check=False)
+        if not sys.stdin.isatty():
+            print("[+] Non-interactive environment detected. Skipping startup prompts.")
         else:
-            print("[+] Setup complete. You may start run_bot.py and dashboard.py manually.")
+            start_bot = input("Start run_bot.py now? [y/N]: ").strip().lower()
+            start_dashboard = input("Start dashboard.py now? [y/N]: ").strip().lower()
+
+            if start_bot in {"y", "yes"} and start_dashboard in {"y", "yes"}:
+                subprocess.run([sys.executable, "run_bot_and_dashboard.py"], check=False)
+            elif start_bot in {"y", "yes"}:
+                subprocess.run([sys.executable, "run_bot.py"], check=False)
+            elif start_dashboard in {"y", "yes"}:
+                subprocess.run([sys.executable, "-m", "streamlit", "run", "dashboard.py"], check=False)
+            else:
+                print("[+] Setup complete. You may start run_bot.py and dashboard.py manually.")
     else:
         print("\n[-] Validation failed or template generated. Please check your .env file and run again.")
+
