@@ -31,7 +31,6 @@ class HistoricalDatasetBuilder:
         trades_df = self._safe_read("daily_summary.txt")
         markets_df = self._safe_read("markets.csv")
         alerts_df = self._safe_read("alerts.csv")
-        wallet_alpha_df = self._safe_read("wallet_alpha.csv")
         wallet_alpha_history_df = self._safe_read("wallet_alpha_history.csv")
         btc_targets_df = self._safe_read("btc_targets.csv")
 
@@ -101,9 +100,6 @@ class HistoricalDatasetBuilder:
             alert_counts = alerts_df.groupby("market").size().reset_index(name="alert_count")
             dataset = dataset.merge(alert_counts, left_on="market_title", right_on="market", how="left")
             dataset["alert_count"] = dataset["alert_count"].fillna(0).astype(int)
-
-        if not wallet_alpha_df.empty and "trader_wallet" in dataset.columns and "wallet_copied" in wallet_alpha_df.columns:
-            dataset = dataset.merge(wallet_alpha_df, left_on="trader_wallet", right_on="wallet_copied", how="left")
 
         if not wallet_alpha_history_df.empty and "trader_wallet" in dataset.columns and "timestamp" in dataset.columns:
             dataset["timestamp"] = pd.to_datetime(dataset["timestamp"], utc=True, errors="coerce", format="mixed")
