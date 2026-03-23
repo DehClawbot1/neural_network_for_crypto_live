@@ -69,8 +69,9 @@ class ExecutionClient:
     def create_and_post_order(self, token_id, price, size, side="BUY", order_type="GTC", options=None):
         side_const = self.BUY if str(side).upper() == "BUY" else self.SELL
         order_type_const = getattr(self.OrderType, str(order_type).upper())
-        args = self.OrderArgs(token_id=token_id, price=float(price), size=float(size), side=side_const, order_type=order_type_const)
-        return self.client.create_and_post_order(args, options=options or {})
+        args = self.OrderArgs(token_id=token_id, price=float(price), size=float(size), side=side_const)
+        signed_order = self.client.create_order(args, options=options or {})
+        return self.client.post_order(signed_order, order_type_const)
 
     def create_and_post_market_order(self, token_id, amount, side="BUY"):
         side_const = self.BUY if str(side).upper() == "BUY" else self.SELL
