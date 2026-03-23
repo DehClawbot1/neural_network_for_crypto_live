@@ -1,39 +1,48 @@
 import unittest
 
-import pandas as pd
-
 from feature_builder import FeatureBuilder
 
 
-class TestFeatureBuilder(unittest.TestCase):
-    def test_build_features_smoke(self):
-        signals = pd.DataFrame([
+class TestFeatureLogic(unittest.TestCase):
+    def test_wallet_history_stat_updates(self):
+        builder = FeatureBuilder()
+        wallet = "0xwhale1"
+
+        builder.update_wallet_history(
             {
-                "timestamp": "2026-03-22T00:00:00Z",
-                "market_title": "BTC Up or Down",
-                "trader_wallet": "0xabc",
-                "size": 50,
-                "outcome_side": "YES",
-                "order_side": "BUY",
-                "price": 0.4,
+                "trader_wallet": wallet,
+                "size": 1000,
+                "future_return": 0.10,
+                "tp_before_sl_60m": 1,
+                "market_title": "BTC Test",
             }
-        ])
-        markets = pd.DataFrame([
+        )
+
+        builder.update_wallet_history(
             {
-                "question": "BTC Up or Down",
-                "liquidity": 10000,
-                "volume": 5000,
-                "last_trade_price": 0.41,
-                "best_bid": 0.40,
-                "best_ask": 0.42,
-                "end_date": "2026-03-29T00:00:00Z",
-                "slug": "btc-up-down",
+                "trader_wallet": wallet,
+                "size": 2000,
+                "future_return": -0.05,
+                "tp_before_sl_60m": 0,
+                "market_title": "BTC Test",
             }
-        ])
-        df = FeatureBuilder().build_features(signals, markets)
-        self.assertFalse(df.empty)
-        self.assertIn("outcome_side", df.columns)
-        self.assertIn("order_side", df.columns)
+        )
+
+        stats = builder.wallet_stats[wallet]
+        self.assertEqual(stats["trade_count"], 2)
+        self.assertEqual(stats["avg_size"], 1500.0)
+        self.assertEqual(stats["win_rate"], 0.5)
+        self.assertEqual(stats["tp_precision"], 0.5)
+        self.assertEqual(stats["same_market_history"], 2)
+
+    def test_normalized_size_clipping(self):
+        builder = FeatureBuilder()
+        wallet = "0xwhale2"
+        builder.wallet_stats[wallet] = {"avg_size": 100.0}
+
+        norm_size = builder._normalized_trade_size(wallet, 1000.0)
+        self.assertLessEqual(norm_size, 1.0)
+        self.assertGreaterEqual(norm_size, 0.0)
 
 
 if __name__ == "__main__":
