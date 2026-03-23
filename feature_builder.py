@@ -194,6 +194,8 @@ class FeatureBuilder:
         if markets_df is not None and not markets_df.empty:
             for _, row in markets_df.iterrows():
                 market_lookup[str(row.get("question", "")).lower()] = row.to_dict()
+                if row.get("slug"):
+                    market_lookup[str(row.get("slug", "")).lower()] = row.to_dict()
 
         rows = []
         work_df = signals_df.copy()
@@ -203,7 +205,7 @@ class FeatureBuilder:
 
         for _, signal_row in work_df.iterrows():
             signal = signal_row.to_dict()
-            title_key = str(signal.get("market_title", "")).lower()
+            title_key = str(signal.get("market_title", signal.get("market", ""))).lower()
             matched_market = market_lookup.get(title_key)
             rows.append(self.build_feature_row(signal, matched_market))
             self.update_wallet_history(signal)

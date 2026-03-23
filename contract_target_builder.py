@@ -11,6 +11,7 @@ class ContractTargetBuilder:
 
     def __init__(self, logs_dir="logs"):
         self.logs_dir = Path(logs_dir)
+        self.raw_candidates_file = self.logs_dir / "raw_candidates.csv"
         self.signals_file = self.logs_dir / "signals.csv"
         self.markets_file = self.logs_dir / "markets.csv"
         self.clob_history_file = self.logs_dir / "clob_price_history.csv"
@@ -66,13 +67,16 @@ class ContractTargetBuilder:
         }
 
     def build(self, forward_minutes=15, max_hold_minutes=60, tp_move=0.04, sl_move=0.03):
-        signals_df = self._safe_read(self.signals_file)
+        signals_df = self._safe_read(self.raw_candidates_file)
         markets_df = self._safe_read(self.markets_file)
         history_df = self._safe_read(self.clob_history_file)
 
         if signals_df.empty or markets_df.empty or history_df.empty:
             return pd.DataFrame()
-        if "market" not in signals_df.columns or "question" not in markets_df.columns:
+
+        market_col = "market" if "market" in signals_df.columns else "market_title" if "market_title" in signals_df.columns else None
+        question_col = "question" if "question" in markets_df.columns else "market_title" if "market_title" in markets_df.columns else None
+        if not market_col or not question_col:
             return pd.DataFrame()
 
         signals_df = signals_df.copy()
@@ -81,17 +85,19 @@ class ContractTargetBuilder:
         history_df["timestamp"] = pd.to_datetime(history_df["timestamp"], utc=True, errors="coerce", format="mixed")
         history_df = history_df.dropna(subset=["timestamp", "token_id"]).sort_values(["token_id", "timestamp"]).reset_index(drop=True)
 
-        market_lookup = markets_df.drop_duplicates(subset=["question"], keep="last").set_index("question").to_dict("index")
+        market_lookup = markets_df.drop_duplicates(subset=[question_col], keep="last").set_index(question_col).to_dict("index")
 
         rows = []
         for _, signal_row in signals_df.iterrows():
-            market_title = signal_row.get("market")
-            market_row = market_lookup.get(market_title)
-            if not market_row:
-                continue
-
-            token_id = self._select_token_id(signal_row.to_dict(), market_row)
-            if not token_id:
+            signal_dict = signal_row.to_dict()
+            token_id = signal_dict.get("token_id")
+            if pd.isna(token_id) or not str(token_id).strip():
+                market_title = signal_dict.get(market_col)
+                market_row = market_lookup.get(market_title)
+                if not market_row:
+                    continue
+                token_id = self._select_token_id(signal_dict, market_row)
+            if not token_id or pd.isna(token_id):
                 continue
 
             token_history = history_df[history_df["token_id"].astype(str) == str(token_id)].copy()

@@ -1,3 +1,5 @@
+import ast
+import json
 import logging
 from pathlib import Path
 from datetime import datetime
@@ -8,6 +10,25 @@ import requests
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
+
+
+def _normalize_token_list(value):
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            pass
+        try:
+            parsed = ast.literal_eval(value)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            pass
+    return []
 
 
 def fetch_btc_markets(limit_per_page=100, closed=False, max_offset=2000):
@@ -55,7 +76,7 @@ def fetch_btc_markets(limit_per_page=100, closed=False, max_offset=2000):
             tokens = market.get("tokens") or []
             yes_token = next((t for t in tokens if str(t.get("outcome", "")).upper() == "YES"), {})
             no_token = next((t for t in tokens if str(t.get("outcome", "")).upper() == "NO"), {})
-            clob_token_ids = market.get("clobTokenIds") or []
+            clob_token_ids = _normalize_token_list(market.get("clobTokenIds"))
             yes_token_id = yes_token.get("token_id") or yes_token.get("id") or (clob_token_ids[0] if len(clob_token_ids) > 0 else None)
             no_token_id = no_token.get("token_id") or no_token.get("id") or (clob_token_ids[1] if len(clob_token_ids) > 1 else None)
             best_bid = market.get("bestBid") or market.get("best_bid") or market.get("bid")
@@ -116,6 +137,12 @@ def save_market_snapshot(markets_df, logs_dir="logs"):
             existing_df = pd.DataFrame()
 
     combined = pd.concat([existing_df, markets_df], ignore_index=True, sort=False)
+    if "timestamp" in combined.columns:
+        combined["timestamp"] = pd.to_datetime(combined["timestamp"], errors="coerce")
+    dedupe_cols = [c for c in ["market_id", "question", "slug"] if c in combined.columns]
+    if dedupe_cols:
+        combined = combined.sort_values("timestamp", kind="stable") if "timestamp" in combined.columns else combined
+        combined = combined.drop_duplicates(subset=dedupe_cols, keep="last")
     combined.to_csv(output_file, index=False)
     logging.info("Saved market snapshot to %s", output_file)
 

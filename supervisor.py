@@ -37,6 +37,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 os.makedirs("logs", exist_ok=True)
 EXECUTION_FILE = "logs/execution_log.csv"
 SIGNALS_FILE = "logs/signals.csv"
+RAW_CANDIDATES_FILE = "logs/raw_candidates.csv"
 MARKETS_FILE = "logs/markets.csv"
 
 
@@ -137,6 +138,21 @@ def safe_read_csv(path):
 def append_csv_record(path, record):
     df = pd.DataFrame([record])
     df.to_csv(path, mode="a", header=not os.path.exists(path), index=False)
+
+
+def append_csv_frame(path, df):
+    if df is None or df.empty:
+        return
+    df.to_csv(path, mode="a", header=not os.path.exists(path), index=False)
+
+
+def log_raw_candidates(candidates_df):
+    if candidates_df is None or candidates_df.empty:
+        return
+    raw_df = candidates_df.copy()
+    if "timestamp" not in raw_df.columns:
+        raw_df["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    append_csv_frame(RAW_CANDIDATES_FILE, raw_df)
 
 
 def log_ranked_signal(signal_row):
@@ -297,6 +313,7 @@ def main_loop():
 
             # 3. Build features, run supervised inference, and score paper-trading opportunities
             features_df = feature_builder.build_features(signals_df, markets_df)
+            log_raw_candidates(features_df)
             inferred_df = model_inference.run(features_df)
             inferred_df = stage1_inference.run(inferred_df)
             inferred_df = stage2_inference.run(inferred_df)

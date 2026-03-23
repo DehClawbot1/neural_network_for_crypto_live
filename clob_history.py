@@ -15,7 +15,7 @@ class CLOBHistoryClient:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.output_file = self.logs_dir / "clob_price_history.csv"
 
-    def fetch_history(self, token_id, days=7, interval="1m", fidelity=1):
+    def fetch_history(self, token_id, days=7, interval="1m", fidelity=10):
         end_ts = int(datetime.now(timezone.utc).timestamp())
         start_ts = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
         response = requests.get(

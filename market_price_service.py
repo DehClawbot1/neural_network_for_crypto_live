@@ -42,7 +42,7 @@ class MarketPriceService:
                 "startTs": start_ts,
                 "endTs": end_ts,
                 "interval": interval,
-                "fidelity": 1,
+                "fidelity": 10,
             },
             timeout=20,
         )
