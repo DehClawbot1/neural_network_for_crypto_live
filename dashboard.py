@@ -291,6 +291,18 @@ def ensure_arrow_compatible(df):
     return out
 
 
+_ORIGINAL_ST_DATAFRAME = st.dataframe
+
+
+def safe_streamlit_dataframe(data=None, *args, **kwargs):
+    if isinstance(data, pd.DataFrame):
+        data = ensure_arrow_compatible(data)
+    return _ORIGINAL_ST_DATAFRAME(data, *args, **kwargs)
+
+
+st.dataframe = safe_streamlit_dataframe
+
+
 def render_overview(signals_df, trades_df, markets_df, alerts_df, positions_df, closed_positions_df):
     st.markdown('<div class="section-title">Overview</div>', unsafe_allow_html=True)
 
