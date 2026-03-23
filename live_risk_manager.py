@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 @dataclass
@@ -35,7 +35,7 @@ class LiveRiskManager:
             return RiskDecision(False, "max_daily_loss_hit")
         if spread is not None and float(spread) > self.max_spread:
             return RiskDecision(False, "spread_too_wide")
-        if self.last_loss_time and datetime.utcnow() - self.last_loss_time < timedelta(minutes=self.cooldown_after_loss_minutes):
+        if self.last_loss_time and datetime.now(timezone.utc) - self.last_loss_time < timedelta(minutes=self.cooldown_after_loss_minutes):
             return RiskDecision(False, "cooldown_after_loss")
         if self.failed_orders >= self.max_failed_orders:
             return RiskDecision(False, "circuit_breaker_failed_orders")
@@ -45,7 +45,7 @@ class LiveRiskManager:
         self.failed_orders += 1
 
     def record_loss(self):
-        self.last_loss_time = datetime.utcnow()
+        self.last_loss_time = datetime.now(timezone.utc)
 
     def activate_kill_switch(self):
         self.kill_switch = True
@@ -53,4 +53,5 @@ class LiveRiskManager:
     def deactivate_kill_switch(self):
         self.kill_switch = False
         self.failed_orders = 0
+
 

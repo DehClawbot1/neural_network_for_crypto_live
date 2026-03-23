@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import time
 
@@ -35,23 +35,23 @@ class OrderManager:
 
     def submit_entry(self, token_id, price, size, side="BUY", condition_id=None, outcome_side=None, spread=None, open_orders=0, daily_pnl=0.0, order_type="GTC", post_only=False, execution_style="maker"):
         decision = self.risk.pre_trade_check(price=price, size=size, spread=spread, open_orders=open_orders, daily_pnl=daily_pnl)
-        idempotency_key = f"{datetime.utcnow().strftime('%Y-%m-%dT%H:%M')}|{token_id}|{condition_id}|{side}|{size}|{round(float(price), 4)}"
+        idempotency_key = f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M')}|{token_id}|{condition_id}|{side}|{size}|{round(float(price), 4)}"
         existing = self.list_orders()
         if not existing.empty and "idempotency_key" in existing.columns and (existing["idempotency_key"].astype(str) == idempotency_key).any():
             return {"status": "REJECTED", "reason": "duplicate_idempotency_key", "idempotency_key": idempotency_key}, None
         if not decision.allowed:
-            row = {"timestamp": datetime.utcnow().isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": decision.reason}
+            row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": decision.reason}
             self._append(self.orders_file, row)
             return row, None
 
         readiness = self.check_readiness(asset_type="COLLATERAL")
         available_balance = float(readiness.get("balance", readiness.get("amount", 0.0))) if isinstance(readiness, dict) else 0.0
         if not readiness:
-            row = {"timestamp": datetime.utcnow().isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": "missing_readiness"}
+            row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": "missing_readiness"}
             self._append(self.orders_file, row)
             return row, None
         if available_balance < float(size):
-            row = {"timestamp": datetime.utcnow().isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": "insufficient_funds", "available_balance": available_balance}
+            row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": "insufficient_funds", "available_balance": available_balance}
             self._append(self.orders_file, row)
             return row, None
 
@@ -59,13 +59,13 @@ class OrderManager:
             response = self.client.create_and_post_order(token_id=token_id, price=price, size=size, side=side, order_type=order_type, options={"post_only": bool(post_only)})
         except Exception as exc:
             self.risk.record_failed_order()
-            row = {"timestamp": datetime.utcnow().isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "FAILED", "reason": str(exc)}
+            row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "FAILED", "reason": str(exc)}
             self._append(self.orders_file, row)
             return row, None
 
         order_id = response.get("orderID") or response.get("order_id") or response.get("id")
         row = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "order_id": order_id,
             "idempotency_key": idempotency_key,
             "token_id": token_id,
@@ -174,7 +174,7 @@ class OrderManager:
 
     def cancel_stale_order(self, order_id):
         response = self.client.cancel_order(order_id)
-        self._append(self.orders_file, {"timestamp": datetime.utcnow().isoformat(), "order_id": order_id, "status": "CANCELED"})
+        self._append(self.orders_file, {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": order_id, "status": "CANCELED"})
         return response
 
     def list_orders(self):
@@ -186,11 +186,12 @@ class OrderManager:
             return pd.DataFrame()
 
     def record_fill(self, fill_payload: dict):
-        row = {"timestamp": datetime.utcnow().isoformat(), **fill_payload}
+        row = {"timestamp": datetime.now(timezone.utc).isoformat(), **fill_payload}
         self._append(self.fills_file, row)
         self.db.execute(
             "INSERT OR REPLACE INTO fills (fill_id, order_id, token_id, price, size, filled_at) VALUES (?, ?, ?, ?, ?, ?)",
             (row.get("trade_id") or row.get("fill_id"), row.get("order_id"), row.get("token_id"), row.get("price"), row.get("size"), row.get("timestamp")),
         )
         return fill_payload
+
 
