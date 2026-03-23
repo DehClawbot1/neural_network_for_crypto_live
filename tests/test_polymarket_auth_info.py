@@ -110,3 +110,18 @@ def test_polymarket_profile_client_get_public_profile():
 
     assert result["address"] == "0xabc"
     mock_get.assert_called_once_with(client.GAMMA_BASE, "/public-profile", {"address": "0xabc"})
+
+
+def test_profile_client_get_public_info_http_path():
+    profile_client = PolymarketProfileClient(timeout=5)
+    mock_response = {"displayName": "TestTrader", "proxyAddress": "0x123"}
+
+    with patch.object(profile_client.session, "get") as mock_get:
+        mock_get.return_value.json.return_value = mock_response
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.raise_for_status.return_value = None
+
+        info = profile_client.get_public_profile("0xaddress")
+
+    assert info["displayName"] == "TestTrader"
+    assert "/public-profile" in mock_get.call_args[0][0]
