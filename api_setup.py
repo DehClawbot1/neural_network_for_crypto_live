@@ -90,10 +90,17 @@ if __name__ == "__main__":
     is_valid = validate_environment()
     if is_valid:
         print("\n[+] Environment is valid.")
-        start_now = input("Start run_bot.py now? [y/N]: ").strip().lower()
-        if start_now in {"y", "yes"}:
-            subprocess.run([sys.executable, "run_bot.py"], check=False)
-        else:
-            print("[+] Setup complete. You may start run_bot.py manually.")
+        start_bot = input("Start run_bot.py now? [y/N]: ").strip().lower()
+        start_dashboard = input("Start dashboard.py now? [y/N]: ").strip().lower()
+
+        bot_process = None
+        if start_bot in {"y", "yes"}:
+            bot_process = subprocess.Popen([sys.executable, "run_bot.py"])
+
+        if start_dashboard in {"y", "yes"}:
+            subprocess.Popen([sys.executable, "-m", "streamlit", "run", "dashboard.py"])
+
+        if not bot_process and start_dashboard not in {"y", "yes"}:
+            print("[+] Setup complete. You may start run_bot.py and dashboard.py manually.")
     else:
         print("\n[-] Validation failed or template generated. Please check your .env file and run again.")
