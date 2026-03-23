@@ -48,8 +48,11 @@ def test_init_with_api_creds(mock_getenv):
         return values.get(key, default)
 
     mock_getenv.side_effect = fake_env
-    mock_client_module.ClobClient.side_effect = None
-    mock_client_module.ClobClient.return_value = MagicMock()
+    mock_client_module.ClobClient.reset_mock()
+    inner_client = MagicMock()
+    inner_client.get_balance_allowance.return_value = {"balance": "100.0"}
+    mock_client_module.ClobClient.return_value = inner_client
+    mock_clob_types_module.ApiCreds.side_effect = lambda key, secret, passphrase: SimpleNamespace(api_key=key, api_secret=secret, api_passphrase=passphrase)
 
     client = ExecutionClient()
 
@@ -70,24 +73,27 @@ def test_init_derives_api_creds_when_missing(mock_getenv):
         return values.get(key, default)
 
     mock_getenv.side_effect = fake_env
-    temp_client = MagicMock()
-    temp_client.create_or_derive_api_creds.return_value = SimpleNamespace(api_key="derived_k", api_secret="derived_s", api_passphrase="derived_p")
-    final_client = MagicMock()
-    mock_client_module.ClobClient.side_effect = [temp_client, final_client]
+    mock_client_module.ClobClient.reset_mock()
+    inner_client = MagicMock()
+    inner_client.create_or_derive_api_creds.return_value = SimpleNamespace(api_key="derived_k", api_secret="derived_s", api_passphrase="derived_p")
+    inner_client.get_balance_allowance.return_value = {"balance": "100.0"}
+    mock_client_module.ClobClient.return_value = inner_client
 
     client = ExecutionClient()
 
     assert client.api_creds is not None
-    assert client.client is final_client
+    assert client.client is inner_client
+    assert client.credential_source == "derived"
 
 
 @patch("execution_client.os.getenv")
 def test_order_placements(mock_getenv):
     mock_getenv.side_effect = lambda key, default=None: {"PRIVATE_KEY": "0xdummy_pk", "POLYMARKET_CHAIN_ID": "137"}.get(key, default)
-    temp_client = MagicMock()
-    temp_client.create_or_derive_api_creds.return_value = SimpleNamespace(api_key="derived_k", api_secret="derived_s", api_passphrase="derived_p")
+    mock_client_module.ClobClient.reset_mock()
     inner_client = MagicMock()
-    mock_client_module.ClobClient.side_effect = [temp_client, inner_client]
+    inner_client.create_or_derive_api_creds.return_value = SimpleNamespace(api_key="derived_k", api_secret="derived_s", api_passphrase="derived_p")
+    inner_client.get_balance_allowance.return_value = {"balance": "100.0"}
+    mock_client_module.ClobClient.return_value = inner_client
 
     client = ExecutionClient(private_key="0xdummy_pk")
     inner_client.create_order.return_value = "signed_limit_order"
@@ -106,10 +112,11 @@ def test_order_placements(mock_getenv):
 @patch("execution_client.os.getenv")
 def test_read_methods(mock_getenv):
     mock_getenv.side_effect = lambda key, default=None: {"PRIVATE_KEY": "0xdummy_pk", "POLYMARKET_CHAIN_ID": "137"}.get(key, default)
-    temp_client = MagicMock()
-    temp_client.create_or_derive_api_creds.return_value = SimpleNamespace(api_key="derived_k", api_secret="derived_s", api_passphrase="derived_p")
+    mock_client_module.ClobClient.reset_mock()
     inner_client = MagicMock()
-    mock_client_module.ClobClient.side_effect = [temp_client, inner_client]
+    inner_client.create_or_derive_api_creds.return_value = SimpleNamespace(api_key="derived_k", api_secret="derived_s", api_passphrase="derived_p")
+    inner_client.get_balance_allowance.return_value = {"balance": "100.0"}
+    mock_client_module.ClobClient.return_value = inner_client
 
     client = ExecutionClient(private_key="0xdummy_pk")
     inner_client.get_order.return_value = {"id": "123", "status": "OPEN"}
@@ -126,23 +133,22 @@ def test_read_methods(mock_getenv):
 @patch("execution_client.os.getenv")
 def test_balance_retrieval(mock_getenv):
     mock_getenv.side_effect = lambda key, default=None: {"PRIVATE_KEY": "0xdummy_pk", "POLYMARKET_CHAIN_ID": "137"}.get(key, default)
-    temp_client = MagicMock()
-    temp_client.create_or_derive_api_creds.return_value = SimpleNamespace(api_key="derived_k", api_secret="derived_s", api_passphrase="derived_p")
+    mock_client_module.ClobClient.reset_mock()
     inner_client = MagicMock()
-    mock_client_module.ClobClient.side_effect = [temp_client, inner_client]
+    inner_client.create_or_derive_api_creds.return_value = SimpleNamespace(api_key="derived_k", api_secret="derived_s", api_passphrase="derived_p")
+    inner_client.get_balance_allowance.side_effect = [
+        {"balance": "100.0"},
+        {"balance": "100.5"},
+        {"available_balance": "50.0"},
+        {"amount": "200.0"},
+        {"other_key": "10"},
+        "not_a_dict",
+    ]
+    mock_client_module.ClobClient.return_value = inner_client
 
     client = ExecutionClient(private_key="0xdummy_pk")
-    inner_client.get_balance_allowance.return_value = {"balance": "100.5"}
     assert client.get_available_balance() == 100.5
-
-    inner_client.get_balance_allowance.return_value = {"available_balance": "50.0"}
     assert client.get_available_balance() == 50.0
-
-    inner_client.get_balance_allowance.return_value = {"amount": "200.0"}
     assert client.get_available_balance() == 200.0
-
-    inner_client.get_balance_allowance.return_value = {"other_key": "10"}
     assert client.get_available_balance() == 0.0
-
-    inner_client.get_balance_allowance.return_value = "not_a_dict"
     assert client.get_available_balance() == 0.0
