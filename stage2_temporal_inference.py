@@ -24,13 +24,15 @@ class Stage2TemporalInference:
         reg_saved = self._load(self.regressor_file)
 
         if clf_saved is not None:
-            feat_cols = [c for c in clf_saved["features"] if c in out.columns]
-            if feat_cols:
-                out["temporal_p_tp_before_sl"] = clf_saved["model"].predict_proba(out[feat_cols])[:, 1]
+            feat_cols = list(clf_saved["features"])
+            X = out.reindex(columns=feat_cols, fill_value=0.0)
+            if not X.empty:
+                out["temporal_p_tp_before_sl"] = clf_saved["model"].predict_proba(X)[:, 1]
         if reg_saved is not None:
-            feat_cols = [c for c in reg_saved["features"] if c in out.columns]
-            if feat_cols:
-                out["temporal_expected_return"] = reg_saved["model"].predict(out[feat_cols])
+            feat_cols = list(reg_saved["features"])
+            X = out.reindex(columns=feat_cols, fill_value=0.0)
+            if not X.empty:
+                out["temporal_expected_return"] = reg_saved["model"].predict(X)
 
         return out
 

@@ -24,14 +24,16 @@ class Stage1Inference:
         reg_saved = self._load(self.regressor_file)
 
         if clf_saved is not None:
-            feat_cols = [c for c in clf_saved["features"] if c in out.columns]
-            if feat_cols:
-                probs = clf_saved["model"].predict_proba(out[feat_cols])[:, 1]
+            feat_cols = list(clf_saved["features"])
+            X = out.reindex(columns=feat_cols, fill_value=0.0)
+            if not X.empty:
+                probs = clf_saved["model"].predict_proba(X)[:, 1]
                 out["p_tp_before_sl"] = probs
         if reg_saved is not None:
-            feat_cols = [c for c in reg_saved["features"] if c in out.columns]
-            if feat_cols:
-                preds = reg_saved["model"].predict(out[feat_cols])
+            feat_cols = list(reg_saved["features"])
+            X = out.reindex(columns=feat_cols, fill_value=0.0)
+            if not X.empty:
+                preds = reg_saved["model"].predict(X)
                 out["expected_return"] = preds
 
         if "p_tp_before_sl" not in out.columns:
