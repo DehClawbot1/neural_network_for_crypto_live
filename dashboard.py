@@ -5,7 +5,11 @@ from datetime import datetime
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-import streamlit.components.v1 as components
+
+try:
+    from streamlit_autorefresh import st_autorefresh
+except Exception:
+    st_autorefresh = None
 from log_loader import load_execution_history as shared_load_execution_history
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -1628,10 +1632,10 @@ def main():
     only_actionable = st.sidebar.checkbox("Actionable only", value=False)
     time_range_hours = date_range_days * 24
     if auto_refresh_enabled:
-        components.html(
-            f"<script>setTimeout(function() {{ window.parent.location.reload(); }}, {int(refresh_seconds) * 1000});</script>",
-            height=0,
-        )
+        if st_autorefresh is not None:
+            st_autorefresh(interval=int(refresh_seconds) * 1000, key="dashboard_data_refresh")
+        else:
+            st.sidebar.caption("Install streamlit-autorefresh for non-disruptive refresh behavior.")
 
     signals_df = load_csv(SIGNALS_FILE)
     trades_df = load_execution_history()
