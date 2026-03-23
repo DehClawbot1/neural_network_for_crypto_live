@@ -38,17 +38,18 @@ class ExecutionClient:
         if not self.private_key:
             raise ValueError("PRIVATE_KEY is required for live-test execution client")
 
+        self.client = self.ClobClient(
+            self.host,
+            key=self.private_key,
+            chain_id=self.chain_id,
+            signature_type=self.signature_type,
+            funder=self.funder,
+        )
+
         if self.api_key and self.api_secret and self.api_passphrase:
             self.api_creds = self.ApiCreds(self.api_key, self.api_secret, self.api_passphrase)
         else:
-            temp_client = self.ClobClient(
-                self.host,
-                key=self.private_key,
-                chain_id=self.chain_id,
-                signature_type=self.signature_type,
-                funder=self.funder,
-            )
-            self.api_creds = temp_client.create_or_derive_api_creds()
+            self.api_creds = self.client.create_or_derive_api_creds()
             print(
                 "SAVE THESE TO .ENV:\n"
                 f"POLYMARKET_API_KEY={getattr(self.api_creds, 'api_key', getattr(self.api_creds, 'key', ''))}\n"
@@ -56,14 +57,7 @@ class ExecutionClient:
                 f"POLYMARKET_API_PASSPHRASE={getattr(self.api_creds, 'api_passphrase', getattr(self.api_creds, 'passphrase', ''))}"
             )
 
-        self.client = self.ClobClient(
-            self.host,
-            key=self.private_key,
-            chain_id=self.chain_id,
-            creds=self.api_creds,
-            signature_type=self.signature_type,
-            funder=self.funder,
-        )
+        self.client.set_api_creds(self.api_creds)
 
     def create_and_post_order(self, token_id, price, size, side="BUY", order_type="GTC", options=None):
         side_const = self.BUY if str(side).upper() == "BUY" else self.SELL
