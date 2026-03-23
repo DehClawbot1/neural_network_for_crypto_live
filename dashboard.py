@@ -5,6 +5,7 @@ from datetime import datetime
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from pandas.io.formats.style import Styler
 from components.market_views import render_market_tracker as component_render_market_tracker, render_whale_tracker as component_render_whale_tracker
 from schema import normalize_dataframe_columns
 
@@ -297,6 +298,8 @@ _ORIGINAL_ST_DATAFRAME = st.dataframe
 def safe_streamlit_dataframe(data=None, *args, **kwargs):
     if isinstance(data, pd.DataFrame):
         data = ensure_arrow_compatible(data)
+    elif isinstance(data, Styler):
+        data = ensure_arrow_compatible(data.data).style
     return _ORIGINAL_ST_DATAFRAME(data, *args, **kwargs)
 
 
@@ -1223,7 +1226,7 @@ def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df,
                     conf_df["timestamp"] = pd.to_datetime(conf_df["timestamp"], errors="coerce")
                     conf_df = conf_df.dropna(subset=["timestamp"]).sort_values("timestamp")
                     if not conf_df.empty:
-                        roll = conf_df.set_index("timestamp")["confidence"].rolling("6H").mean().reset_index(name="rolling_confidence")
+                        roll = conf_df.set_index("timestamp")["confidence"].rolling("6h").mean().reset_index(name="rolling_confidence")
                         st.plotly_chart(px.line(roll, x="timestamp", y="rolling_confidence", title="Rolling Confidence Drift"), use_container_width=True)
         availability_checks = {
             "confidence": "confidence" in signals_df.columns,
