@@ -6,6 +6,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 from components.market_views import render_market_tracker as component_render_market_tracker, render_whale_tracker as component_render_whale_tracker
+from schema import normalize_dataframe_columns
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -1395,23 +1396,23 @@ def main():
         else:
             st.sidebar.caption("Install streamlit-autorefresh for non-disruptive refresh behavior.")
 
-    signals_df = load_csv(SIGNALS_FILE)
-    trades_df = load_execution_history()
-    episode_log_df = load_csv(EPISODE_LOG_FILE)
-    markets_df = load_csv(MARKETS_FILE)
-    whales_df = load_csv(WHALES_FILE)
-    distribution_df = load_csv(MARKET_DISTRIBUTION_FILE)
-    alerts_df = load_csv(ALERTS_FILE)
-    model_status_df = load_csv(MODEL_STATUS_FILE)
-    system_health_df = load_csv(SYSTEM_HEALTH_FILE)
-    service_heartbeats_df = load_csv(SERVICE_HEARTBEATS_FILE)
-    positions_df = load_csv(POSITIONS_FILE)
-    closed_positions_df = load_csv(CLOSED_POSITIONS_FILE)
-    supervised_eval_df = load_csv(SUPERVISED_EVAL_FILE)
-    time_split_eval_df = load_csv(TIME_SPLIT_EVAL_FILE)
-    path_replay_df = load_csv(PATH_REPLAY_FILE)
-    backtest_wallet_df = load_csv(BACKTEST_BY_WALLET_FILE)
-    model_registry_df = load_csv(MODEL_REGISTRY_FILE)
+    signals_df = normalize_dataframe_columns(load_csv(SIGNALS_FILE))
+    trades_df = normalize_dataframe_columns(load_execution_history())
+    episode_log_df = normalize_dataframe_columns(load_csv(EPISODE_LOG_FILE))
+    markets_df = normalize_dataframe_columns(load_csv(MARKETS_FILE))
+    whales_df = normalize_dataframe_columns(load_csv(WHALES_FILE))
+    distribution_df = normalize_dataframe_columns(load_csv(MARKET_DISTRIBUTION_FILE))
+    alerts_df = normalize_dataframe_columns(load_csv(ALERTS_FILE))
+    model_status_df = normalize_dataframe_columns(load_csv(MODEL_STATUS_FILE))
+    system_health_df = normalize_dataframe_columns(load_csv(SYSTEM_HEALTH_FILE))
+    service_heartbeats_df = normalize_dataframe_columns(load_csv(SERVICE_HEARTBEATS_FILE))
+    positions_df = normalize_dataframe_columns(load_csv(POSITIONS_FILE))
+    closed_positions_df = normalize_dataframe_columns(load_csv(CLOSED_POSITIONS_FILE))
+    supervised_eval_df = normalize_dataframe_columns(load_csv(SUPERVISED_EVAL_FILE))
+    time_split_eval_df = normalize_dataframe_columns(load_csv(TIME_SPLIT_EVAL_FILE))
+    path_replay_df = normalize_dataframe_columns(load_csv(PATH_REPLAY_FILE))
+    backtest_wallet_df = normalize_dataframe_columns(load_csv(BACKTEST_BY_WALLET_FILE))
+    model_registry_df = normalize_dataframe_columns(load_csv(MODEL_REGISTRY_FILE))
 
     signals_df = apply_dashboard_filters(signals_df, market_search=market_search, wallet_search=wallet_search, min_confidence=min_confidence, signal_label=signal_label_filter, side_filter=side_filter, min_edge_score=min_edge_score, only_actionable=only_actionable, time_range_hours=time_range_hours)
     trades_df = apply_dashboard_filters(trades_df, market_search=market_search, wallet_search=wallet_search, min_confidence=min_confidence, signal_label=signal_label_filter, side_filter=side_filter, min_edge_score=min_edge_score, only_actionable=only_actionable, time_range_hours=time_range_hours)
