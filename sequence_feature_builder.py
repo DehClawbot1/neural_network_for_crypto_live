@@ -42,7 +42,6 @@ class SequenceFeatureBuilder:
                 "spread",
                 "current_price",
                 "normalized_trade_size",
-                "confidence",
             ] if c in df.columns
         ]
 

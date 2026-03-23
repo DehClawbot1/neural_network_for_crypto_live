@@ -65,6 +65,8 @@ class WalletAlphaBuilder:
                 if past.empty:
                     rows.append({"wallet_copied": wallet, "timestamp": group.iloc[idx]["timestamp"]})
                     continue
+                yes_avg = float(past[past["outcome_side"] == "YES"][return_col].mean()) if "outcome_side" in past.columns else 0.0
+                no_avg = float(past[past["outcome_side"] == "NO"][return_col].mean()) if "outcome_side" in past.columns else 0.0
                 rows.append(
                     {
                         "wallet_copied": wallet,
@@ -75,18 +77,11 @@ class WalletAlphaBuilder:
                         "wallet_alpha_30d": float(past[return_col].mean()),
                         "wallet_signal_precision_tp": float(past[hit_col].mean()) if hit_col else None,
                         "wallet_recent_streak": int((past[return_col].tail(5) > 0).sum()),
+                        "yes_side_avg_return": yes_avg,
+                        "no_side_avg_return": no_avg,
                     }
                 )
         history_df = pd.DataFrame(rows)
-        if not history_df.empty and "outcome_side" in df.columns and wallet_col in df.columns:
-            side_stats = (
-                df.groupby([wallet_col, "outcome_side"])[return_col]
-                .mean()
-                .unstack(fill_value=0.0)
-                .reset_index()
-                .rename(columns={wallet_col: "wallet_copied", "YES": "yes_side_avg_return", "NO": "no_side_avg_return"})
-            )
-            history_df = history_df.merge(side_stats, on="wallet_copied", how="left")
         return history_df
 
     def write(self):
