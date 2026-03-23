@@ -135,11 +135,12 @@ class PositionManager:
                     latest_conf[str(token_id)] = float(row.get("confidence", 0.0))
 
         token_ids = [str(x) for x in positions.get("token_id", pd.Series(dtype=str)).dropna().tolist()]
-        latest_prices = self.price_service.get_latest_prices(token_ids) if token_ids else {}
+        latest_quotes = self.price_service.get_batch_prices(token_ids) if token_ids else {}
 
         for idx, row in positions.iterrows():
             token_id = str(row.get("token_id", ""))
-            current_price = latest_prices.get(token_id)
+            quote = latest_quotes.get(token_id) or {}
+            current_price = quote.get("price")
             if current_price is None:
                 current_price = float(row.get("current_price", row.get("entry_price", 0.5)))
             entry_price = float(row.get("entry_price", current_price))
@@ -149,6 +150,8 @@ class PositionManager:
             unrealized_pnl = PNLEngine.mark_to_market_pnl(float(row.get("size_usdc", 0.0)), entry_price, current_price, fees=fees_paid)
 
             positions.at[idx, "current_price"] = current_price
+            positions.at[idx, "spread"] = float(quote.get("spread", 0.0) or 0.0)
+            positions.at[idx, "bid_size"] = float(quote.get("best_bid_size", 0.0) or 0.0)
             positions.at[idx, "market_value"] = round(float(market_value), 4)
             positions.at[idx, "unrealized_pnl"] = round(float(unrealized_pnl), 4)
             prior_peak = float(row.get("peak_price", entry_price) or entry_price)

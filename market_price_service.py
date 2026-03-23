@@ -138,7 +138,7 @@ class MarketPriceService:
 
     def get_latest_prices(self, token_ids):
         quotes = self.get_batch_prices(token_ids)
-        return {token_id: (quote or {}).get("midpoint") for token_id, quote in quotes.items()}
+        return {token_id: (quote or {}).get("price") for token_id, quote in quotes.items()}
 
     async def stream_prices(self, token_ids, update_callback=None):
         try:
@@ -181,3 +181,4 @@ class MarketPriceService:
 
     def stream_prices_forever(self, token_ids, update_callback=None):
         asyncio.run(self.stream_prices(token_ids, update_callback=update_callback))
+
