@@ -431,18 +431,3 @@ def main_loop():
 if __name__ == "__main__":
     main_loop()
 
-onds...")
-            time.sleep(60)
-
-        except KeyboardInterrupt:
-            logging.info("Supervisor halted manually by user.")
-            break
-        except Exception as e:
-            autonomous_monitor.write_failure("supervisor", str(e))
-            logging.error(f"Critical error in main loop: {e}. Auto-restarting in 60 seconds...")
-            time.sleep(60)
-
-
-if __name__ == "__main__":
-    main_loop()
-
