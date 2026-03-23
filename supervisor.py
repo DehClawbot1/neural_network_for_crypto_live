@@ -29,6 +29,7 @@ from stage1_inference import Stage1Inference
 from stage2_temporal_inference import Stage2TemporalInference
 from stage3_hybrid import Stage3HybridScorer
 from strategy_layers import EntryRuleLayer
+from shadow_purgatory import ShadowPurgatory
 
 # Configure logging for zero-intervention monitoring
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -286,6 +287,11 @@ def main_loop():
     autonomous_monitor = AutonomousMonitor()
     retrainer = Retrainer()
     previous_markets_df = None
+    try:
+        shadow_purgatory = ShadowPurgatory()
+    except Exception as exc:
+        shadow_purgatory = None
+        logging.warning("ShadowPurgatory unavailable at startup: %s", exc)
 
     while True:
         try:
@@ -345,11 +351,10 @@ def main_loop():
             log_raw_candidates(inferred_df)
             scored_df = signal_engine.score_features(inferred_df)
 
-            if shadow_logger is not None and not scored_df.empty:
-                scored_view = normalize_dataframe_columns(scored_df)
-                for _, row in scored_view.head(5).iterrows():
+            if shadow_purgatory is not None and not scored_df.empty:
+                for _, row in scored_df.head(5).iterrows():
                     try:
-                        shadow_logger.log_entry(row.to_dict(), pd.DataFrame([row]))
+                        shadow_purgatory.log_intent(row.to_dict(), pd.DataFrame([row]))
                     except Exception as exc:
                         logging.warning("Shadow logging failed for %s: %s", row.get("market_title", row.get("market")), exc)
 
