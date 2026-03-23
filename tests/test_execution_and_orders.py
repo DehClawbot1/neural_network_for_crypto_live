@@ -52,6 +52,7 @@ def test_wait_for_fill_persists_fill(mock_execution_client, tmp_path):
     result = manager.wait_for_fill("test-order-123", timeout_seconds=1, poll_seconds=0)
 
     assert result["filled"] is True
+    assert result["response"]["status"] == "FILLED"
     fills_df = pd.read_csv(tmp_path / "live_fills.csv")
     assert not fills_df.empty
     assert str(fills_df.iloc[0]["order_id"]) == "test-order-123"
