@@ -56,7 +56,7 @@ def render_market_tracker(markets_df):
     c4.metric("Price-updated Recently", recently_updated)
 
     table_cols = [c for c in [market_col, price_col, "liquidity", "volume", "market_id", "url", "updated_at", "timestamp"] if c and c in view.columns]
-    st.dataframe(view[table_cols], width="stretch", hide_index=True)
+    st.dataframe(view[table_cols], use_container_width=True, hide_index=True)
 
     if market_col and "liquidity" in view.columns:
         liq_df = view.dropna(subset=[market_col]).copy().head(12)
@@ -158,3 +158,4 @@ def render_whale_tracker(whales_df):
         if not activity_df.empty:
             timeline = activity_df.groupby(activity_df[time_col].dt.floor("H")).size().reset_index(name="activity_count")
             st.plotly_chart(px.line(timeline, x=time_col, y="activity_count", title="Wallet Activity Over Time"), width="stretch")
+

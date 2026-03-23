@@ -468,8 +468,8 @@ def render_factor_matrix(signals_df):
     st.caption(f"Explaining: {selected_row.get('market_title', selected_row.get('market', 'Unknown Market'))}")
     fig = px.bar(numeric_plot, x="numeric_score", y="factor", orientation="h", title="Signal Factor Breakdown")
     fig.update_layout(height=420, yaxis={"categoryorder": "total ascending"})
-    st.plotly_chart(fig, width="stretch")
-    st.dataframe(factor_df, width="stretch", hide_index=True)
+    st.plotly_chart(fig, use_container_width=True)
+    st.dataframe(factor_df, use_container_width=True, hide_index=True)
 
 
 def render_top_opportunities(signals_df):
@@ -566,7 +566,7 @@ def render_top_opportunities(signals_df):
             if missing_scores:
                 st.caption(f"⚠ Missing score data: {', '.join(missing_scores)}")
             if pd.notna(market_url) and market_url:
-                st.link_button("Open market on Polymarket", market_url, width="stretch")
+                st.link_button("Open market on Polymarket", market_url, use_container_width=True)
 
 
 def render_opportunity_table(signals_df):
@@ -599,7 +599,7 @@ def render_opportunity_table(signals_df):
     preferred = ["market", "side", "signal label", "confidence", "p_tp_before_sl", "edge score", "expected return", "wallet", "current price", "action", "timestamp", "freshness age"]
     cols = [c for c in preferred if c in display.columns]
     display = display[cols].copy()
-    st.dataframe(display, width="stretch", hide_index=True)
+    st.dataframe(display, use_container_width=True, hide_index=True)
     st.download_button(
         "Export opportunity table CSV",
         data=display.to_csv(index=False).encode("utf-8"),
@@ -622,12 +622,12 @@ def render_market_distribution(distribution_df):
         st.info("No market distribution data yet.")
         return
 
-    st.dataframe(distribution_df.head(15), width="stretch")
+    st.dataframe(distribution_df.head(15), use_container_width=True)
     if "unique_wallets" in distribution_df.columns and "market_title" in distribution_df.columns:
         chart_df = distribution_df.head(10)
         fig = px.bar(chart_df, x="unique_wallets", y="market_title", orientation="h", title="Where the watched wallets are clustering")
         fig.update_layout(height=380, yaxis={"categoryorder": "total ascending"})
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, use_container_width=True)
 
 
 def render_alerts(alerts_df):
@@ -753,7 +753,7 @@ def render_simulated_decisions(positions_df, closed_positions_df):
         return
 
     decisions_df = pd.DataFrame(rows)
-    st.dataframe(decisions_df.sort_values(by="profit_usdc", ascending=False), width="stretch")
+    st.dataframe(decisions_df.sort_values(by="profit_usdc", ascending=False), use_container_width=True)
 
 
 def render_positions_pnl_summary(positions_df, closed_positions_df):
@@ -826,7 +826,7 @@ def render_positions(positions_df, closed_positions_df):
                     return ["background-color: rgba(245, 158, 11, 0.18)"] * len(row)
                 return [""] * len(row)
 
-            st.dataframe(open_view.style.apply(_row_style, axis=1), width="stretch")
+            st.dataframe(open_view.style.apply(_row_style, axis=1), use_container_width=True)
     with c2:
         st.markdown("**Closed Positions**")
         if closed_positions_df.empty:
@@ -848,7 +848,7 @@ def render_positions(positions_df, closed_positions_df):
                 closed_view["signal_label_at_entry"] = closed_view["signal_label"]
             display_cols = [c for c in ["market", "outcome_side", "entry_price", "exit_price", "opened_at", "closed_at", "hold_duration", "close_reason", "fees", "net_pnl", "wallet_copied", "signal_label_at_entry"] if c in closed_view.columns]
             closed_view = closed_view[display_cols].rename(columns={"outcome_side": "side", "opened_at": "entry time", "closed_at": "exit time", "close_reason": "exit reason", "wallet_copied": "copied wallet", "net_pnl": "net PnL", "signal_label_at_entry": "signal label at entry"}).fillna("N/A")
-            st.dataframe(closed_view, width="stretch", hide_index=True)
+            st.dataframe(closed_view, use_container_width=True, hide_index=True)
 
 
 def render_paper_trades(trades_df):
@@ -958,7 +958,7 @@ def render_best_trades(closed_positions_df, path_replay_df):
 
     pnl_col = "net_realized_pnl" if "net_realized_pnl" in source_df.columns else "realized_pnl" if "realized_pnl" in source_df.columns else "net_pnl" if "net_pnl" in source_df.columns else "unrealized_pnl" if "unrealized_pnl" in source_df.columns else None
     if pnl_col is None:
-        st.dataframe(source_df.head(10), width="stretch")
+        st.dataframe(source_df.head(10), use_container_width=True)
         return
 
     cols = [c for c in ["market", "entry_price", "exit_price", pnl_col, "wallet_copied", "close_reason", "exit_reason"] if c in source_df.columns]
@@ -966,11 +966,11 @@ def render_best_trades(closed_positions_df, path_replay_df):
     with left:
         st.markdown("**Top Winners**")
         winners = source_df.sort_values(by=pnl_col, ascending=False).head(10)
-        st.dataframe(winners[cols], width="stretch", hide_index=True)
+        st.dataframe(winners[cols], use_container_width=True, hide_index=True)
     with right:
         st.markdown("**Top Losers**")
         losers = source_df.sort_values(by=pnl_col, ascending=True).head(10)
-        st.dataframe(losers[cols], width="stretch", hide_index=True)
+        st.dataframe(losers[cols], use_container_width=True, hide_index=True)
 
 
 def render_action_board(signals_df, positions_df):
@@ -1033,7 +1033,7 @@ def render_action_board(signals_df, positions_df):
         if group_df.empty:
             st.caption("No rows in this group.")
         else:
-            st.dataframe(group_df, width="stretch", hide_index=True)
+            st.dataframe(group_df, use_container_width=True, hide_index=True)
 
 
 def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df, path_replay_df, backtest_wallet_df, model_registry_df, signals_df=None):
@@ -1155,7 +1155,7 @@ def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df,
         if pnl_col:
             fig = px.histogram(path_replay_df, x=pnl_col, title="Replay PnL Distribution")
             fig.update_layout(height=320)
-            st.plotly_chart(fig, width="stretch")
+            st.plotly_chart(fig, use_container_width=True)
 
             equity_df = path_replay_df.copy()
             equity_df["equity_curve"] = equity_df[pnl_col].astype(float).cumsum()
@@ -1170,7 +1170,7 @@ def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df,
 
     if not backtest_wallet_df.empty:
         st.markdown("**Wallet Alpha Evolution / Leaders**")
-        st.dataframe(backtest_wallet_df.head(15), width="stretch")
+        st.dataframe(backtest_wallet_df.head(15), use_container_width=True)
 
     if signals_df is not None and not signals_df.empty:
         st.markdown("**Prediction Health & Drift**")
@@ -1194,7 +1194,7 @@ def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df,
             "current_price": "current_price" in signals_df.columns or "market_last_trade_price" in signals_df.columns,
         }
         avail_df = pd.DataFrame([{"field": k, "available": "Yes" if v else "No"} for k, v in availability_checks.items()])
-        st.dataframe(avail_df, width="stretch", hide_index=True)
+        st.dataframe(avail_df, use_container_width=True, hide_index=True)
 
 
 def render_data_quality_panel(signals_df, trades_df, markets_df, whales_df, alerts_df, model_status_df, positions_df, closed_positions_df, path_replay_df, system_health_df=None):
@@ -1235,7 +1235,7 @@ def render_data_quality_panel(signals_df, trades_df, markets_df, whales_df, aler
             "schema_validation": "ok" if df is not None and not df.empty else "missing/empty",
         })
     quality_df = pd.DataFrame(rows)
-    st.dataframe(quality_df, width="stretch", hide_index=True)
+    st.dataframe(quality_df, use_container_width=True, hide_index=True)
 
     training_ready = "Yes" if not closed_positions_df.empty and not model_status_df.empty else "No"
     replay_ready = "Yes" if not path_replay_df.empty else "No"
@@ -1349,24 +1349,24 @@ def render_raw_data(signals_df, trades_df, episode_log_df, markets_df, whales_df
     raw_tabs = st.tabs(["Signals", "Execution", "Episodes", "Markets", "Whales", "Alerts", "Learning", "Positions"])
 
     with raw_tabs[0]:
-        st.dataframe(signals_df, width="stretch")
+        st.dataframe(signals_df, use_container_width=True)
     with raw_tabs[1]:
-        st.dataframe(trades_df, width="stretch")
+        st.dataframe(trades_df, use_container_width=True)
     with raw_tabs[2]:
-        st.dataframe(episode_log_df, width="stretch")
+        st.dataframe(episode_log_df, use_container_width=True)
     with raw_tabs[3]:
-        st.dataframe(markets_df, width="stretch")
+        st.dataframe(markets_df, use_container_width=True)
     with raw_tabs[4]:
-        st.dataframe(whales_df, width="stretch")
+        st.dataframe(whales_df, use_container_width=True)
     with raw_tabs[5]:
-        st.dataframe(alerts_df, width="stretch")
+        st.dataframe(alerts_df, use_container_width=True)
     with raw_tabs[6]:
-        st.dataframe(model_status_df, width="stretch")
+        st.dataframe(model_status_df, use_container_width=True)
     with raw_tabs[7]:
         st.markdown("**Open Positions**")
-        st.dataframe(positions_df, width="stretch")
+        st.dataframe(positions_df, use_container_width=True)
         st.markdown("**Closed Positions**")
-        st.dataframe(closed_positions_df, width="stretch")
+        st.dataframe(closed_positions_df, use_container_width=True)
 
 
 def main():
@@ -1476,7 +1476,7 @@ def main():
         render_best_trades(closed_positions_df, path_replay_df)
         if not episode_log_df.empty:
             st.markdown('<div class="section-title">Episode Log</div>', unsafe_allow_html=True)
-            st.dataframe(episode_log_df.tail(20), width="stretch")
+            st.dataframe(episode_log_df.tail(20), use_container_width=True)
         bottom_left, bottom_right = st.columns([1, 1])
         with bottom_left:
             render_paper_trades(trades_df)
@@ -1506,3 +1506,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
