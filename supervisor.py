@@ -6,6 +6,11 @@ import pandas as pd
 from datetime import datetime
 from stable_baselines3 import PPO
 
+try:
+    from sb3_contrib import RecurrentPPO
+except Exception:
+    RecurrentPPO = None
+
 from leaderboard_scraper import run_scraper_cycle
 from market_monitor import fetch_btc_markets, save_market_snapshot
 from feature_builder import FeatureBuilder
@@ -35,9 +40,30 @@ SIGNALS_FILE = "logs/signals.csv"
 MARKETS_FILE = "logs/markets.csv"
 
 
+class StatefulRecurrentBrain:
+    def __init__(self, model):
+        self.model = model
+        self.lstm_state = None
+        self.episode_start = np.array([True], dtype=bool)
+
+    def predict(self, obs, deterministic=True):
+        action, self.lstm_state = self.model.predict(obs, state=self.lstm_state, episode_start=self.episode_start, deterministic=deterministic)
+        self.episode_start = np.array([False], dtype=bool)
+        return action, self.lstm_state
+
+    def reset_memory(self):
+        self.lstm_state = None
+        self.episode_start = np.array([True], dtype=bool)
+
+
 def load_brain(model_path="weights/ppo_polytrader"):
     """Loads the trained Reinforcement Learning model."""
+    recurrent_path = "weights/recurrent_ppo_polytrader"
     try:
+        if RecurrentPPO is not None and os.path.exists(recurrent_path + ".zip"):
+            model = RecurrentPPO.load(recurrent_path)
+            logging.info(f"[+] Successfully loaded recurrent RL brain from {recurrent_path}.zip")
+            return StatefulRecurrentBrain(model)
         model = PPO.load(model_path)
         logging.info(f"[+] Successfully loaded RL brain from {model_path}.zip")
         return model

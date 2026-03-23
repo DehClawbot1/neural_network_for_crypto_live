@@ -33,28 +33,28 @@ class OrderManager:
         except Exception:
             return None
 
-    def submit_entry(self, token_id, price, size, side="BUY", condition_id=None, outcome_side=None, spread=None, open_orders=0, daily_pnl=0.0):
+    def submit_entry(self, token_id, price, size, side="BUY", condition_id=None, outcome_side=None, spread=None, open_orders=0, daily_pnl=0.0, order_type="GTC", post_only=False, execution_style="maker"):
         decision = self.risk.pre_trade_check(price=price, size=size, spread=spread, open_orders=open_orders, daily_pnl=daily_pnl)
         idempotency_key = f"{datetime.utcnow().strftime('%Y-%m-%dT%H:%M')}|{token_id}|{condition_id}|{side}|{size}|{round(float(price), 4)}"
         existing = self.list_orders()
         if not existing.empty and "idempotency_key" in existing.columns and (existing["idempotency_key"].astype(str) == idempotency_key).any():
             return {"status": "REJECTED", "reason": "duplicate_idempotency_key", "idempotency_key": idempotency_key}, None
         if not decision.allowed:
-            row = {"timestamp": datetime.utcnow().isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "status": "REJECTED", "reason": decision.reason}
+            row = {"timestamp": datetime.utcnow().isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": decision.reason}
             self._append(self.orders_file, row)
             return row, None
 
         readiness = self.check_readiness(asset_type="COLLATERAL")
         if not readiness:
-            row = {"timestamp": datetime.utcnow().isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "status": "REJECTED", "reason": "missing_readiness"}
+            row = {"timestamp": datetime.utcnow().isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": "missing_readiness"}
             self._append(self.orders_file, row)
             return row, None
 
         try:
-            response = self.client.create_and_post_order(token_id=token_id, price=price, size=size, side=side)
+            response = self.client.create_and_post_order(token_id=token_id, price=price, size=size, side=side, order_type=order_type, options={"post_only": bool(post_only)})
         except Exception as exc:
             self.risk.record_failed_order()
-            row = {"timestamp": datetime.utcnow().isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "status": "FAILED", "reason": str(exc)}
+            row = {"timestamp": datetime.utcnow().isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "FAILED", "reason": str(exc)}
             self._append(self.orders_file, row)
             return row, None
 
@@ -69,6 +69,9 @@ class OrderManager:
             "order_side": side,
             "price": price,
             "size": size,
+            "order_type": order_type,
+            "post_only": post_only,
+            "execution_style": execution_style,
             "status": response.get("status", "SUBMITTED"),
             "readiness": readiness,
         }
@@ -98,6 +101,32 @@ class OrderManager:
                 return {"filled": False, "response": last_response}
             time.sleep(float(poll_seconds))
         return {"filled": False, "response": last_response, "reason": "timeout_waiting_for_fill"}
+
+    def submit_quote_order(self, token_id, price, size, side="BUY", condition_id=None, outcome_side=None):
+        return self.submit_entry(
+            token_id=token_id,
+            price=price,
+            size=size,
+            side=side,
+            condition_id=condition_id,
+            outcome_side=outcome_side,
+            order_type="GTC",
+            post_only=True,
+            execution_style="maker",
+        )
+
+    def submit_taker_order(self, token_id, price, size, side="BUY", condition_id=None, outcome_side=None):
+        return self.submit_entry(
+            token_id=token_id,
+            price=price,
+            size=size,
+            side=side,
+            condition_id=condition_id,
+            outcome_side=outcome_side,
+            order_type="GTC",
+            post_only=False,
+            execution_style="taker",
+        )
 
     def place_target_exit_order(self, token_id, target_price, size, condition_id=None, outcome_side=None):
         row, response = self.submit_entry(
