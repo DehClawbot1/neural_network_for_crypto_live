@@ -210,7 +210,7 @@ class LivePolyTradeEnv(gym.Env):
 
     FEATURE_DIM = 16
 
-    def __init__(self, execution_client, market_price_service, token_id=None, outcome_side="YES", max_hold_steps=120, order_manager=None, logs_dir="logs"):
+    def __init__(self, execution_client, market_price_service, token_id=None, outcome_side="YES", max_hold_steps=120, order_manager=None, logs_dir="logs", continuous_actions=False):
         super().__init__()
         self.execution_client = execution_client
         self.market_price_service = market_price_service
@@ -218,11 +218,12 @@ class LivePolyTradeEnv(gym.Env):
         self.logs_dir = Path(logs_dir)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.experience_file = self.logs_dir / "live_experience.csv"
+        self.continuous_actions = bool(continuous_actions)
         self.current_token_id = str(token_id) if token_id else None
         self.outcome_side = str(outcome_side).upper()
         self.max_hold_steps = max_hold_steps
 
-        self.action_space = spaces.Discrete(6)
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32) if self.continuous_actions else spaces.Discrete(6)
         self.observation_space = spaces.Box(low=-10.0, high=10.0, shape=(self.FEATURE_DIM,), dtype=np.float32)
 
         self.position_open = False
@@ -347,11 +348,27 @@ class LivePolyTradeEnv(gym.Env):
         return self._build_state(), {"token_id": self.current_token_id, "outcome_side": self.outcome_side}
 
     def _submit_live_action(self, action):
+        if self.continuous_actions:
+            action_value = float(np.asarray(action).reshape(-1)[0])
+        else:
+            action_value = float(action)
         if self.order_manager is None or not self.current_token_id:
-            return {"status": "NO_ORDER_MANAGER", "action": int(action)}
+            return {"status": "NO_ORDER_MANAGER", "action": action_value}
         quote = self.last_quote or self._safe_quote()
         best_ask = float(quote.get("best_ask") or quote.get("midpoint") or 0.0)
         best_bid = float(quote.get("best_bid") or quote.get("midpoint") or 0.0)
+
+        if self.continuous_actions:
+            if action_value > 0.05:
+                size = max(1.0, min(50.0, 50.0 * abs(action_value)))
+                row, _ = self.order_manager.submit_entry(token_id=self.current_token_id, price=best_ask, size=size, side="BUY", outcome_side=self.outcome_side)
+                return row
+            if action_value < -0.05:
+                size = max(1.0, min(max(float(self.shares), 1.0), max(float(self.shares), 50.0) * abs(action_value)))
+                row, _ = self.order_manager.submit_entry(token_id=self.current_token_id, price=best_bid, size=size, side="SELL", outcome_side=self.outcome_side)
+                return row
+            return {"status": "HOLD", "action": action_value}
+
         if action == 1:
             row, _ = self.order_manager.submit_entry(token_id=self.current_token_id, price=best_ask, size=10, side="BUY", outcome_side=self.outcome_side)
             return row
@@ -370,14 +387,14 @@ class LivePolyTradeEnv(gym.Env):
                 return {"status": "NO_POSITION_TO_EXIT"}
             row, _ = self.order_manager.submit_entry(token_id=self.current_token_id, price=best_bid, size=exit_size, side="SELL", outcome_side=self.outcome_side)
             return row
-        return {"status": "HOLD", "action": int(action)}
+        return {"status": "HOLD", "action": action_value}
 
     def _log_experience(self, action, reward, obs_before, obs_after, order_result):
         row = {
             "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
             "token_id": self.current_token_id,
             "outcome_side": self.outcome_side,
-            "action": int(action),
+            "action": float(action),
             "reward": float(reward),
             "position_open": self.position_open,
             "shares": float(self.shares),
@@ -393,7 +410,7 @@ class LivePolyTradeEnv(gym.Env):
         pd.DataFrame([row]).to_csv(self.experience_file, mode="a", header=not self.experience_file.exists(), index=False)
 
     def step(self, action):
-        action = int(action)
+        logged_action = float(np.asarray(action).reshape(-1)[0]) if self.continuous_actions else int(action)
         if self.position_open:
             self.position_age += 1
         obs_before = self._build_state()
@@ -407,11 +424,11 @@ class LivePolyTradeEnv(gym.Env):
         obs_after = self._build_state()
         balance_after = float(self._safe_balance())
         reward = float(balance_after - balance_before) if filled else 0.0
-        self._log_experience(action, reward, obs_before, obs_after, order_result)
+        self._log_experience(logged_action, reward, obs_before, obs_after, order_result)
         terminated = False
         truncated = self.position_age >= self.max_hold_steps
         info = {
-            "action_requested": action,
+            "action_requested": logged_action,
             "token_id": self.current_token_id,
             "outcome_side": self.outcome_side,
             "quote": self.last_quote,
