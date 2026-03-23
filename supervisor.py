@@ -451,17 +451,29 @@ def main_loop():
             open_positions_df = position_manager.update_mark_to_market(scored_df)
             if not open_positions_df.empty and brain is not None:
                 for _, pos_row in open_positions_df.iterrows():
-                    obs = prepare_position_observation(pos_row.to_dict())
+                    pos_dict = pos_row.to_dict()
+                    token_id = str(pos_dict.get("token_id", "") or "")
+                    obs = prepare_position_observation(pos_dict)
                     try:
                         pos_action, _ = brain.predict(obs, deterministic=True)
                         pos_action_val = int(pos_action.item() if hasattr(pos_action, "item") else pos_action[0])
                     except Exception:
                         pos_action_val = 3
 
+                    pos_action_map = {3: "HOLD", 4: "REDUCE", 5: "EXIT"}
+                    action_str = pos_action_map.get(pos_action_val, "HOLD")
+                    try:
+                        db.execute(
+                            "INSERT INTO model_decisions (token_id, model_name, score, action) VALUES (?, ?, ?, ?)",
+                            (token_id, "ppo_polytrader_management", float(pos_dict.get("confidence", 0.5) or 0.5), action_str),
+                        )
+                    except Exception as exc:
+                        logging.warning("Failed to log management decision for %s: %s", token_id, exc)
+
                     if pos_action_val == 4:
-                        position_manager.reduce_position(pos_row.to_dict(), fraction=0.5)
+                        position_manager.reduce_position(pos_dict, fraction=0.5)
                     elif pos_action_val == 5:
-                        position_manager.close_position(pos_row.to_dict(), reason="rl_exit")
+                        position_manager.close_position(pos_dict, reason="rl_exit")
 
             # 5. Phase 2 analytics outputs
             trades_df = safe_read_csv(EXECUTION_FILE)
