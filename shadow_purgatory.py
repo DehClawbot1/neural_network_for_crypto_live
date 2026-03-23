@@ -1,5 +1,4 @@
 import logging
-import os
 import random
 import threading
 import time
@@ -27,9 +26,7 @@ class ResilientCLOBClient:
                 response = requests.get(self.trades_url, params=params, timeout=10)
                 if response.status_code == 200:
                     data = response.json()
-                    if not isinstance(data, list):
-                        return []
-                    return data
+                    return data if isinstance(data, list) else []
                 if response.status_code == 429 or 500 <= response.status_code < 600:
                     retries += 1
                     sleep_time = (self.base_delay * (2 ** (retries - 1))) + random.uniform(0, 1)
@@ -47,7 +44,7 @@ class ResilientCLOBClient:
 
 
 class ShadowPurgatory:
-    def __init__(self, model_bundle_path, clob_client=None, log_path="logs/shadow_results.csv"):
+    def __init__(self, model_bundle_path=None, clob_client=None, log_path="logs/shadow_results.csv"):
         self.log_path = Path(log_path)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.clob = clob_client or ResilientCLOBClient()
@@ -66,6 +63,23 @@ class ShadowPurgatory:
             raise FileNotFoundError("No meta_model_bundle_*.pkl found in weights/")
         return bundles[-1]
 
+    def _get_bucket_slippage(self, meta_prob, window=50):
+        try:
+            with self.lock:
+                if not self.log_path.exists():
+                    return 20.0
+                df = pd.read_csv(self.log_path, engine="python", on_bad_lines="skip")
+            bucket_df = df[
+                (df["meta_prob"] >= meta_prob - 0.05)
+                & (df["meta_prob"] <= meta_prob + 0.05)
+                & (df["outcome"] != "PENDING")
+            ].tail(window)
+            if bucket_df.empty:
+                return 20.0
+            return float(bucket_df["entry_slippage_bps"].median())
+        except Exception:
+            return 20.0
+
     def log_intent(self, signal, features_df):
         try:
             if features_df is None or features_df.empty:
@@ -76,14 +90,21 @@ class ShadowPurgatory:
                 return 0.0
             X = features_df[self.feature_cols].copy()
             meta_prob = float(self.model.predict_proba(X)[:, 1][0])
+            expected_slip_bps = self._get_bucket_slippage(meta_prob)
+            expected_slip_pct = expected_slip_bps / 10000.0
+            ev_adj = (meta_prob * 0.04) + ((1 - meta_prob) * -0.03) - expected_slip_pct
+            is_doa = ev_adj < 0.005
+
             token_id = signal.get("token_id")
             if not token_id:
-                return meta_prob
+                return 0.0 if is_doa else meta_prob
+
             signal_ts = int(datetime.fromisoformat(str(signal["timestamp"]).replace("Z", "+00:00")).timestamp())
             shadow_price, delay = self._get_reachable_price(token_id, signal_ts)
             scraper_price = float(signal.get("price", signal.get("entry_price", 0.0)) or 0.0)
             shadow_price = shadow_price or scraper_price
             slippage = int(((shadow_price - scraper_price) / scraper_price) * 10000) if scraper_price > 0 else 0
+
             new_row = {
                 "timestamp": signal.get("timestamp"),
                 "market_title": signal.get("market_title", signal.get("market", "Unknown")),
@@ -95,13 +116,18 @@ class ShadowPurgatory:
                 "entry_slippage_bps": slippage,
                 "entry_delay_sec": delay,
                 "meta_prob": round(meta_prob, 6),
-                "outcome": "PENDING",
+                "expected_slip_bps": expected_slip_bps,
+                "ev_adj": round(ev_adj, 6),
+                "outcome": "DOA" if is_doa else "PENDING",
                 "realized_return": 0.0,
                 "trades_in_window": 0,
             }
             with self.lock:
                 pd.DataFrame([new_row]).to_csv(self.log_path, mode="a", header=not self.log_path.exists(), index=False)
-            logging.info("👻 Shadow Intent: %s | Prob: %.2f%% | Slip: %sbps", new_row["market_title"], meta_prob * 100, slippage)
+            if is_doa:
+                logging.warning("🚫 VETO (DOA): %s | EV_adj: %.2f%% | Exp Slip: %sbps", new_row["market_title"], ev_adj * 100, expected_slip_bps)
+                return 0.0
+            logging.info("👻 Shadow Intent: %s | Prob: %.2f%% | Slip: %sbps | EV_adj: %.2f%%", new_row["market_title"], meta_prob * 100, slippage, ev_adj * 100)
             return meta_prob
         except Exception as e:
             logging.error("Failed to log shadow intent: %s", e)
