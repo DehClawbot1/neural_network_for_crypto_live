@@ -345,6 +345,14 @@ def main_loop():
             log_raw_candidates(inferred_df)
             scored_df = signal_engine.score_features(inferred_df)
 
+            if shadow_logger is not None and not scored_df.empty:
+                scored_view = normalize_dataframe_columns(scored_df)
+                for _, row in scored_view.head(5).iterrows():
+                    try:
+                        shadow_logger.log_entry(row.to_dict(), pd.DataFrame([row]))
+                    except Exception as exc:
+                        logging.warning("Shadow logging failed for %s: %s", row.get("market_title", row.get("market")), exc)
+
             if scored_df.empty:
                 logging.info("No scored signals generated on this pass.")
                 logging.info("Cycle complete. Sleeping for 60 seconds...")
