@@ -52,9 +52,12 @@ def fetch_btc_markets(limit_per_page=100, closed=False, max_offset=2000):
         ]
 
         if any(keyword in text_blob for keyword in btc_keywords):
+            tokens = market.get("tokens") or []
+            yes_token = next((t for t in tokens if str(t.get("outcome", "")).upper() == "YES"), {})
+            no_token = next((t for t in tokens if str(t.get("outcome", "")).upper() == "NO"), {})
             clob_token_ids = market.get("clobTokenIds") or []
-            yes_token_id = clob_token_ids[0] if len(clob_token_ids) > 0 else None
-            no_token_id = clob_token_ids[1] if len(clob_token_ids) > 1 else None
+            yes_token_id = yes_token.get("token_id") or yes_token.get("id") or (clob_token_ids[0] if len(clob_token_ids) > 0 else None)
+            no_token_id = no_token.get("token_id") or no_token.get("id") or (clob_token_ids[1] if len(clob_token_ids) > 1 else None)
             best_bid = market.get("bestBid") or market.get("best_bid") or market.get("bid")
             best_ask = market.get("bestAsk") or market.get("best_ask") or market.get("ask")
             midpoint = None
@@ -104,7 +107,16 @@ def save_market_snapshot(markets_df, logs_dir="logs"):
     logs_path = Path(logs_dir)
     logs_path.mkdir(parents=True, exist_ok=True)
     output_file = logs_path / "markets.csv"
-    markets_df.to_csv(output_file, mode="a", header=not output_file.exists(), index=False)
+
+    existing_df = pd.DataFrame()
+    if output_file.exists():
+        try:
+            existing_df = pd.read_csv(output_file, engine="python", on_bad_lines="skip")
+        except Exception:
+            existing_df = pd.DataFrame()
+
+    combined = pd.concat([existing_df, markets_df], ignore_index=True, sort=False)
+    combined.to_csv(output_file, index=False)
     logging.info("Saved market snapshot to %s", output_file)
 
 
