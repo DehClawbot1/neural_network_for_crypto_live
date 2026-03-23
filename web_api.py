@@ -3,6 +3,7 @@ from pathlib import Path
 import pandas as pd
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from log_loader import load_execution_history
 
 BASE_DIR = Path(__file__).resolve().parent
 LOGS_DIR = BASE_DIR / "logs"
@@ -44,7 +45,7 @@ def health():
     files = {
         "markets": (LOGS_DIR / "markets.csv").exists(),
         "signals": (LOGS_DIR / "signals.csv").exists(),
-        "trades": (LOGS_DIR / "daily_summary.txt").exists(),
+        "trades": (LOGS_DIR / "execution_log.csv").exists() or (LOGS_DIR / "daily_summary.txt").exists(),
         "whales": (LOGS_DIR / "whales.csv").exists(),
         "alerts": (LOGS_DIR / "alerts.csv").exists(),
         "system_health": (LOGS_DIR / "system_health.csv").exists(),
@@ -75,7 +76,7 @@ def signals(limit: int = 50):
 
 @app.get("/trades")
 def trades(limit: int = 50):
-    df = read_csv("daily_summary.txt")
+    df = load_execution_history(str(LOGS_DIR))
     if df.empty:
         return JSONResponse([])
     return JSONResponse(df.tail(limit).to_dict(orient="records"))
@@ -119,3 +120,4 @@ def dataset(limit: int = 100):
     if df.empty:
         return JSONResponse([])
     return JSONResponse(df.tail(limit).to_dict(orient="records"))
+
