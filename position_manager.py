@@ -4,6 +4,7 @@ from datetime import datetime
 
 import pandas as pd
 
+from config import TradingConfig
 from pnl_engine import PNLEngine
 from market_price_service import MarketPriceService
 
@@ -16,7 +17,7 @@ class PositionManager:
     Research/paper-trading only.
     """
 
-    def __init__(self, logs_dir="logs", max_open_positions=10, max_positions_per_token=1, max_positions_per_condition=2, max_positions_per_wallet=2, cooldown_minutes=30, take_profit_price_move=0.25, take_profit_roi_pct=0.25, trailing_stop_pct=0.08, time_stop_minutes=180, max_spread_to_exit=0.05, min_bid_size_to_exit=0, fee_rate=0.0, slippage_rate=0.005):
+    def __init__(self, logs_dir="logs", max_open_positions=10, max_positions_per_token=1, max_positions_per_condition=2, max_positions_per_wallet=2, cooldown_minutes=30, take_profit_price_move=0.25, take_profit_roi_pct=TradingConfig.PAPER_TP_ROI, trailing_stop_pct=TradingConfig.PAPER_TRAILING_STOP, time_stop_minutes=180, max_spread_to_exit=0.05, min_bid_size_to_exit=0, fee_rate=0.0, slippage_rate=0.005):
         self.logs_dir = Path(logs_dir)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.positions_file = self.logs_dir / "positions.csv"
