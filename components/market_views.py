@@ -63,21 +63,21 @@ def render_market_tracker(markets_df):
         liq_df["liquidity"] = pd.to_numeric(liq_df["liquidity"], errors="coerce")
         liq_df = liq_df.dropna(subset=["liquidity"]).sort_values("liquidity", ascending=False).head(12)
         if not liq_df.empty:
-            st.plotly_chart(px.bar(liq_df, x="liquidity", y=market_col, orientation="h", title="Top Markets by Liquidity"), width="stretch")
+            st.plotly_chart(px.bar(liq_df, x="liquidity", y=market_col, orientation="h", title="Top Markets by Liquidity"), use_container_width=True)
 
     if market_col and "volume" in view.columns:
         vol_df = view.dropna(subset=[market_col]).copy()
         vol_df["volume"] = pd.to_numeric(vol_df["volume"], errors="coerce")
         vol_df = vol_df.dropna(subset=["volume"]).sort_values("volume", ascending=False).head(12)
         if not vol_df.empty:
-            st.plotly_chart(px.bar(vol_df, x="volume", y=market_col, orientation="h", title="Top Markets by Volume"), width="stretch")
+            st.plotly_chart(px.bar(vol_df, x="volume", y=market_col, orientation="h", title="Top Markets by Volume"), use_container_width=True)
 
     if price_col:
         price_df = view.copy()
         price_df[price_col] = pd.to_numeric(price_df[price_col], errors="coerce")
         price_df = price_df.dropna(subset=[price_col])
         if not price_df.empty:
-            st.plotly_chart(px.histogram(price_df, x=price_col, nbins=20, title="Last Trade Price Distribution"), width="stretch")
+            st.plotly_chart(px.histogram(price_df, x=price_col, nbins=20, title="Last Trade Price Distribution"), use_container_width=True)
 
     time_col = "updated_at" if "updated_at" in view.columns else "timestamp" if "timestamp" in view.columns else None
     if time_col:
@@ -85,8 +85,8 @@ def render_market_tracker(markets_df):
         timeline[time_col] = pd.to_datetime(timeline[time_col], errors="coerce")
         timeline = timeline.dropna(subset=[time_col])
         if not timeline.empty:
-            counts = timeline.groupby(timeline[time_col].dt.floor("H")).size().reset_index(name="tracked_market_count")
-            st.plotly_chart(px.line(counts, x=time_col, y="tracked_market_count", title="Tracked Market Count Over Time"), width="stretch")
+            counts = timeline.groupby(timeline[time_col].dt.floor("h")).size().reset_index(name="tracked_market_count")
+            st.plotly_chart(px.line(counts, x=time_col, y="tracked_market_count", title="Tracked Market Count Over Time"), use_container_width=True)
 
 
 def render_whale_tracker(whales_df):
@@ -129,26 +129,26 @@ def render_whale_tracker(whales_df):
         if time_col:
             grouped["latest_activity_time"] = pd.to_datetime(summary[time_col], errors="coerce").groupby(summary[wallet_col]).max()
         grouped = grouped.reset_index().sort_values("action_count", ascending=False)
-        st.dataframe(grouped.head(20), width="stretch", hide_index=True)
+        st.dataframe(grouped.head(20), use_container_width=True, hide_index=True)
     else:
-        st.dataframe(whales_df.head(20), width="stretch", hide_index=True)
+        st.dataframe(whales_df.head(20), use_container_width=True, hide_index=True)
 
     if wallet_col:
         wallet_counts = whales_df[wallet_col].astype(str).value_counts().head(15).reset_index()
         wallet_counts.columns = [wallet_col, "actions"]
-        st.plotly_chart(px.bar(wallet_counts, x=wallet_col, y="actions", title="Trades / Actions by Wallet"), width="stretch")
+        st.plotly_chart(px.bar(wallet_counts, x=wallet_col, y="actions", title="Trades / Actions by Wallet"), use_container_width=True)
 
     if market_col:
         market_counts = whales_df[market_col].astype(str).value_counts().head(15).reset_index()
         market_counts.columns = [market_col, "wallet_count"]
-        st.plotly_chart(px.bar(market_counts, x=market_col, y="wallet_count", title="Wallet Concentration by Market"), width="stretch")
+        st.plotly_chart(px.bar(market_counts, x=market_col, y="wallet_count", title="Wallet Concentration by Market"), use_container_width=True)
 
     if wallet_col and "profit" in whales_df.columns:
         profit_df = whales_df.copy()
         profit_df["profit"] = pd.to_numeric(profit_df["profit"], errors="coerce")
         profit_df = profit_df.dropna(subset=["profit"]).sort_values("profit", ascending=False).head(15)
         if not profit_df.empty:
-            st.plotly_chart(px.bar(profit_df, x=wallet_col, y="profit", title="Top Wallets by Profitability"), width="stretch")
+            st.plotly_chart(px.bar(profit_df, x=wallet_col, y="profit", title="Top Wallets by Profitability"), use_container_width=True)
 
     time_col = "timestamp" if "timestamp" in whales_df.columns else "updated_at" if "updated_at" in whales_df.columns else None
     if wallet_col and time_col:
@@ -157,5 +157,5 @@ def render_whale_tracker(whales_df):
         activity_df = activity_df.dropna(subset=[time_col])
         if not activity_df.empty:
             timeline = activity_df.groupby(activity_df[time_col].dt.floor("H")).size().reset_index(name="activity_count")
-            st.plotly_chart(px.line(timeline, x=time_col, y="activity_count", title="Wallet Activity Over Time"), width="stretch")
+            st.plotly_chart(px.line(timeline, x=time_col, y="activity_count", title="Wallet Activity Over Time"), use_container_width=True)
 

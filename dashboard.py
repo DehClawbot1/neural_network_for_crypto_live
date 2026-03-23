@@ -281,6 +281,16 @@ def optional_number(value, digits=3):
         return "N/A"
 
 
+def ensure_arrow_compatible(df):
+    if df is None or getattr(df, "empty", False):
+        return df
+    out = df.copy()
+    for col in out.columns:
+        if out[col].dtype == "object":
+            out[col] = out[col].apply(lambda x: "N/A" if x is None or (isinstance(x, float) and pd.isna(x)) else str(x))
+    return out
+
+
 def render_overview(signals_df, trades_df, markets_df, alerts_df, positions_df, closed_positions_df):
     st.markdown('<div class="section-title">Overview</div>', unsafe_allow_html=True)
 
@@ -697,7 +707,7 @@ def render_alerts(alerts_df):
         chart_df[time_col] = pd.to_datetime(chart_df[time_col], errors="coerce")
         chart_df = chart_df.dropna(subset=[time_col])
         if not chart_df.empty:
-            over_time = chart_df.groupby(chart_df[time_col].dt.floor("H")).size().reset_index(name="count")
+            over_time = chart_df.groupby(chart_df[time_col].dt.floor("h")).size().reset_index(name="count")
             st.plotly_chart(px.line(over_time, x=time_col, y="count", title="Alerts Over Time"), use_container_width=True)
     if alert_col and not view.empty:
         type_counts = view[alert_col].astype(str).value_counts().reset_index()
@@ -711,7 +721,8 @@ def render_alerts(alerts_df):
     source_col = "source_module" if "source_module" in view.columns else "source" if "source" in view.columns else None
     status_col = "status" if "status" in view.columns else None
     display_cols = [c for c in [time_col, severity_col, alert_col, market_col, "message", source_col, status_col] if c and c in view.columns]
-    st.dataframe(view.sort_index(ascending=False).tail(50)[display_cols] if display_cols else view.tail(50), use_container_width=True, hide_index=True)
+    alert_view = view.sort_index(ascending=False).tail(50)[display_cols] if display_cols else view.tail(50)
+    st.dataframe(ensure_arrow_compatible(alert_view), use_container_width=True, hide_index=True)
 
     missing_schema_bits = []
     if severity_col is None:
@@ -768,7 +779,7 @@ def render_simulated_decisions(positions_df, closed_positions_df):
         return
 
     decisions_df = pd.DataFrame(rows)
-    st.dataframe(decisions_df.sort_values(by="profit_usdc", ascending=False), use_container_width=True)
+    st.dataframe(ensure_arrow_compatible(decisions_df.sort_values(by="profit_usdc", ascending=False)), use_container_width=True)
 
 
 def render_positions_pnl_summary(positions_df, closed_positions_df):
@@ -1048,7 +1059,7 @@ def render_action_board(signals_df, positions_df):
         if group_df.empty:
             st.caption("No rows in this group.")
         else:
-            st.dataframe(group_df, use_container_width=True, hide_index=True)
+            st.dataframe(ensure_arrow_compatible(group_df), use_container_width=True, hide_index=True)
 
 
 def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df, path_replay_df, backtest_wallet_df, model_registry_df, signals_df=None):
@@ -1364,9 +1375,9 @@ def render_raw_data(signals_df, trades_df, episode_log_df, markets_df, whales_df
     raw_tabs = st.tabs(["Signals", "Execution", "Episodes", "Markets", "Whales", "Alerts", "Learning", "Positions"])
 
     with raw_tabs[0]:
-        st.dataframe(signals_df, use_container_width=True)
+        st.dataframe(ensure_arrow_compatible(signals_df), use_container_width=True)
     with raw_tabs[1]:
-        st.dataframe(trades_df, use_container_width=True)
+        st.dataframe(ensure_arrow_compatible(trades_df), use_container_width=True)
     with raw_tabs[2]:
         st.dataframe(episode_log_df, use_container_width=True)
     with raw_tabs[3]:
@@ -1379,9 +1390,9 @@ def render_raw_data(signals_df, trades_df, episode_log_df, markets_df, whales_df
         st.dataframe(model_status_df, use_container_width=True)
     with raw_tabs[7]:
         st.markdown("**Open Positions**")
-        st.dataframe(positions_df, use_container_width=True)
+        st.dataframe(ensure_arrow_compatible(positions_df), use_container_width=True)
         st.markdown("**Closed Positions**")
-        st.dataframe(closed_positions_df, use_container_width=True)
+        st.dataframe(ensure_arrow_compatible(closed_positions_df), use_container_width=True)
 
 
 def main():
