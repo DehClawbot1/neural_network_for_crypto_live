@@ -61,13 +61,23 @@ class HistoricalDatasetBuilder:
             if "timestamp" in trades_df.columns and all(c in trades_df.columns for c in ["market_title", "trader_wallet"]):
                 dataset["timestamp"] = pd.to_datetime(dataset["timestamp"], utc=True, errors="coerce", format="mixed")
                 trades_df["timestamp"] = pd.to_datetime(trades_df["timestamp"], utc=True, errors="coerce", format="mixed")
-                dataset = pd.merge_asof(
-                    dataset.sort_values("timestamp"),
-                    trades_df.sort_values("timestamp"),
-                    on="timestamp",
-                    by=["market_title", "trader_wallet"],
-                    direction="backward",
-                )
+                dataset = dataset.dropna(subset=["timestamp", "market_title", "trader_wallet"])
+                trades_df = trades_df.dropna(subset=["timestamp", "market_title", "trader_wallet"])
+                merged_parts = []
+                for (market_title, trader_wallet), group in dataset.groupby(["market_title", "trader_wallet"]):
+                    trade_history = trades_df[(trades_df["market_title"] == market_title) & (trades_df["trader_wallet"] == trader_wallet)]
+                    if trade_history.empty:
+                        merged_parts.append(group)
+                        continue
+                    merged_parts.append(
+                        pd.merge_asof(
+                            group.sort_values("timestamp"),
+                            trade_history.sort_values("timestamp"),
+                            on="timestamp",
+                            direction="backward",
+                        )
+                    )
+                dataset = pd.concat(merged_parts, ignore_index=True) if merged_parts else dataset
 
         if not markets_df.empty and "market_title" in dataset.columns and "question" in markets_df.columns:
             if "timestamp" in dataset.columns and "timestamp" in markets_df.columns:
@@ -79,6 +89,8 @@ class HistoricalDatasetBuilder:
                     if market_history.empty:
                         merged_parts.append(group)
                         continue
+                    group = group.dropna(subset=["timestamp"])
+                    market_history = market_history.dropna(subset=["timestamp"])
                     merged_parts.append(
                         pd.merge_asof(
                             group.sort_values("timestamp"),
@@ -113,8 +125,12 @@ class HistoricalDatasetBuilder:
                 if history.empty:
                     merged_parts.append(group)
                     continue
+                group = group.dropna(subset=["timestamp"])
+                history = history.dropna(subset=["timestamp"])
                 merged_parts.append(pd.merge_asof(group.sort_values("timestamp"), history.sort_values("timestamp"), on="timestamp", direction="backward"))
-            dataset = pd.concat(merged_parts, ignore_index=True) if merged_parts else dataset
+            if merged_parts:
+                merged_parts = [part.loc[:, ~part.columns.duplicated()] for part in merged_parts]
+                dataset = pd.concat(merged_parts, ignore_index=True)
 
         if not btc_targets_df.empty and "timestamp" in dataset.columns:
             btc_targets_df["timestamp"] = pd.to_datetime(btc_targets_df["timestamp"], utc=True, errors="coerce", format="mixed")

@@ -11,6 +11,27 @@ from urllib3.util.retry import Retry
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
+def _normalize_timestamp_value(value):
+    if value in [None, ""]:
+        return value
+    try:
+        numeric = float(value)
+        if numeric > 1e17:
+            return pd.to_datetime(numeric, utc=True, unit="ns").isoformat()
+        if numeric > 1e14:
+            return pd.to_datetime(numeric, utc=True, unit="us").isoformat()
+        if numeric > 1e11:
+            return pd.to_datetime(numeric, utc=True, unit="ms").isoformat()
+        if numeric > 1e9:
+            return pd.to_datetime(numeric, utc=True, unit="s").isoformat()
+    except Exception:
+        pass
+    try:
+        return pd.to_datetime(value, utc=True).isoformat()
+    except Exception:
+        return value
+
+
 def _build_session():
     session = requests.Session()
     retries = Retry(
@@ -84,15 +105,17 @@ def get_recent_btc_trades(wallet_address, limit=50, market_universe=None):
         market_universe = market_universe or {"condition_ids": set(), "token_ids": set(), "slugs": set()}
         signals = []
         for trade in trades:
-            condition_id = str(trade.get("conditionId", "") or "")
-            token_id = str(trade.get("tokenId", "") or "")
+            cond_id = trade.get("conditionId") or trade.get("condition_id")
+            token_id = trade.get("tokenId") or trade.get("token_id")
             slug = str(trade.get("slug", trade.get("marketSlug", "")) or "")
             title = str(trade.get("title", ""))
             title_l = title.lower()
+            condition_id = str(cond_id or "")
+            token_id_str = str(token_id or "")
 
             mapped_to_btc = (
                 condition_id in market_universe.get("condition_ids", set())
-                or token_id in market_universe.get("token_ids", set())
+                or token_id_str in market_universe.get("token_ids", set())
                 or slug in market_universe.get("slugs", set())
             )
             keyword_fallback = (
@@ -110,8 +133,8 @@ def get_recent_btc_trades(wallet_address, limit=50, market_universe=None):
                     "trader_wallet": wallet_address,
                     "market_title": title,
                     "market_slug": slug,
-                    "token_id": trade.get("tokenId"),
-                    "condition_id": trade.get("conditionId"),
+                    "token_id": token_id,
+                    "condition_id": cond_id,
                     "order_side": order_side,
                     "trade_side": order_side,
                     "outcome_side": trade.get("outcome"),
@@ -119,7 +142,7 @@ def get_recent_btc_trades(wallet_address, limit=50, market_universe=None):
                     "side": trade.get("outcome"),
                     "price": float(trade.get("price", 0)),
                     "size": float(trade.get("size", 0)),
-                    "timestamp": trade.get("timestamp"),
+                    "timestamp": _normalize_timestamp_value(trade.get("timestamp")),
                 }
             )
         return signals

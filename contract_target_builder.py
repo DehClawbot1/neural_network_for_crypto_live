@@ -9,6 +9,21 @@ class ContractTargetBuilder:
     Research/paper-trading only.
     """
 
+    @staticmethod
+    def _normalize_timestamp_series(series):
+        numeric = pd.to_numeric(series, errors="coerce")
+        if numeric.notna().any():
+            sample = numeric.dropna().iloc[0]
+            if sample > 1e17:
+                return pd.to_datetime(numeric, utc=True, errors="coerce", unit="ns")
+            if sample > 1e14:
+                return pd.to_datetime(numeric, utc=True, errors="coerce", unit="us")
+            if sample > 1e11:
+                return pd.to_datetime(numeric, utc=True, errors="coerce", unit="ms")
+            if sample > 1e9:
+                return pd.to_datetime(numeric, utc=True, errors="coerce", unit="s")
+        return pd.to_datetime(series, utc=True, errors="coerce", format="mixed")
+
     def __init__(self, logs_dir="logs"):
         self.logs_dir = Path(logs_dir)
         self.raw_candidates_file = self.logs_dir / "raw_candidates.csv"
@@ -80,9 +95,9 @@ class ContractTargetBuilder:
             return pd.DataFrame()
 
         signals_df = signals_df.copy()
-        signals_df["timestamp"] = pd.to_datetime(signals_df["timestamp"], utc=True, errors="coerce", format="mixed")
+        signals_df["timestamp"] = self._normalize_timestamp_series(signals_df["timestamp"])
         history_df = history_df.copy()
-        history_df["timestamp"] = pd.to_datetime(history_df["timestamp"], utc=True, errors="coerce", format="mixed")
+        history_df["timestamp"] = self._normalize_timestamp_series(history_df["timestamp"])
         history_df = history_df.dropna(subset=["timestamp", "token_id"]).sort_values(["token_id", "timestamp"]).reset_index(drop=True)
 
         market_lookup = markets_df.drop_duplicates(subset=[question_col], keep="last").set_index(question_col).to_dict("index")

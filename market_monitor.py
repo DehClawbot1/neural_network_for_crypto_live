@@ -1,8 +1,9 @@
 import ast
 import json
 import logging
+import time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 import requests
@@ -31,35 +32,104 @@ def _normalize_token_list(value):
     return []
 
 
+def parse_gamma_market(market):
+    """Helper to convert raw Gamma API market object to our internal schema."""
+    question = str(market.get("question", ""))
+    title = str(market.get("title", ""))
+    tokens = market.get("tokens") or []
+    yes_token = next((t for t in tokens if str(t.get("outcome", "")).upper() == "YES"), {})
+    no_token = next((t for t in tokens if str(t.get("outcome", "")).upper() == "NO"), {})
+    clob_token_ids = _normalize_token_list(market.get("clobTokenIds"))
+    yes_token_id = yes_token.get("token_id") or yes_token.get("id") or (clob_token_ids[0] if len(clob_token_ids) > 0 else None)
+    no_token_id = no_token.get("token_id") or no_token.get("id") or (clob_token_ids[1] if len(clob_token_ids) > 1 else None)
+    best_bid = market.get("bestBid") or market.get("best_bid") or market.get("bid")
+    best_ask = market.get("bestAsk") or market.get("best_ask") or market.get("ask")
+    midpoint, spread = None, None
+    if best_bid is not None and best_ask is not None:
+        try:
+            midpoint = (float(best_bid) + float(best_ask)) / 2.0
+            spread = abs(float(best_ask) - float(best_bid))
+        except Exception:
+            pass
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "market_id": market.get("id"),
+        "condition_id": market.get("conditionId"),
+        "question": question or title,
+        "active": market.get("active"),
+        "closed": market.get("closed"),
+        "liquidity": market.get("liquidity", 0),
+        "volume": market.get("volume", 0),
+        "last_trade_price": market.get("lastTradePrice", 0),
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "midpoint": midpoint,
+        "spread": spread,
+        "bid_size": market.get("bidSize") or market.get("bid_size"),
+        "ask_size": market.get("askSize") or market.get("ask_size"),
+        "end_date": market.get("endDate"),
+        "slug": market.get("slug"),
+        "clob_token_ids": clob_token_ids,
+        "yes_token_id": yes_token_id,
+        "no_token_id": no_token_id,
+        "url": f"https://polymarket.com/event/{market.get('slug')}" if market.get("slug") else None,
+    }
+
+
+def fetch_markets_by_condition_ids(condition_ids):
+    """Legacy helper retained for compatibility; Gamma condition_id filtering is unreliable."""
+    return pd.DataFrame()
+
+
+def fetch_markets_by_slugs(slugs):
+    """Fetch specific markets from Gamma API by their slugs to fill metadata gaps."""
+    new_markets = []
+    slugs_to_fetch = list(set([s for s in slugs if s and str(s) != "nan"]))
+    logging.info("JIT: Fetching metadata for %s specific slugs...", len(slugs_to_fetch))
+    for slug in slugs_to_fetch:
+        try:
+            response = requests.get(GAMMA_MARKETS_URL, params={"slug": slug}, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            if data and isinstance(data, list):
+                for market in data:
+                    if str(market.get("slug", "")) == str(slug):
+                        new_markets.append(parse_gamma_market(market))
+            time.sleep(0.1)
+        except Exception as e:
+            logging.error("Failed to fetch market slug %s: %s", slug, e)
+    return pd.DataFrame(new_markets)
+
+
 def fetch_btc_markets(limit_per_page=100, closed=False, max_offset=2000):
     """
     Fetch public Polymarket markets and filter for Bitcoin/BTC-related ones.
     This is for research/monitoring only.
     """
     markets = []
-    offset = 0
-    while True:
-        params = {
-            "limit": limit_per_page,
-            "offset": offset,
-            "closed": str(closed).lower(),
-        }
-        response = requests.get(GAMMA_MARKETS_URL, params=params, timeout=20)
-        response.raise_for_status()
-        page_data = response.json()
-        if not page_data:
-            break
-        markets.extend(page_data)
-        offset += limit_per_page
-        if offset > max_offset:
-            break
+    for closed_flag in [False, True]:
+        offset = 0
+        while True:
+            params = {
+                "limit": limit_per_page,
+                "offset": offset,
+                "closed": str(closed_flag).lower(),
+            }
+            response = requests.get(GAMMA_MARKETS_URL, params=params, timeout=20)
+            response.raise_for_status()
+            page_data = response.json()
+            if not page_data:
+                break
+            markets.extend(page_data)
+            offset += limit_per_page
+            if offset > max_offset:
+                break
 
     btc_markets = []
     for market in markets:
         question = str(market.get("question", ""))
         title = str(market.get("title", ""))
         text_blob = f"{question} {title}".lower()
-
         btc_keywords = [
             "bitcoin",
             "btc",
@@ -71,51 +141,8 @@ def fetch_btc_markets(limit_per_page=100, closed=False, max_offset=2000):
             "para cima ou para baixo",
             "$btc",
         ]
-
         if any(keyword in text_blob for keyword in btc_keywords):
-            tokens = market.get("tokens") or []
-            yes_token = next((t for t in tokens if str(t.get("outcome", "")).upper() == "YES"), {})
-            no_token = next((t for t in tokens if str(t.get("outcome", "")).upper() == "NO"), {})
-            clob_token_ids = _normalize_token_list(market.get("clobTokenIds"))
-            yes_token_id = yes_token.get("token_id") or yes_token.get("id") or (clob_token_ids[0] if len(clob_token_ids) > 0 else None)
-            no_token_id = no_token.get("token_id") or no_token.get("id") or (clob_token_ids[1] if len(clob_token_ids) > 1 else None)
-            best_bid = market.get("bestBid") or market.get("best_bid") or market.get("bid")
-            best_ask = market.get("bestAsk") or market.get("best_ask") or market.get("ask")
-            midpoint = None
-            spread = None
-            if best_bid is not None and best_ask is not None:
-                try:
-                    midpoint = (float(best_bid) + float(best_ask)) / 2.0
-                    spread = abs(float(best_ask) - float(best_bid))
-                except Exception:
-                    midpoint = None
-                    spread = None
-
-            btc_markets.append(
-                {
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "market_id": market.get("id"),
-                    "condition_id": market.get("conditionId"),
-                    "question": question or title,
-                    "active": market.get("active"),
-                    "closed": market.get("closed"),
-                    "liquidity": market.get("liquidity", 0),
-                    "volume": market.get("volume", 0),
-                    "last_trade_price": market.get("lastTradePrice", 0),
-                    "best_bid": best_bid,
-                    "best_ask": best_ask,
-                    "midpoint": midpoint,
-                    "spread": spread,
-                    "bid_size": market.get("bidSize") or market.get("bid_size"),
-                    "ask_size": market.get("askSize") or market.get("ask_size"),
-                    "end_date": market.get("endDate"),
-                    "slug": market.get("slug"),
-                    "clob_token_ids": clob_token_ids,
-                    "yes_token_id": yes_token_id,
-                    "no_token_id": no_token_id,
-                    "url": f"https://polymarket.com/event/{market.get('slug')}" if market.get("slug") else None,
-                }
-            )
+            btc_markets.append(parse_gamma_market(market))
 
     logging.info("Fetched %s BTC-related markets.", len(btc_markets))
     return pd.DataFrame(btc_markets)
@@ -139,7 +166,7 @@ def save_market_snapshot(markets_df, logs_dir="logs"):
     combined = pd.concat([existing_df, markets_df], ignore_index=True, sort=False)
     if "timestamp" in combined.columns:
         combined["timestamp"] = pd.to_datetime(combined["timestamp"], errors="coerce")
-    dedupe_cols = [c for c in ["market_id", "question", "slug"] if c in combined.columns]
+    dedupe_cols = [c for c in ["condition_id", "market_id", "question", "slug"] if c in combined.columns]
     if dedupe_cols:
         combined = combined.sort_values("timestamp", kind="stable") if "timestamp" in combined.columns else combined
         combined = combined.drop_duplicates(subset=dedupe_cols, keep="last")
@@ -153,4 +180,3 @@ if __name__ == "__main__":
         print("No BTC-related markets found.")
     else:
         print(df.head()[["market_id", "question", "liquidity", "volume", "url"]])
-

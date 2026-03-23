@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import pandas as pd
@@ -31,33 +32,49 @@ class SequenceFeatureBuilder:
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
         df = df.sort_values(["token_id", "timestamp"]).reset_index(drop=True)
 
-        base_cols = [
-            c for c in [
-                "entry_price",
-                "wallet_trade_count_30d",
-                "wallet_alpha_30d",
-                "wallet_signal_precision_tp",
-                "btc_spot_return_5m",
-                "btc_spot_return_15m",
-                "spread",
-                "current_price",
-                "normalized_trade_size",
-            ] if c in df.columns
+        potential_cols = [
+            "entry_price",
+            "wallet_trade_count_30d",
+            "wallet_alpha_30d",
+            "wallet_signal_precision_tp",
+            "btc_spot_return_5m",
+            "btc_spot_return_15m",
+            "spread",
+            "current_price",
+            "normalized_trade_size",
         ]
 
+        base_cols = []
+        for c in potential_cols:
+            if c in df.columns:
+                if df[c].notnull().any():
+                    base_cols.append(c)
+                else:
+                    logging.warning("SequenceFeatureBuilder: Skipping '%s' - source column is all-null.", c)
+
+        if not base_cols:
+            logging.error("SequenceFeatureBuilder: No valid base columns with data found. Dataset aborted.")
+            return pd.DataFrame()
+
         parts = []
+        lag_cols = []
         for token_id, group in df.groupby("token_id"):
             group = group.copy().reset_index(drop=True)
             for col in base_cols:
                 for lag in lags:
-                    group[f"{col}_lag_{lag}"] = group[col].shift(lag)
+                    l_name = f"{col}_lag_{lag}"
+                    group[l_name] = group[col].shift(lag)
+                    if l_name not in lag_cols:
+                        lag_cols.append(l_name)
             if "trader_wallet" in group.columns:
                 group["recent_token_activity_5"] = group["trader_wallet"].rolling(5).count()
             if "side" in group.columns:
                 group["recent_yes_ratio_5"] = (group["side"].astype(str).str.upper() == "YES").rolling(5).mean()
             parts.append(group)
 
-        result = pd.concat(parts, ignore_index=True).dropna().reset_index(drop=True)
+        combined = pd.concat(parts, ignore_index=True)
+        result = combined.dropna(subset=lag_cols).reset_index(drop=True)
+        logging.info("SequenceFeatureBuilder: Generated %s sequence rows using %s base features.", len(result), len(base_cols))
         return result
 
     def write(self):

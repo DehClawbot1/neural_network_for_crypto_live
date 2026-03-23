@@ -136,13 +136,22 @@ class FeatureBuilder:
         volatility_risk = volatility_score
         time_decay_score = _clip01(1.0 - time_left)
 
+        outcome_side = str(signal.get("outcome_side", signal.get("side", ""))).upper()
+        token_id = signal.get("token_id")
+        if (token_id in [None, ""] or pd.isna(token_id)) and market_row:
+            if outcome_side in {"YES", "UP"}:
+                token_id = market_row.get("yes_token_id")
+            elif outcome_side in {"NO", "DOWN"}:
+                token_id = market_row.get("no_token_id")
+        condition_id = signal.get("condition_id") or market_row.get("condition_id")
+
         wallet_info = self.wallet_stats.get(wallet, {})
         feature_row = {
             "timestamp": signal.get("timestamp"),
             "trader_wallet": wallet,
-            "market_title": signal.get("market_title"),
-            "condition_id": signal.get("condition_id"),
-            "token_id": signal.get("token_id"),
+            "market_title": signal.get("market_title", signal.get("market")),
+            "condition_id": condition_id,
+            "token_id": token_id,
             "market_slug": market_row.get("slug"),
             "order_side": signal.get("order_side", signal.get("trade_side")),
             "trade_side": signal.get("trade_side", signal.get("order_side")),
@@ -190,23 +199,47 @@ class FeatureBuilder:
         if signals_df is None or signals_df.empty:
             return pd.DataFrame()
 
-        market_lookup = {}
+        market_lookup_cond = {}
+        market_lookup_slug = {}
         if markets_df is not None and not markets_df.empty:
             for _, row in markets_df.iterrows():
-                market_lookup[str(row.get("question", "")).lower()] = row.to_dict()
-                if row.get("slug"):
-                    market_lookup[str(row.get("slug", "")).lower()] = row.to_dict()
+                row_dict = row.to_dict()
+                cond = str(row.get("condition_id", "")).strip()
+                if cond and cond != "nan":
+                    market_lookup_cond[cond] = row_dict
+                slug = str(row.get("slug", "")).strip()
+                if slug and slug != "nan":
+                    market_lookup_slug[slug] = row_dict
 
         rows = []
         work_df = signals_df.copy()
         if "timestamp" in work_df.columns:
-            work_df["timestamp"] = pd.to_datetime(work_df["timestamp"], utc=True, errors="coerce")
+            numeric_ts = pd.to_numeric(work_df["timestamp"], errors="coerce")
+            if numeric_ts.notna().any():
+                sample = numeric_ts.dropna().iloc[0]
+                if sample > 1e17:
+                    work_df["timestamp"] = pd.to_datetime(numeric_ts, utc=True, errors="coerce", unit="ns")
+                elif sample > 1e14:
+                    work_df["timestamp"] = pd.to_datetime(numeric_ts, utc=True, errors="coerce", unit="us")
+                elif sample > 1e11:
+                    work_df["timestamp"] = pd.to_datetime(numeric_ts, utc=True, errors="coerce", unit="ms")
+                elif sample > 1e9:
+                    work_df["timestamp"] = pd.to_datetime(numeric_ts, utc=True, errors="coerce", unit="s")
+                else:
+                    work_df["timestamp"] = pd.to_datetime(work_df["timestamp"], utc=True, errors="coerce")
+            else:
+                work_df["timestamp"] = pd.to_datetime(work_df["timestamp"], utc=True, errors="coerce")
             work_df = work_df.sort_values("timestamp")
 
         for _, signal_row in work_df.iterrows():
             signal = signal_row.to_dict()
-            title_key = str(signal.get("market_title", signal.get("market", ""))).lower()
-            matched_market = market_lookup.get(title_key)
+            cond_id = str(signal.get("condition_id", "")).strip()
+            slug_id = str(signal.get("market_slug", "")).strip()
+
+            matched_market = market_lookup_cond.get(cond_id)
+            if not matched_market:
+                matched_market = market_lookup_slug.get(slug_id)
+
             rows.append(self.build_feature_row(signal, matched_market))
             self.update_wallet_history(signal)
 

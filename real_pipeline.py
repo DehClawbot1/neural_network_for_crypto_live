@@ -45,6 +45,41 @@ def run_research_pipeline():
     logging.info("Building contract-level labels and wallet alpha...")
     ContractTargetBuilder().write(forward_minutes=15, max_hold_minutes=60, tp_move=0.04, sl_move=0.03)
     WalletAlphaBuilder().write()
+
+    targets_path = HistoricalDatasetBuilder().logs_dir / "contract_targets.csv"
+    alpha_history_path = HistoricalDatasetBuilder().logs_dir / "wallet_alpha_history.csv"
+    if targets_path.exists() and alpha_history_path.exists():
+        targets = pd.read_csv(targets_path, engine="python", on_bad_lines="skip")
+        alpha_hist = pd.read_csv(alpha_history_path, engine="python", on_bad_lines="skip")
+        if not targets.empty and not alpha_hist.empty and "timestamp" in targets.columns and "timestamp" in alpha_hist.columns:
+            logging.info("Merging point-in-time wallet alpha into target features...")
+            targets["timestamp"] = pd.to_datetime(targets["timestamp"], utc=True, errors="coerce")
+            alpha_hist["timestamp"] = pd.to_datetime(alpha_hist["timestamp"], utc=True, errors="coerce")
+            join_key = "wallet_copied" if "wallet_copied" in targets.columns else "trader_wallet"
+            if join_key in targets.columns and "wallet_copied" in alpha_hist.columns:
+                if join_key != "wallet_copied":
+                    alpha_hist = alpha_hist.rename(columns={"wallet_copied": join_key})
+                targets = targets.dropna(subset=["timestamp", join_key])
+                alpha_hist = alpha_hist.dropna(subset=["timestamp", join_key])
+                merged_parts = []
+                for wallet, group in targets.groupby(join_key):
+                    history = alpha_hist[alpha_hist[join_key] == wallet]
+                    if history.empty:
+                        merged_parts.append(group)
+                        continue
+                    merged = pd.merge_asof(
+                        group.sort_values("timestamp"),
+                        history.sort_values("timestamp"),
+                        on="timestamp",
+                        direction="backward",
+                    )
+                    merged_parts.append(merged.loc[:, ~merged.columns.duplicated()])
+                if merged_parts:
+                    targets = pd.concat(merged_parts, ignore_index=True)
+                    targets = targets.loc[:, ~targets.columns.duplicated()]
+                    targets.to_csv(targets_path, index=False)
+                    logging.info("Alpha merge complete. Targets now enriched with wallet context.")
+
     SupervisedModels().train()
     Stage1Models().train()
     SequenceFeatureBuilder().write()

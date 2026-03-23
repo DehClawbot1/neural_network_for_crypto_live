@@ -12,7 +12,7 @@ except Exception:
     RecurrentPPO = None
 
 from leaderboard_scraper import run_scraper_cycle
-from market_monitor import fetch_btc_markets, save_market_snapshot
+from market_monitor import fetch_btc_markets, save_market_snapshot, fetch_markets_by_slugs
 from feature_builder import FeatureBuilder
 from signal_engine import SignalEngine
 from whale_tracker import WhaleTracker
@@ -292,11 +292,28 @@ def main_loop():
             logging.info("--- Starting Research + Paper-Trading Evaluation Cycle ---")
 
             # 1. Gather public market context + public wallet activity
-            markets_df = fetch_btc_markets()
+            open_markets = fetch_btc_markets(closed=False)
+            closed_markets = fetch_btc_markets(closed=True, max_offset=500)
+            if not open_markets.empty and not closed_markets.empty:
+                markets_df = pd.concat([open_markets, closed_markets], ignore_index=True).drop_duplicates(subset=["market_id"])
+            else:
+                markets_df = open_markets if not open_markets.empty else closed_markets
             autonomous_monitor.write_heartbeat("market_monitor", status="ok", message="markets_fetched", extra={"rows": len(markets_df) if markets_df is not None else 0})
             save_market_snapshot(markets_df)
             signals_df = run_scraper_cycle()
             autonomous_monitor.write_heartbeat("signal_engine", status="ok", message="signals_scraped", extra={"rows": len(signals_df) if signals_df is not None else 0})
+
+            if signals_df is not None and not signals_df.empty and "market_slug" in signals_df.columns:
+                scraped_slugs = set(signals_df["market_slug"].dropna().astype(str).unique())
+                scraped_slugs.discard("")
+                known_slugs = set(markets_df["slug"].dropna().astype(str).unique()) if markets_df is not None and not markets_df.empty and "slug" in markets_df.columns else set()
+                missing_slugs = scraped_slugs - known_slugs
+                if missing_slugs:
+                    logging.info("Universe Gap: %s slugs missing. Synchronizing...", len(missing_slugs))
+                    missing_df = fetch_markets_by_slugs(list(missing_slugs))
+                    if missing_df is not None and not missing_df.empty:
+                        markets_df = pd.concat([markets_df, missing_df], ignore_index=True).drop_duplicates(subset=["slug"])
+                        save_market_snapshot(markets_df)
 
             if signals_df.empty:
                 logging.info("No actionable signals found on this pass.")
