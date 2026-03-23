@@ -52,13 +52,22 @@ class HistoricalDatasetBuilder:
         if "timestamp" not in dataset.columns:
             dataset["timestamp"] = pd.NaT
 
-        if not trades_df.empty:
-            dataset = dataset.merge(
-                trades_df[[c for c in trades_df.columns if c in ["market", "wallet_copied", "fill_price", "size_usdc", "action_type", "timestamp"]]],
-                left_on=[c for c in ["market_title", "trader_wallet"] if c in dataset.columns],
-                right_on=[c for c in ["market", "wallet_copied"] if c in trades_df.columns],
-                how="left",
-            )
+        if not trades_df.empty and all(c in dataset.columns for c in ["market_title", "trader_wallet", "timestamp"]):
+            trades_df = trades_df.copy()
+            if "market" in trades_df.columns and "market_title" not in trades_df.columns:
+                trades_df["market_title"] = trades_df["market"]
+            if "wallet_copied" in trades_df.columns and "trader_wallet" not in trades_df.columns:
+                trades_df["trader_wallet"] = trades_df["wallet_copied"]
+            if "timestamp" in trades_df.columns and all(c in trades_df.columns for c in ["market_title", "trader_wallet"]):
+                dataset["timestamp"] = pd.to_datetime(dataset["timestamp"], utc=True, errors="coerce", format="mixed")
+                trades_df["timestamp"] = pd.to_datetime(trades_df["timestamp"], utc=True, errors="coerce", format="mixed")
+                dataset = pd.merge_asof(
+                    dataset.sort_values("timestamp"),
+                    trades_df.sort_values("timestamp"),
+                    on="timestamp",
+                    by=["market_title", "trader_wallet"],
+                    direction="backward",
+                )
 
         if not markets_df.empty and "market_title" in dataset.columns and "question" in markets_df.columns:
             if "timestamp" in dataset.columns and "timestamp" in markets_df.columns:
