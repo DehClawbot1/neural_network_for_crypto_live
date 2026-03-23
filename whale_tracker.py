@@ -22,8 +22,13 @@ class WhaleTracker:
         if signals_df is None or signals_df.empty:
             return pd.DataFrame()
 
+        df = signals_df.copy()
+        time_col = "timestamp" if "timestamp" in df.columns else "updated_at" if "updated_at" in df.columns else None
+        profit_col = "profit" if "profit" in df.columns else "net_pnl" if "net_pnl" in df.columns else "realized_pnl" if "realized_pnl" in df.columns else None
+        alpha_col = "alpha_score" if "alpha_score" in df.columns else "wallet_alpha_30d" if "wallet_alpha_30d" in df.columns else None
+
         grouped = (
-            signals_df.groupby("trader_wallet")
+            df.groupby("trader_wallet")
             .agg(
                 trade_count=("trader_wallet", "size"),
                 avg_price=("price", "mean"),
@@ -33,6 +38,34 @@ class WhaleTracker:
             .reset_index()
             .sort_values(by=["trade_count", "avg_size"], ascending=[False, False])
         )
+
+        top_market = (
+            df.groupby(["trader_wallet", "market_title"]).size().reset_index(name="market_signal_count")
+            .sort_values(["trader_wallet", "market_signal_count", "market_title"], ascending=[True, False, True])
+            .drop_duplicates(subset=["trader_wallet"], keep="first")
+            .rename(columns={"market_title": "market"})[["trader_wallet", "market", "market_signal_count"]]
+        )
+        grouped = grouped.merge(top_market, on="trader_wallet", how="left")
+        grouped["top_market"] = grouped.get("market")
+
+        if alpha_col is not None:
+            alpha_df = df.groupby("trader_wallet")[alpha_col].mean().reset_index(name="alpha_score")
+            grouped = grouped.merge(alpha_df, on="trader_wallet", how="left")
+        else:
+            grouped["alpha_score"] = pd.NA
+
+        if profit_col is not None:
+            profit_df = df.groupby("trader_wallet")[profit_col].sum().reset_index(name="profit")
+            grouped = grouped.merge(profit_df, on="trader_wallet", how="left")
+        else:
+            grouped["profit"] = pd.NA
+
+        if time_col is not None:
+            latest_df = df.groupby("trader_wallet")[time_col].max().reset_index(name="timestamp")
+            grouped = grouped.merge(latest_df, on="trader_wallet", how="left")
+        else:
+            grouped["timestamp"] = pd.NA
+
         return grouped
 
     def market_distribution(self, signals_df: pd.DataFrame):
@@ -67,4 +100,3 @@ class WhaleTracker:
             logging.info("Saved market distribution to %s", self.distribution_file)
 
         return summary_df
-

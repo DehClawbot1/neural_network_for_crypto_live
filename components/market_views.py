@@ -46,8 +46,9 @@ def render_market_tracker(markets_df):
         top_idx = pd.to_numeric(view["volume"], errors="coerce").fillna(0).idxmax()
         highest_volume_market = str(view.loc[top_idx, market_col]) if top_idx in view.index else "-"
     recently_updated = 0
-    if "timestamp" in view.columns:
-        ts = pd.to_datetime(view["timestamp"], errors="coerce", utc=True)
+    freshness_col = "updated_at" if "updated_at" in view.columns else "timestamp" if "timestamp" in view.columns else None
+    if freshness_col:
+        ts = pd.to_datetime(view[freshness_col], errors="coerce", utc=True)
         recently_updated = int((ts >= (pd.Timestamp.utcnow() - pd.Timedelta(minutes=10))).fillna(False).sum())
 
     c1, c2, c3, c4 = st.columns(4)
@@ -98,7 +99,7 @@ def render_whale_tracker(whales_df):
         return
 
     wallet_col = "wallet" if "wallet" in whales_df.columns else "trader_wallet" if "trader_wallet" in whales_df.columns else None
-    market_col = "market" if "market" in whales_df.columns else "market_title" if "market_title" in whales_df.columns else None
+    market_col = "market" if "market" in whales_df.columns else "market_title" if "market_title" in whales_df.columns else "top_market" if "top_market" in whales_df.columns else None
     watched_wallets_count = int(whales_df[wallet_col].nunique()) if wallet_col else len(whales_df)
     most_active_wallet = str(whales_df[wallet_col].astype(str).value_counts().idxmax()) if wallet_col else "-"
     highest_concentration_market = str(whales_df[market_col].astype(str).value_counts().idxmax()) if market_col else "-"
@@ -159,4 +160,3 @@ def render_whale_tracker(whales_df):
         if not activity_df.empty:
             timeline = activity_df.groupby(activity_df[time_col].dt.floor("H")).size().reset_index(name="activity_count")
             st.plotly_chart(px.line(timeline, x=time_col, y="activity_count", title="Wallet Activity Over Time"), use_container_width=True)
-
