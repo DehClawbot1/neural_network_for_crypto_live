@@ -76,9 +76,9 @@ class ContractTargetBuilder:
             return pd.DataFrame()
 
         signals_df = signals_df.copy()
-        signals_df["timestamp"] = pd.to_datetime(signals_df["timestamp"], utc=True, errors="coerce")
+        signals_df["timestamp"] = pd.to_datetime(signals_df["timestamp"], utc=True, errors="coerce", format="mixed")
         history_df = history_df.copy()
-        history_df["timestamp"] = pd.to_datetime(history_df["timestamp"], utc=True, errors="coerce")
+        history_df["timestamp"] = pd.to_datetime(history_df["timestamp"], utc=True, errors="coerce", format="mixed")
         history_df = history_df.dropna(subset=["timestamp", "token_id"]).sort_values(["token_id", "timestamp"]).reset_index(drop=True)
 
         market_lookup = markets_df.drop_duplicates(subset=["question"], keep="last").set_index("question").to_dict("index")

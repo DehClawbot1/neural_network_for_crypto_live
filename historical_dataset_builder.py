@@ -61,8 +61,8 @@ class HistoricalDatasetBuilder:
 
         if not markets_df.empty and "market_title" in dataset.columns and "question" in markets_df.columns:
             if "timestamp" in dataset.columns and "timestamp" in markets_df.columns:
-                dataset["timestamp"] = pd.to_datetime(dataset["timestamp"], utc=True, errors="coerce")
-                markets_df["timestamp"] = pd.to_datetime(markets_df["timestamp"], utc=True, errors="coerce")
+                dataset["timestamp"] = pd.to_datetime(dataset["timestamp"], utc=True, errors="coerce", format="mixed")
+                markets_df["timestamp"] = pd.to_datetime(markets_df["timestamp"], utc=True, errors="coerce", format="mixed")
                 merged_parts = []
                 for market_title, group in dataset.groupby("market_title"):
                     market_history = markets_df[markets_df["question"] == market_title]
@@ -96,8 +96,8 @@ class HistoricalDatasetBuilder:
             dataset = dataset.merge(wallet_alpha_df, left_on="trader_wallet", right_on="wallet_copied", how="left")
 
         if not wallet_alpha_history_df.empty and "trader_wallet" in dataset.columns and "timestamp" in dataset.columns:
-            dataset["timestamp"] = pd.to_datetime(dataset["timestamp"], utc=True, errors="coerce")
-            wallet_alpha_history_df["timestamp"] = pd.to_datetime(wallet_alpha_history_df["timestamp"], utc=True, errors="coerce")
+            dataset["timestamp"] = pd.to_datetime(dataset["timestamp"], utc=True, errors="coerce", format="mixed")
+            wallet_alpha_history_df["timestamp"] = pd.to_datetime(wallet_alpha_history_df["timestamp"], utc=True, errors="coerce", format="mixed")
             dataset = dataset.sort_values(["trader_wallet", "timestamp"])
             wallet_alpha_history_df = wallet_alpha_history_df.sort_values(["wallet_copied", "timestamp"])
             merged_parts = []
@@ -110,7 +110,7 @@ class HistoricalDatasetBuilder:
             dataset = pd.concat(merged_parts, ignore_index=True) if merged_parts else dataset
 
         if not btc_targets_df.empty and "timestamp" in dataset.columns:
-            btc_targets_df["timestamp"] = pd.to_datetime(btc_targets_df["timestamp"], utc=True, errors="coerce")
+            btc_targets_df["timestamp"] = pd.to_datetime(btc_targets_df["timestamp"], utc=True, errors="coerce", format="mixed")
             dataset = pd.merge_asof(
                 dataset.sort_values("timestamp"),
                 btc_targets_df[[c for c in btc_targets_df.columns if c in ["timestamp", "btc_price", "btc_spot_return_5m", "btc_spot_return_15m", "btc_realized_vol_15m", "btc_volume_proxy"]]].sort_values("timestamp"),
@@ -121,8 +121,8 @@ class HistoricalDatasetBuilder:
         if "best_ask" in dataset.columns and "best_bid" in dataset.columns:
             dataset["spread"] = (dataset["best_ask"].fillna(0) - dataset["best_bid"].fillna(0)).abs()
         if "end_date" in dataset.columns and "timestamp" in dataset.columns:
-            dataset["timestamp"] = pd.to_datetime(dataset["timestamp"], utc=True, errors="coerce")
-            dataset["end_date"] = pd.to_datetime(dataset["end_date"], utc=True, errors="coerce")
+            dataset["timestamp"] = pd.to_datetime(dataset["timestamp"], utc=True, errors="coerce", format="mixed")
+            dataset["end_date"] = pd.to_datetime(dataset["end_date"], utc=True, errors="coerce", format="mixed")
             dataset["time_to_close_minutes"] = (dataset["end_date"] - dataset["timestamp"]).dt.total_seconds().div(60)
 
         return dataset
