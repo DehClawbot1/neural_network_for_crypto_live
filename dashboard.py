@@ -10,6 +10,11 @@ from components.market_views import render_market_tracker as component_render_ma
 from schema import normalize_dataframe_columns
 
 try:
+    from execution_client import ExecutionClient
+except ImportError:
+    ExecutionClient = None
+
+try:
     from streamlit_autorefresh import st_autorefresh
 except Exception:
     st_autorefresh = None
@@ -1468,6 +1473,18 @@ def main():
     st.sidebar.write(f"Files missing count: {missing_files_count}")
     st.sidebar.write(f"Alerts count: {len(alerts_df)}")
     st.sidebar.write(f"Last signal timestamp: {latest_signal_ts.strftime('%Y-%m-%d %H:%M:%S') if latest_signal_ts is not None else 'N/A'}")
+
+    st.sidebar.markdown("**Live Account Status**")
+    if ExecutionClient is not None and os.getenv("TRADING_MODE", "paper").lower() == "live":
+        try:
+            live_client = ExecutionClient()
+            balance_payload = live_client.get_balance_allowance()
+            st.sidebar.write("Connection: Connected")
+            st.sidebar.write(f"Balance payload: {balance_payload}")
+        except Exception as exc:
+            st.sidebar.write(f"Connection: Error ({exc})")
+    else:
+        st.sidebar.write("Connection: Paper / unavailable")
 
     st.sidebar.markdown("**Export**")
     st.sidebar.download_button("Export filtered signals", data=signals_df.to_csv(index=False).encode("utf-8"), file_name="filtered_signals.csv", mime="text/csv")
