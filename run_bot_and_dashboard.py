@@ -1,6 +1,8 @@
 import multiprocessing
 import subprocess
 import sys
+import time
+import webbrowser
 
 
 def run_bot_process():
@@ -18,7 +20,10 @@ if __name__ == "__main__":
     dashboard_process = multiprocessing.Process(target=run_dashboard_process, name="Dashboard")
 
     bot_process.start()
+    time.sleep(2)
     dashboard_process.start()
+    time.sleep(4)
+    webbrowser.open("http://127.0.0.1:8501")
 
     try:
         bot_process.join()
