@@ -54,8 +54,13 @@ def ensure_live_client_ready():
             print("[!] Live client failed: collateral balance payload missing or invalid.\n")
             return False
         balance = collateral.get("balance", collateral.get("amount", collateral.get("available_balance")))
+        source = getattr(client, 'credential_source', 'unknown')
+        if source != "stored_env":
+            print(f"[!] Live client only connected via fallback credential source: {source}")
+            print("[!] Update your .env with the freshly derived L2 credentials before proceeding.\n")
+            return False
         print(f"[+] Live client connected. Collateral balance payload received: {balance}")
-        print(f"[+] Credential source in use: {getattr(client, 'credential_source', 'unknown')}\n")
+        print(f"[+] Credential source in use: {source}\n")
         return True
     except Exception as exc:
         print(f"[!] Live client verification failed: {exc}\n")
