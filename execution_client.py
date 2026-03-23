@@ -11,7 +11,7 @@ class ExecutionClient:
     def __init__(self, host=None, chain_id=None, private_key=None, funder=None, signature_type=None):
         try:
             from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import OrderArgs, OrderType, MarketOrderArgs
+            from py_clob_client.clob_types import OrderArgs, OrderType, MarketOrderArgs, BalanceAllowanceParams, AssetType
             from py_clob_client.order_builder.constants import BUY, SELL
             from py_clob_client.credentials import ApiCreds
         except Exception as exc:
@@ -20,6 +20,8 @@ class ExecutionClient:
         self.ClobClient = ClobClient
         self.OrderArgs = OrderArgs
         self.MarketOrderArgs = MarketOrderArgs
+        self.BalanceAllowanceParams = BalanceAllowanceParams
+        self.AssetType = AssetType
         self.OrderType = OrderType
         self.BUY = BUY
         self.SELL = SELL
@@ -81,11 +83,10 @@ class ExecutionClient:
     def get_trades(self):
         return self.client.get_trades()
 
-    def get_balance_allowance(self, asset_type=None):
-        kwargs = {}
-        if asset_type is not None:
-            kwargs["asset_type"] = asset_type
-        return self.client.get_balance_allowance(**kwargs)
+    def get_balance_allowance(self, asset_type="COLLATERAL"):
+        target_asset = self.AssetType.COLLATERAL if str(asset_type).upper() == "COLLATERAL" else self.AssetType.CONDITIONAL
+        params = self.BalanceAllowanceParams(asset_type=target_asset)
+        return self.client.get_balance_allowance(params=params)
 
     def get_available_balance(self, asset_type=None):
         payload = self.get_balance_allowance(asset_type=asset_type)
