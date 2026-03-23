@@ -1,97 +1,101 @@
-import os
 import logging
+from pathlib import Path
+
 import pandas as pd
-from datetime import datetime, timedelta, timezone
-from neural_network_for_crypto.shadow_purgatory import ResilientCLOBClient # Import the client
 
-# Configure logging for this script
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [DOAResurrection] %(levelname)s: %(message)s")
+from shadow_purgatory import ResilientCLOBClient, ShadowPurgatory
 
-def _simulate_path(row, clob):
-    token_id = row['token_id']
-    entry_p = float(row['shadow_entry_price'])
-    start_ts = int(datetime.fromisoformat(str(row['timestamp']).replace("Z", "+00:00")).timestamp())
-    
-    tp, sl = entry_p + 0.04, entry_p - 0.03
-    
-    trades = clob.get_trades_with_retry(token_id, start_ts)
-    if trades is None: # Handle API failure
-        logging.warning(f"Failed to fetch trades for {token_id} at {start_ts}. Cannot simulate.")
-        return "PENDING_API_FAIL", 0.0, 0 # Special outcome for API failures
-    if not trades: 
-        return "EXPIRED", 0.0, 0
-    
-    trades = sorted(trades, key=lambda x: int(x['timestamp']))
-    last_p = entry_p
-    count = 0
-    for t in trades:
-        ts, p = int(t['timestamp']), float(t['price'])
-        if ts > start_ts + 3600: # 60 minutes after signal
-            break
-        last_p, count = p, count + 1
-        if p >= tp: return "TP", 0.04, count
-        if p <= sl: return "SL", -0.03, count
-    
-    # If no TP/SL hit within 60 minutes, return based on last price
-    return "EXPIRED", round(last_p - entry_p, 4), count
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [DOA-Resurrector] %(message)s")
 
-def resurrect_doa_trades(log_path="logs/shadow_results.csv", clob_client=None):
-    if not os.path.exists(log_path):
-        logging.error("❌ Shadow log not found at %s", log_path)
-        return
 
-    df = pd.read_csv(log_path, engine="python", on_bad_lines="skip")
-    doa_df = df[df['outcome'] == "DOA"].copy()
-    
-    if doa_df.empty:
-        logging.info("✅ No DOA trades found to resurrect.")
-        return
+class DOAResurrector:
+    def __init__(self, log_path="logs/shadow_results.csv", model_bundle_path=None, clob_client=None):
+        self.log_path = Path(log_path)
+        self.clob = clob_client or ResilientCLOBClient()
+        self.purgatory = ShadowPurgatory(
+            model_bundle_path=model_bundle_path,
+            clob_client=self.clob,
+            log_path=self.log_path,
+        )
 
-    clob = clob_client or ResilientCLOBClient()
-    logging.info(f"👻 Resurrecting {len(doa_df)} DOA trades to check opportunity cost...")
+    def run_audit(self, limit=50):
+        if not self.log_path.exists():
+            logging.error("Shadow results log not found.")
+            return pd.DataFrame()
 
-    ghost_results = []
+        df = pd.read_csv(self.log_path, engine="python", on_bad_lines="skip")
+        if "outcome" not in df.columns:
+            logging.error("No outcome column found in results.")
+            return pd.DataFrame()
 
-    for idx, row in doa_df.iterrows():
-        outcome, realized_ret, count = _simulate_path(row, clob)
-        ghost_results.append({
-            "market": row['market_title'],
-            "prob": row['meta_prob'],
-            "exp_slip": row['expected_slip_bps'],
-            "ghost_outcome": outcome,
-            "ghost_return": realized_ret
-        })
+        doa_trades = df[df["outcome"] == "DOA"].tail(limit).copy()
+        if doa_trades.empty:
+            logging.info("No DOA trades found to resurrect.")
+            return pd.DataFrame()
 
-    results_df = pd.DataFrame(ghost_results)
-    
-    if results_df.empty:
-        logging.info("No ghost results to analyze.")
-        return
+        logging.info("Resurrecting %s DOA trades...", len(doa_trades))
 
-    win_rate = (results_df['ghost_outcome'] == "TP").mean()
-    avg_ret = results_df['ghost_return'].mean()
-    
-    bullets_dodged = (results_df['ghost_outcome'] == "SL").sum()
-    alpha_leaked = (results_df['ghost_outcome'] == "TP").sum()
+        ghost_outcomes = []
+        for _, row in doa_trades.iterrows():
+            outcome, ghost_ret, trade_count = self.purgatory._check_path(row)
+            ghost_outcomes.append(
+                {
+                    "market": row.get("market_title"),
+                    "prob": row.get("meta_prob"),
+                    "expected_slip": row.get("expected_slip_bps"),
+                    "actual_slippage": row.get("entry_slippage_bps"),
+                    "outcome": outcome,
+                    "pnl": ghost_ret,
+                    "trade_count": trade_count,
+                }
+            )
 
-    print("-" * 50)
-    print("📈 DOA RESURRECTION REPORT (Opportunity Cost)")
-    print("-" * 50)
-    print(f"🏆 Ghost Win Rate: {win_rate:.2%}")
-    print(f"💰 Avg Ghost Return: {avg_ret:+.2%}")
-    
-    print(f"\n🛡️ Bullets Dodged (SL): {bullets_dodged}")
-    print(f"💸 Alpha Leaked (TP): {alpha_leaked}")
+        results_df = pd.DataFrame(ghost_outcomes)
+        self._report(results_df)
+        return results_df
 
-    if win_rate > 0.60 and avg_ret > 0.01:
-        print("\n⚠️ VERDICT: OVER-VETOING. Your slippage thresholds are too tight.")
-        print("You are killing high-quality alpha to save on execution costs.")
-    elif win_rate < 0.40:
-        print("\n✅ VERDICT: VETO WORKING. Most DOA trades were indeed toxic or flat.")
-    else:
-        print("\n📊 VERDICT: NEUTRAL. Veto is neither consistently over-vetoing nor perfectly shielding.")
-    
-    print("-" * 50)
+    def _report(self, results_df):
+        total = len(results_df)
+        tp_count = int((results_df["outcome"] == "TP").sum()) if total else 0
+        sl_count = int((results_df["outcome"] == "SL").sum()) if total else 0
+        exp_count = int((results_df["outcome"] == "EXPIRED").sum()) if total else 0
+        pending_count = int((results_df["outcome"] == "PENDING").sum()) if total else 0
+
+        ghost_win_rate = (tp_count / total) if total > 0 else 0.0
+        avg_ghost_pnl = results_df["pnl"].mean() if total else 0.0
+
+        print("\n" + "=" * 50)
+        print("👻 DOA RESURRECTION REPORT: ALPHA LEAK AUDIT")
+        print("=" * 50)
+        print(f"Total Vetoed Trades Analyzed: {total}")
+        print(f"Ghost Win Rate (TP hit): {ghost_win_rate:.2%}")
+        print(f"Avg Ghost PnL: {avg_ghost_pnl:+.2%}")
+        print("-" * 50)
+        print(f"🛡 Bullets Dodged (SL): {sl_count}")
+        print(f"💸 Alpha Leaked (TP): {tp_count}")
+        print(f"⏳ Neutral/Expired: {exp_count}")
+        if pending_count:
+            print(f"🕒 Pending/API-limited: {pending_count}")
+        print("-" * 50)
+
+        if ghost_win_rate > 0.65:
+            print("VERDICT: 🔴 OVER-VETOING. You are killing high-quality alpha.")
+            print("Action: Consider relaxing the EV_adj threshold in shadow_purgatory.py.")
+        elif ghost_win_rate < 0.40:
+            print("VERDICT: 🟢 VETO IS EFFECTIVE. DOA trades are largely toxic.")
+        else:
+            print("VERDICT: 🟡 NEUTRAL. Veto is catching noise, but not significant alpha.")
+        print("=" * 50 + "\n")
+
+
+def resurrect_doa_trades(log_path="logs/shadow_results.csv", limit=50, model_bundle_path=None, clob_client=None):
+    return DOAResurrector(
+        log_path=log_path,
+        model_bundle_path=model_bundle_path,
+        clob_client=clob_client,
+    ).run_audit(limit=limit)
+
 
 if __name__ == "__main__":
-    resurrect_doa_trades()
+    auditor = DOAResurrector()
+    auditor.run_audit()
