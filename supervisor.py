@@ -348,6 +348,10 @@ def main_loop():
                 token_id = str(signal_row.get("token_id", "") or "")
                 entry_intent = str(signal_row.get("entry_intent", "OPEN_LONG") or "OPEN_LONG").upper()
 
+                if not token_id:
+                    logging.warning("Skipping signal with missing token_id: %s", signal_row.get("market_title", signal_row.get("market", "unknown_market")))
+                    continue
+
                 if entry_intent == "CLOSE_LONG":
                     if token_id and token_id in open_token_ids:
                         matching = open_positions_df[open_positions_df.get("token_id", pd.Series(dtype=str)).astype(str) == token_id]
@@ -365,6 +369,9 @@ def main_loop():
                 if action_val != 0:
                     size = 10 if action_val == 1 else 50
                     fill_price = quote_entry_price(signal_row)
+                    if fill_price is None or pd.isna(fill_price):
+                        logging.warning("Skipping signal with missing fill price for token_id=%s", token_id)
+                        continue
                     if trading_mode == "live" and execution_client is not None:
                         execution_client.create_and_post_order(
                             token_id=signal_row.get("token_id"),
