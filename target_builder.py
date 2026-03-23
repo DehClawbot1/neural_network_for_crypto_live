@@ -2,17 +2,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
-
-_ORIGINAL_TO_DATETIME = pd.to_datetime
-
-
-def _mixed_to_datetime(*args, **kwargs):
-    kwargs.setdefault("format", "mixed")
-    kwargs.setdefault("errors", "coerce")
-    return _ORIGINAL_TO_DATETIME(*args, **kwargs)
-
-
-pd.to_datetime = _mixed_to_datetime
 import requests
 
 
