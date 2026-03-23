@@ -25,7 +25,8 @@ def load_execution_history(logs_dir="logs"):
         return current_df
 
     combined = pd.concat([legacy_df, current_df], ignore_index=True, sort=False)
-    dedupe_cols = [c for c in ["timestamp", "market", "wallet_copied", "fill_price", "size_usdc", "action_type"] if c in combined.columns]
+    dedupe_cols = [c for c in ["timestamp", "market", "wallet_copied", "fill_price", "size_usdc", "action_type", "token_id", "order_id"] if c in combined.columns]
     if dedupe_cols:
         combined = combined.drop_duplicates(subset=dedupe_cols, keep="last")
     return combined
+
