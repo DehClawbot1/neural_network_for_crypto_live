@@ -211,3 +211,4 @@ class FeatureBuilder:
         features_df = pd.DataFrame(rows)
         logging.info("Built %s grouped feature rows.", len(features_df))
         return features_df
+

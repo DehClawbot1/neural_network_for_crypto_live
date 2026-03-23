@@ -135,3 +135,4 @@ class HistoricalDatasetBuilder:
         dataset.to_csv(self.output_file, index=False)
         logging.info("Saved historical dataset to %s", self.output_file)
         return dataset
+
