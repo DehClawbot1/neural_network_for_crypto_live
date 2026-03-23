@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -66,6 +67,56 @@ class TestDatabase(unittest.TestCase):
         results = new_db.query_all("SELECT price FROM fills WHERE fill_id = ?", ("fill-1",))
         self.assertEqual(results[0]["price"], 0.42)
         new_db.conn.close()
+
+
+class TestDatabaseLogging(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.tmp_dir.name) / "test_events.db"
+        self.db = Database(self.db_path)
+
+    def tearDown(self):
+        self.db.conn.close()
+        self.tmp_dir.cleanup()
+
+    def test_log_model_decision(self):
+        query = """
+        INSERT INTO model_decisions (token_id, model_name, score, action)
+        VALUES (?, ?, ?, ?)
+        """
+        params = ("0xtoken_abc", "stage3_hybrid_v1", 0.88, "BUY")
+        self.db.execute(query, params)
+
+        results = self.db.query_all("SELECT * FROM model_decisions")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["model_name"], "stage3_hybrid_v1")
+        self.assertEqual(results[0]["score"], 0.88)
+        self.assertIsNotNone(results[0]["created_at"])
+
+    def test_log_risk_event(self):
+        query = "INSERT INTO risk_events (token_id, event_type, detail) VALUES (?, ?, ?)"
+        detail = "Spread 0.06 exceeds max_spread 0.05"
+        self.db.execute(query, ("0xtoken_xyz", "spread_violation", detail))
+
+        results = self.db.query_all("SELECT * FROM risk_events WHERE event_type = ?", ("spread_violation",))
+        self.assertEqual(results[0]["detail"], detail)
+
+    def test_log_trade_event_with_json_payload(self):
+        payload = {
+            "side": "BUY",
+            "size_usdc": 100.0,
+            "slippage_bps": 15,
+            "whale_wallet": "0xwhale_123",
+        }
+        json_payload = json.dumps(payload)
+
+        query = "INSERT INTO trade_events (event_type, token_id, payload) VALUES (?, ?, ?)"
+        self.db.execute(query, ("whale_order_detected", "0xtoken_123", json_payload))
+
+        results = self.db.query_all("SELECT payload FROM trade_events WHERE token_id = ?", ("0xtoken_123",))
+        recovered_payload = json.loads(results[0]["payload"])
+        self.assertEqual(recovered_payload["whale_wallet"], "0xwhale_123")
+        self.assertEqual(recovered_payload["size_usdc"], 100.0)
 
 
 if __name__ == "__main__":
