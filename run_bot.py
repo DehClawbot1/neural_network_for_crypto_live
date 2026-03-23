@@ -6,6 +6,8 @@ from pathlib import Path
 from api_setup import validate_environment
 from rl_trainer import train_model
 from supervisor import main_loop, load_brain
+import supervisor as supervisor_module
+from supervisor_ui_patch import apply_supervisor_ui_patch
 from retrainer import Retrainer
 from real_pipeline import run_research_pipeline
 
@@ -76,6 +78,7 @@ def build_research_artifacts():
 
 
 def start_supervisor():
+    apply_supervisor_ui_patch(supervisor_module)
     print("[4/4] Starting supervisor...")
     print("[+] Status: RUNNING")
     print("[+] Expected behavior:")
