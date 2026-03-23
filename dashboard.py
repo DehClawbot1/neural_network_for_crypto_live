@@ -962,21 +962,13 @@ def render_trade_chart(trades_df, positions_df=None, closed_positions_df=None):
     curve_df["day"] = curve_df[time_col].dt.date.astype(str)
     daily = curve_df.groupby("day")[pnl_col].sum().reset_index(name="daily_pnl")
 
-    unrealized_total = 0.0
-    if positions_df is not None and not positions_df.empty and "unrealized_pnl" in positions_df.columns:
-        unrealized_total = float(pd.to_numeric(positions_df["unrealized_pnl"], errors="coerce").fillna(0).sum())
-    curve_df["realized_plus_unrealized"] = curve_df["cumulative_realized_pnl"] + unrealized_total
-
     c1, c2 = st.columns(2)
     with c1:
         st.plotly_chart(px.line(curve_df, x=time_col, y="cumulative_realized_pnl", title="Cumulative Realized PnL Over Time"), use_container_width=True)
     with c2:
-        st.plotly_chart(px.line(curve_df, x=time_col, y="realized_plus_unrealized", title="Realized + Unrealized Equity Curve"), use_container_width=True)
-    c3, c4 = st.columns(2)
-    with c3:
-        st.plotly_chart(px.bar(daily, x="day", y="daily_pnl", title="Daily PnL"), use_container_width=True)
-    with c4:
         st.plotly_chart(px.line(curve_df, x=time_col, y="drawdown", title="Drawdown Curve"), use_container_width=True)
+    with st.container():
+        st.plotly_chart(px.bar(daily, x="day", y="daily_pnl", title="Daily PnL"), use_container_width=True)
 
 
 def render_performance_charts(trades_df, closed_positions_df, alerts_df, backtest_wallet_df, model_registry_df, positions_df=None):
