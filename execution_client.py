@@ -11,9 +11,8 @@ class ExecutionClient:
     def __init__(self, host=None, chain_id=None, private_key=None, funder=None, signature_type=None):
         try:
             from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import OrderArgs, OrderType, MarketOrderArgs, BalanceAllowanceParams, AssetType
+            from py_clob_client.clob_types import OrderArgs, OrderType, MarketOrderArgs, BalanceAllowanceParams, AssetType, ApiCreds
             from py_clob_client.order_builder.constants import BUY, SELL
-            from py_clob_client.credentials import ApiCreds
         except Exception as exc:
             raise ImportError("py-clob-client is required for live-test execution_client.py") from exc
 
