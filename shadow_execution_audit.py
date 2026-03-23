@@ -1,5 +1,33 @@
 import os
 import pandas as pd
+import scipy.stats as stats
+
+
+def run_impact_correlation(df):
+    resolved = df[df['outcome'] != "PENDING"].copy()
+    if len(resolved) < 10:
+        print("📊 Correlation Audit: Waiting for N >= 10 for statistical relevance.")
+        return
+
+    metrics = [
+        ('meta_prob', 'Symmetry Check'),
+        ('whale_trade_size', 'Liquidity Depth Check'),
+        ('normalized_trade_size', 'Market Impact Check'),
+    ]
+
+    print("\n--- 🕵️ WHALE IMPACT CORRELATIONS (Spearman Rho) ---")
+    for col, description in metrics:
+        if col in resolved.columns:
+            rho, p_val = stats.spearmanr(resolved[col], resolved['entry_slippage_bps'])
+            significance = "✅" if p_val > 0.05 else "⚠️"
+            print(f"{col:<22} | Rho: {rho:+.3f} | P-Val: {p_val:.3f} | {significance} {description}")
+
+    high_prob = resolved[resolved['meta_prob'] > 0.90]
+    low_prob = resolved[resolved['meta_prob'] < 0.70]
+    high_prob_slip = high_prob['entry_slippage_bps'].mean() if not high_prob.empty else float('nan')
+    low_prob_slip = low_prob['entry_slippage_bps'].mean() if not low_prob.empty else float('nan')
+    print(f"\n💡 Conviction Tax: Avg Slippage for Prob > 0.90 is {high_prob_slip:.1f} BPS")
+    print(f"💡 Noise Tax: Avg Slippage for Prob < 0.70 is {low_prob_slip:.1f} BPS")
 
 
 def run_execution_audit(log_path="logs/shadow_results.csv", limit=20):
@@ -48,6 +76,7 @@ def run_execution_audit(log_path="logs/shadow_results.csv", limit=20):
         print("Check if high-conviction whales are clearing the book before you can enter.")
 
     print("-" * 50)
+    run_impact_correlation(resolved)
 
 
 if __name__ == "__main__":
