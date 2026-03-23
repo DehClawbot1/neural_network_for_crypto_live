@@ -313,7 +313,7 @@ st.dataframe = safe_streamlit_dataframe
 
 def render_live_account_status():
     st.sidebar.markdown("---")
-    st.sidebar.markdown("Live API Status (Polymarket)")
+    st.sidebar.markdown("Polymarket Auth Details")
 
     if ExecutionClient is None:
         st.sidebar.error("ExecutionClient module not found.")
@@ -325,9 +325,20 @@ def render_live_account_status():
 
     try:
         client = ExecutionClient()
-        balance = client.get_available_balance()
+        collat_data = client.get_balance_allowance(asset_type="COLLATERAL")
+        usdc_balance = float(collat_data.get("balance", 0.0)) if isinstance(collat_data, dict) else 0.0
+        collat_allowance = float(collat_data.get("allowance", 0.0)) if isinstance(collat_data, dict) else 0.0
+
+        cond_data = client.get_balance_allowance(asset_type="CONDITIONAL")
+        cond_allowance = float(cond_data.get("allowance", 0.0)) if isinstance(cond_data, dict) else 0.0
+
+        address = client.funder if client.funder else "Loaded from Private Key"
+
         st.sidebar.success("✅ API Connected")
-        st.sidebar.metric("Available USDC Balance", f"${balance:.2f}")
+        st.sidebar.markdown(f"**Account Address:**\n`{address}`")
+        st.sidebar.metric("USDC Balance", f"${usdc_balance:.2f}")
+        st.sidebar.caption(f"**Collateral Allowance:**\n`{collat_allowance}`")
+        st.sidebar.caption(f"**Conditional Allowance:**\n`{cond_allowance}`")
     except Exception as e:
         st.sidebar.error("❌ API Connection Failed")
         st.sidebar.caption(f"Error: {str(e)}")
