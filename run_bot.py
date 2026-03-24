@@ -102,7 +102,7 @@ def maybe_retrain_before_start():
     return retrained
 
 
-def should_refresh_research_artifacts(max_age_minutes=60):
+def should_refresh_research_artifacts(max_age_minutes=240):
     force_refresh = os.getenv("FORCE_RESEARCH_REFRESH", "").strip().lower() in {"1", "true", "yes", "on"}
     if force_refresh:
         return True, "FORCE_RESEARCH_REFRESH enabled"
