@@ -30,6 +30,7 @@ from polytrade_env import PolyTradeEnv
 from model_inference import ModelInference
 from stage1_inference import Stage1Inference
 from stage2_temporal_inference import Stage2TemporalInference
+from ops_state_sync import sync_ops_state_to_db
 from stage3_hybrid import Stage3HybridScorer
 from strategy_layers import EntryRuleLayer
 from rl_entry_inference import EntryRLInference
@@ -37,6 +38,7 @@ from rl_position_inference import PositionRLInference
 from rl_observation_schemas import prepare_entry_observation, prepare_position_observation
 from shadow_purgatory import ShadowPurgatory
 from db import Database
+from ops_state_sync import sync_ops_csv_to_db
 
 # Configure logging for zero-intervention monitoring
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -665,6 +667,10 @@ def main_loop():
             open_positions_df = position_manager.get_open_positions()
             autonomous_monitor.write_heartbeat("position_manager", status="ok", message="positions_updated", extra={"open_positions": len(open_positions_df) if open_positions_df is not None else 0})
             autonomous_monitor.write_status(trader_signals_df, trades_df, alerts_df, open_positions_df)
+            try:
+                sync_ops_state_to_db("logs")
+            except Exception as exc:
+                logging.warning("Ops state sync to DB failed: %s", exc)
             retrainer.maybe_retrain()
             autonomous_monitor.write_heartbeat("retrainer", status="ok", message="retrain_checked")
 

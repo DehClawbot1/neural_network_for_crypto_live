@@ -73,6 +73,28 @@ class Database:
                 detail TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS incidents (
+                incident_id TEXT PRIMARY KEY,
+                category TEXT,
+                severity TEXT,
+                summary TEXT,
+                detail TEXT,
+                created_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS service_heartbeats (
+                heartbeat_id TEXT PRIMARY KEY,
+                service TEXT,
+                status TEXT,
+                detail TEXT,
+                created_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS system_health (
+                health_id TEXT PRIMARY KEY,
+                component TEXT,
+                status TEXT,
+                detail TEXT,
+                created_at TEXT
+            );
             CREATE INDEX IF NOT EXISTS idx_positions_token_id ON positions(token_id);
             CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
             CREATE INDEX IF NOT EXISTS idx_orders_token_id ON orders(token_id);
@@ -84,6 +106,9 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_model_decisions_created_at ON model_decisions(created_at);
             CREATE INDEX IF NOT EXISTS idx_risk_events_token_id ON risk_events(token_id);
             CREATE INDEX IF NOT EXISTS idx_risk_events_created_at ON risk_events(created_at);
+            CREATE INDEX IF NOT EXISTS idx_incidents_created_at ON incidents(created_at);
+            CREATE INDEX IF NOT EXISTS idx_service_heartbeats_created_at ON service_heartbeats(created_at);
+            CREATE INDEX IF NOT EXISTS idx_system_health_created_at ON system_health(created_at);
             """
         )
         self.conn.commit()
