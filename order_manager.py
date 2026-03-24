@@ -245,12 +245,14 @@ class OrderManager:
                 last_response = None
             status = str((last_response or {}).get("status", "")).upper()
             if status in ["FILLED", "EXECUTED", "MATCHED"]:
+                fill_event_time = datetime.now(timezone.utc).isoformat()
                 fill_payload = {
-                    "trade_id": (last_response or {}).get("id", order_id),
+                    "trade_id": (last_response or {}).get("id") or f"{order_id}:{fill_event_time}",
                     "order_id": order_id,
                     "token_id": (last_response or {}).get("token_id", ""),
                     "price": float((last_response or {}).get("price", 0.0) or 0.0),
                     "size": float((last_response or {}).get("size", 0.0) or 0.0),
+                    "filled_at": fill_event_time,
                 }
                 self._update_order_status(order_id, "FILLED", fill_price=fill_payload["price"], fill_size=fill_payload["size"])
                 self.record_fill(fill_payload)
@@ -366,9 +368,11 @@ class OrderManager:
 
     def record_fill(self, fill_payload: dict):
         row = {"timestamp": datetime.now(timezone.utc).isoformat(), **fill_payload}
+        fill_id = row.get("trade_id") or row.get("fill_id") or f"{row.get('order_id', 'unknown')}:{row['timestamp']}"
+        row["fill_id"] = fill_id
         self._append(self.fills_file, row)
         self.db.execute(
             "INSERT OR REPLACE INTO fills (fill_id, order_id, token_id, price, size, filled_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (row.get("trade_id") or row.get("fill_id"), row.get("order_id"), row.get("token_id"), row.get("price"), row.get("size"), row.get("timestamp")),
+            (fill_id, row.get("order_id"), row.get("token_id"), row.get("price"), row.get("size"), row.get("filled_at") or row.get("timestamp")),
         )
         return fill_payload
