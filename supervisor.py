@@ -32,6 +32,8 @@ from stage1_inference import Stage1Inference
 from stage2_temporal_inference import Stage2TemporalInference
 from stage3_hybrid import Stage3HybridScorer
 from strategy_layers import EntryRuleLayer
+from rl_entry_inference import EntryRLInference
+from rl_position_inference import PositionRLInference
 from shadow_purgatory import ShadowPurgatory
 from db import Database
 
@@ -63,7 +65,7 @@ class StatefulRecurrentBrain:
 
 
 def load_brain(model_path="weights/ppo_polytrader"):
-    """Loads the trained Reinforcement Learning model."""
+    """Loads the legacy shared Reinforcement Learning model."""
     recurrent_path = "weights/recurrent_ppo_polytrader"
     vecnorm_path = "weights/ppo_polytrader_vecnormalize.pkl"
     try:
@@ -85,11 +87,35 @@ def load_brain(model_path="weights/ppo_polytrader"):
                 env = None
 
         model = PPO.load(model_path, env=env)
-        logging.info(f"[+] Successfully loaded RL brain from {model_path}.zip")
+        logging.info(f"[+] Successfully loaded legacy shared RL brain from {model_path}.zip")
         return model
     except Exception as e:
         logging.error(f"[-] Failed to load model from {model_path}. Error: {e}")
         return None
+
+
+def load_entry_brain():
+    try:
+        loader = EntryRLInference()
+        model = loader.load()
+        if model is not None:
+            logging.info("[+] Successfully loaded entry RL brain.")
+            return loader
+    except Exception as exc:
+        logging.warning(f"[!] Failed to load entry RL brain: {exc}")
+    return None
+
+
+def load_position_brain():
+    try:
+        loader = PositionRLInference()
+        model = loader.load()
+        if model is not None:
+            logging.info("[+] Successfully loaded position RL brain.")
+            return loader
+    except Exception as exc:
+        logging.warning(f"[!] Failed to load position RL brain: {exc}")
+    return None
 
 
 def prepare_observation(feature_row, legacy=False):
@@ -206,11 +232,18 @@ def log_ranked_signal(signal_row):
     append_csv_record(SIGNALS_FILE, record)
 
 
-def choose_action(signal_row, entry_rule: EntryRuleLayer, brain=None):
-    if brain is not None:
+def choose_action(signal_row, entry_rule: EntryRuleLayer, entry_brain=None, legacy_brain=None):
+    if entry_brain is not None:
+        try:
+            action_val = entry_brain.predict(signal_row)
+            if action_val is not None:
+                return int(action_val)
+        except Exception:
+            pass
+    if legacy_brain is not None:
         try:
             obs = prepare_observation(signal_row)
-            action, _ = brain.predict(obs, deterministic=True)
+            action, _ = legacy_brain.predict(obs, deterministic=True)
             action_val = int(action.item() if hasattr(action, "item") else action[0])
             return action_val
         except Exception:
@@ -305,9 +338,18 @@ def main_loop():
     """The continuous autonomous loop (research + paper-trading mode)."""
     logging.info("Initializing PAPER-TRADING PolyMarket Supervisor...")
 
-    brain = load_brain()
-    if not brain:
-        logging.warning("RL brain unavailable. Continuing with supervised-first ranking path.")
+    entry_brain = load_entry_brain()
+    position_brain = load_position_brain()
+    legacy_brain = None
+    if entry_brain is None or position_brain is None:
+        legacy_brain = load_brain()
+
+    if entry_brain is None:
+        logging.warning("Entry RL brain unavailable. Falling back to legacy shared RL or rules.")
+    if position_brain is None:
+        logging.warning("Position RL brain unavailable. Falling back to legacy shared RL or holds.")
+    if entry_brain is None and position_brain is None and legacy_brain is None:
+        logging.warning("No RL brain available. Continuing with supervised-first ranking path.")
 
     feature_builder = FeatureBuilder()
     signal_engine = SignalEngine()
@@ -486,7 +528,12 @@ def main_loop():
                 if token_id and token_id in open_token_ids:
                     continue
 
-                action_val = choose_action(signal_row, entry_rule, brain=brain)
+                action_val = choose_action(
+                    signal_row,
+                    entry_rule,
+                    entry_brain=entry_brain,
+                    legacy_brain=legacy_brain,
+                )
                 if action_val not in [0, 1, 2]:
                     action_val = 0
 
@@ -541,14 +588,17 @@ def main_loop():
 
             # 4B. Open-position management path for hold / reduce / exit
             open_positions_df = position_manager.update_mark_to_market(scored_df)
-            if not open_positions_df.empty and brain is not None:
+            if not open_positions_df.empty and (position_brain is not None or legacy_brain is not None):
                 for _, pos_row in open_positions_df.iterrows():
                     pos_dict = pos_row.to_dict()
                     token_id = str(pos_dict.get("token_id", "") or "")
-                    obs = prepare_position_observation(pos_dict)
                     try:
-                        pos_action, _ = brain.predict(obs, deterministic=True)
-                        pos_action_val = int(pos_action.item() if hasattr(pos_action, "item") else pos_action[0])
+                        if position_brain is not None:
+                            pos_action_val = position_brain.predict(pos_dict)
+                        else:
+                            obs = prepare_position_observation(pos_dict)
+                            pos_action, _ = legacy_brain.predict(obs, deterministic=True)
+                            pos_action_val = int(pos_action.item() if hasattr(pos_action, "item") else pos_action[0])
                     except Exception:
                         pos_action_val = 3
 

@@ -17,7 +17,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 load_dotenv()
 
-WEIGHTS_PATH = Path("weights/ppo_polytrader.zip")
+LEGACY_WEIGHTS_PATH = Path("weights/ppo_polytrader.zip")
+ENTRY_WEIGHTS_PATH = Path("weights/ppo_entry_policy.zip")
+POSITION_WEIGHTS_PATH = Path("weights/ppo_position_policy.zip")
 LOGS_DIR = Path("logs")
 RESEARCH_ARTIFACTS = [
     LOGS_DIR / "historical_dataset.csv",
@@ -78,8 +80,24 @@ def ensure_live_client_ready():
 def ensure_optional_rl_model():
     print("[2/3] Checking optional RL model weights...")
 
-    if WEIGHTS_PATH.exists():
-        print(f"[+] Found RL weights: {WEIGHTS_PATH} (optional fallback)\n")
+    legacy_exists = LEGACY_WEIGHTS_PATH.exists()
+    entry_exists = ENTRY_WEIGHTS_PATH.exists()
+    position_exists = POSITION_WEIGHTS_PATH.exists()
+
+    if entry_exists or position_exists:
+        if entry_exists:
+            print(f"[+] Found entry RL weights: {ENTRY_WEIGHTS_PATH}")
+        else:
+            print("[!] Entry RL weights missing: weights\\ppo_entry_policy.zip")
+        if position_exists:
+            print(f"[+] Found position RL weights: {POSITION_WEIGHTS_PATH}")
+        else:
+            print("[!] Position RL weights missing: weights\\ppo_position_policy.zip")
+        print("")
+        return True
+
+    if legacy_exists:
+        print(f"[+] Found legacy shared RL weights: {LEGACY_WEIGHTS_PATH} (compatibility fallback)\n")
         return True
 
     print("[!] No RL weights found.")
