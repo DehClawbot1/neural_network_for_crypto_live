@@ -352,7 +352,7 @@ st.dataframe = safe_streamlit_dataframe
 
 def render_live_account_status():
     st.sidebar.markdown("---")
-    st.sidebar.markdown("Polymarket Auth Details")
+    st.sidebar.markdown("Polymarket Live Truth")
 
     if ExecutionClient is None:
         st.sidebar.error("ExecutionClient module not found.")
@@ -364,22 +364,34 @@ def render_live_account_status():
 
     try:
         client = ExecutionClient()
+        raw_client = getattr(client, "client", None)
+        try:
+            if hasattr(client, "update_balance_allowance"):
+                client.update_balance_allowance(asset_type="COLLATERAL")
+        except Exception:
+            pass
+
         collat_data = client.get_balance_allowance(asset_type="COLLATERAL")
-        usdc_balance = float(collat_data.get("balance", 0.0)) if isinstance(collat_data, dict) else 0.0
+        usdc_balance = float(collat_data.get("balance", collat_data.get("amount", 0.0))) if isinstance(collat_data, dict) else 0.0
         collat_allowance = float(collat_data.get("allowance", 0.0)) if isinstance(collat_data, dict) else 0.0
+        address = client.funder if client.funder else os.getenv("POLYMARKET_PUBLIC_ADDRESS", "") or "Loaded from Private Key"
+        exchange_ok = False
+        server_time = None
+        if raw_client is not None and hasattr(raw_client, "get_ok"):
+            exchange_ok = bool(raw_client.get_ok())
+        if raw_client is not None and hasattr(raw_client, "get_server_time"):
+            server_time = raw_client.get_server_time()
 
-        cond_data = client.get_balance_allowance(asset_type="CONDITIONAL")
-        cond_allowance = float(cond_data.get("allowance", 0.0)) if isinstance(cond_data, dict) else 0.0
-
-        address = client.funder if client.funder else "Loaded from Private Key"
-
-        st.sidebar.success("✅ API Connected")
-        st.sidebar.markdown(f"**Account Address:**\n`{address}`")
+        st.sidebar.success("✅ Live client connected")
+        st.sidebar.metric("Balance source", "API: COLLATERAL")
         st.sidebar.metric("USDC Balance", f"${usdc_balance:.2f}")
-        st.sidebar.caption(f"**Collateral Allowance:**\n`{collat_allowance}`")
-        st.sidebar.caption(f"**Conditional Allowance:**\n`{cond_allowance}`")
+        st.sidebar.metric("Collateral Allowance", f"{collat_allowance:.2f}")
+        st.sidebar.metric("Exchange reachable", "YES" if exchange_ok else "NO")
+        st.sidebar.markdown(f"**Account Address:**\n`{address}`")
+        if server_time is not None:
+            st.sidebar.caption(f"Server time: {server_time}")
     except Exception as e:
-        st.sidebar.error("❌ API Connection Failed")
+        st.sidebar.error("❌ Live client failed")
         st.sidebar.caption(f"Error: {str(e)}")
 
 

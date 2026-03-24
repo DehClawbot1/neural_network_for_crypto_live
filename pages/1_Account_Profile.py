@@ -70,33 +70,85 @@ def _get_candidate_address_with_source() -> tuple[Optional[str], str]:
     return None, "missing"
 
 
-def _read_live_client_state() -> Dict[str, Any]:
+def _load_local_live_activity() -> Dict[str, pd.DataFrame]:
+    base_dir = Path(__file__).resolve().parent.parent
+    logs_dir = base_dir / "logs"
+    orders_path = logs_dir / "live_orders.csv"
+    fills_path = logs_dir / "live_fills.csv"
+
+    def safe_read(path: Path) -> pd.DataFrame:
+        if not path.exists():
+            return pd.DataFrame()
+        try:
+            return pd.read_csv(path, engine="python", on_bad_lines="skip")
+        except Exception:
+            return pd.DataFrame()
+
+    return {
+        "orders": safe_read(orders_path),
+        "fills": safe_read(fills_path),
+    }
+
+
+def _latest_tradability_snapshot(orders_df: pd.DataFrame) -> Dict[str, Any]:
+    if orders_df is None or orders_df.empty:
+        return {"tradable_status": "N/A", "tradable_reason": None}
+    df = orders_df.copy()
+    if "timestamp" in df.columns:
+        df["_ts"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+        df = df.sort_values(by="_ts")
+    row = df.tail(1).to_dict(orient="records")[0]
+    tradable = row.get("tradable")
+    if pd.isna(tradable):
+        tradable = None
+    return {
+        "tradable_status": "YES" if tradable is True else "NO" if tradable is False else "N/A",
+        "tradable_reason": row.get("reason") or row.get("orderbook_error"),
+        "bid_levels": row.get("bid_levels"),
+        "ask_levels": row.get("ask_levels"),
+        "quoted_price": row.get("quoted_price"),
+        "quoted_spread": row.get("quoted_spread"),
+    }
+
+
+def _read_live_client_state(local_activity: Optional[Dict[str, pd.DataFrame]] = None) -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "live_mode": os.getenv("TRADING_MODE", "paper").strip().lower() == "live",
         "client_ok": False,
+        "exchange_ok": False,
         "client_error": None,
+        "server_time": None,
         "funder": os.getenv("POLYMARKET_FUNDER", "").strip() or None,
         "address_source": "missing",
+        "balance_source": "none",
         "collateral_balance": None,
         "collateral_allowance": None,
-        "conditional_allowance": None,
     }
     fallback_address, fallback_source = _get_candidate_address_with_source()
     result["address_source"] = fallback_source
+    if local_activity is not None:
+        result.update(_latest_tradability_snapshot(local_activity.get("orders", pd.DataFrame())))
     if ExecutionClient is None or not result["live_mode"]:
         result["funder"] = result["funder"] or fallback_address
         return result
     try:
         client = ExecutionClient()
+        raw_client = getattr(client, "client", None)
         client_funder = getattr(client, "funder", None)
         result["funder"] = client_funder or result["funder"] or fallback_address
         result["address_source"] = "client_funder" if client_funder else fallback_source
         try:
-            client.update_balance_allowance(asset_type="COLLATERAL")
+            if hasattr(client, "update_balance_allowance"):
+                client.update_balance_allowance(asset_type="COLLATERAL")
         except Exception:
             pass
+        if raw_client is not None and hasattr(raw_client, "get_ok"):
+            result["exchange_ok"] = bool(raw_client.get_ok())
+        if raw_client is not None and hasattr(raw_client, "get_server_time"):
+            result["server_time"] = raw_client.get_server_time()
         collat = client.get_balance_allowance(asset_type="COLLATERAL")
         result["client_ok"] = True
+        result["balance_source"] = "api:COLLATERAL"
         if isinstance(collat, dict):
             result["collateral_balance"] = _safe_float(collat.get("balance", collat.get("amount")))
             result["collateral_allowance"] = _safe_float(collat.get("allowance"))
@@ -159,37 +211,22 @@ def _fetch_profile_bundle(address: str) -> Dict[str, Any]:
     return bundle
 
 
-def _load_local_live_activity() -> Dict[str, pd.DataFrame]:
-    base_dir = Path(__file__).resolve().parent.parent
-    logs_dir = base_dir / "logs"
-    orders_path = logs_dir / "live_orders.csv"
-    fills_path = logs_dir / "live_fills.csv"
-
-    def safe_read(path: Path) -> pd.DataFrame:
-        if not path.exists():
-            return pd.DataFrame()
-        try:
-            return pd.read_csv(path, engine="python", on_bad_lines="skip")
-        except Exception:
-            return pd.DataFrame()
-
-    return {
-        "orders": safe_read(orders_path),
-        "fills": safe_read(fills_path),
-    }
-
-
 def _render_top_status(live_state: Dict[str, Any], address: Optional[str], bundle: Optional[Dict[str, Any]]) -> None:
     status_bits: List[str] = []
     if live_state.get("live_mode"):
         if live_state.get("client_ok"):
-            status_bits.append("✅ live client connected (real API call succeeded)")
+            status_bits.append("✅ live client connected (real API balance call succeeded)")
         elif live_state.get("client_error"):
             status_bits.append("❌ live client failed")
         else:
             status_bits.append("⚪ live mode active")
     else:
         status_bits.append("ℹ️ paper mode")
+
+    if live_state.get("exchange_ok"):
+        status_bits.append("✅ exchange reachable")
+    elif live_state.get("client_ok"):
+        status_bits.append("⚠️ exchange check unavailable")
 
     address_source = live_state.get("address_source", "missing")
     if address:
@@ -199,6 +236,12 @@ def _render_top_status(live_state: Dict[str, Any], address: Optional[str], bundl
             status_bits.append(f"⚠️ wallet address fallback ({address_source})")
     else:
         status_bits.append("❌ wallet address missing")
+
+    tradable_status = live_state.get("tradable_status")
+    if tradable_status == "YES":
+        status_bits.append("✅ latest local tradability check passed")
+    elif tradable_status == "NO":
+        status_bits.append("⚠️ latest local tradability check failed")
 
     if bundle is not None:
         if bundle.get("profile"):
@@ -218,10 +261,10 @@ def _render_top_status(live_state: Dict[str, Any], address: Optional[str], bundl
 
 def main() -> None:
     st.title("🪪 Polymarket Account Profile")
-    st.caption("Use this page to visually confirm that your wallet/profile data is reachable after setup and auth.")
+    st.caption("Strict live truth view: real client connectivity, API-fetched collateral balance, address source, and latest local tradability signal.")
 
-    live_state = _read_live_client_state()
     local_activity = _load_local_live_activity()
+    live_state = _read_live_client_state(local_activity=local_activity)
     default_address = live_state.get("funder") or ""
 
     if not live_state.get("live_mode"):
@@ -242,16 +285,27 @@ def main() -> None:
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Trading mode", "live" if live_state.get("live_mode") else "paper")
-    c2.metric("Wallet address", address if address else "missing")
-    c3.metric("Collateral balance", f"${live_state['collateral_balance']:.2f}" if live_state.get("collateral_balance") is not None else "N/A")
-    c4.metric("Collateral allowance", f"{live_state['collateral_allowance']:.2f}" if live_state.get("collateral_allowance") is not None else "N/A")
+    c2.metric("Client connected", "YES" if live_state.get("client_ok") else "NO")
+    c3.metric("Exchange reachable", "YES" if live_state.get("exchange_ok") else "NO")
+    c4.metric("Balance source", live_state.get("balance_source") or "none")
 
-    lc1, lc2 = st.columns(2)
+    c5, c6, c7, c8 = st.columns(4)
+    c5.metric("Wallet address", address if address else "missing")
+    c6.metric("Address source", live_state.get("address_source") or "missing")
+    c7.metric("Collateral balance", f"${live_state['collateral_balance']:.2f}" if live_state.get("collateral_balance") is not None else "N/A")
+    c8.metric("Collateral allowance", f"{live_state['collateral_allowance']:.2f}" if live_state.get("collateral_allowance") is not None else "N/A")
+
+    lc1, lc2, lc3 = st.columns(3)
     lc1.metric("Local live orders", len(local_activity.get("orders", pd.DataFrame())))
     lc2.metric("Local live fills", len(local_activity.get("fills", pd.DataFrame())))
+    lc3.metric("Latest tradability", live_state.get("tradable_status") or "N/A")
 
-    if live_state.get("conditional_allowance") is not None:
-        st.caption(f"Conditional allowance: {live_state['conditional_allowance']:.2f}")
+    if live_state.get("server_time") is not None:
+        st.caption(f"Server time: {live_state['server_time']}")
+    if live_state.get("tradable_reason"):
+        st.caption(f"Latest tradability detail: {live_state['tradable_reason']}")
+    if live_state.get("quoted_price") is not None or live_state.get("quoted_spread") is not None:
+        st.caption(f"Latest quoted price/spread: {live_state.get('quoted_price', 'N/A')} / {live_state.get('quoted_spread', 'N/A')}")
     if live_state.get("client_error"):
         st.error(f"Live client error: {live_state['client_error']}")
 
