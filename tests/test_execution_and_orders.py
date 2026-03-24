@@ -46,7 +46,7 @@ def test_order_manager_insufficient_funds(mock_execution_client, tmp_path):
     assert row["reason"] == "insufficient_funds"
 
 
-def test_order_manager_onchain_fallback_allows_buy(mock_execution_client, tmp_path, monkeypatch):
+def test_order_manager_onchain_fallback_allows_buy(mock_execution_client, tmp_path):
     mock_execution_client.get_balance_allowance.return_value = {"balance": 0.0}
     mock_execution_client.get_onchain_collateral_balance.return_value = {
         "wallet": "0x672c1b45553aac41e9dccdf68a65be6a401c3176",
@@ -54,7 +54,6 @@ def test_order_manager_onchain_fallback_allows_buy(mock_execution_client, tmp_pa
         "total": 20.50165,
     }
     manager = _build_manager(tmp_path)
-    monkeypatch.setenv("ALLOW_ONCHAIN_USDC_FALLBACK", "true")
 
     row, response = manager.submit_entry(token_id="0x123", price=0.5, size=20, side="BUY")
 

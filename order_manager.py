@@ -153,24 +153,22 @@ class OrderManager:
                 self._append(self.orders_file, row)
                 return row, None
             if (available_balance or 0.0) < float(notional_usdc):
-                fallback_allowed = os.getenv("ALLOW_ONCHAIN_USDC_FALLBACK", "false").strip().lower() in {"1", "true", "yes", "on"}
                 fallback_total = 0.0
                 fallback_detail = None
-                if fallback_allowed:
-                    try:
-                        fallback_detail = self.client.get_onchain_collateral_balance()
-                        fallback_total = float((fallback_detail or {}).get("total", 0.0) or 0.0)
-                    except Exception as exc:
-                        logging.warning("On-chain collateral fallback lookup failed: %s", exc)
-                if fallback_allowed and fallback_total >= float(notional_usdc):
+                try:
+                    fallback_detail = self.client.get_onchain_collateral_balance()
+                    fallback_total = float((fallback_detail or {}).get("total", 0.0) or 0.0)
+                except Exception as exc:
+                    logging.warning("On-chain collateral fallback lookup failed: %s", exc)
+                if fallback_total >= float(notional_usdc):
                     logging.warning(
-                        "Using opt-in on-chain collateral fallback for BUY %s: CLOB balance=%s onchain_total=%s",
+                        "Using default on-chain collateral fallback for BUY %s: CLOB balance=%s onchain_total=%s",
                         token_id,
                         available_balance,
                         fallback_total,
                     )
                 else:
-                    row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "size_usdc": notional_usdc, "order_size_shares": order_size_shares, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": "insufficient_funds", "available_balance": available_balance, "onchain_fallback_total": fallback_total, "onchain_fallback_enabled": fallback_allowed, "onchain_fallback_wallet": (fallback_detail or {}).get("wallet") if isinstance(fallback_detail, dict) else None}
+                    row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "size_usdc": notional_usdc, "order_size_shares": order_size_shares, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": "insufficient_funds", "available_balance": available_balance, "onchain_fallback_total": fallback_total, "onchain_fallback_wallet": (fallback_detail or {}).get("wallet") if isinstance(fallback_detail, dict) else None}
                     self._append(self.orders_file, row)
                     return row, None
         else:

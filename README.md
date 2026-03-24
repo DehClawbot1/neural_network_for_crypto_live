@@ -180,7 +180,7 @@ The `live-test` branch now includes:
 - exchange order/fill reconciliation via `reconciliation_service.py`
 - reconciled live PnL reporting via `live_pnl.py`
 - mismatch freeze guard via `mismatch_detector.py`
-- optional buy-side on-chain collateral fallback via `ALLOW_ONCHAIN_USDC_FALLBACK=true`
+- default buy-side on-chain collateral fallback when CLOB collateral reports zero but wallet stablecoin balance covers the order
 - dashboard/account surfaces that show both CLOB collateral and on-chain wallet stablecoin balance
 
 ### Live learning scaffolds
