@@ -62,6 +62,9 @@ class LiveRiskManager:
     def record_loss(self):
         self.last_loss_time = datetime.now(timezone.utc)
 
+    def reset_failed_orders(self):
+        self.failed_orders = 0
+
     def activate_kill_switch(self):
         self.kill_switch = True
 
