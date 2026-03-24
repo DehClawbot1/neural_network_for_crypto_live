@@ -18,6 +18,15 @@ class Database:
         self._ensure_column("model_decisions", "model_artifact", "TEXT")
         self._ensure_column("model_decisions", "normalization_artifact", "TEXT")
 
+    def _ensure_column(self, table_name, column_name, column_type):
+        existing_columns = {
+            row["name"] if isinstance(row, sqlite3.Row) else row[1]
+            for row in self.conn.execute(f"PRAGMA table_info({table_name})")
+        }
+        if column_name not in existing_columns:
+            self.conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+            self.conn.commit()
+
     def _init_schema(self):
         cur = self.conn.cursor()
         cur.executescript(

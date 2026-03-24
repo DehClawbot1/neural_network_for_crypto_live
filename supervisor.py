@@ -38,7 +38,6 @@ from rl_position_inference import PositionRLInference
 from rl_observation_schemas import prepare_entry_observation, prepare_position_observation
 from shadow_purgatory import ShadowPurgatory
 from db import Database
-from ops_state_sync import sync_ops_csv_to_db
 
 # Configure logging for zero-intervention monitoring
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -222,6 +221,52 @@ def quote_exit_price(signal_row, slippage=0.01):
     best_bid = signal_row.get("best_bid")
     base_price = float(best_bid) if best_bid not in [None, ""] and pd.notna(best_bid) else current_price
     return max(0.01, base_price - slippage)
+
+
+def get_tp_target_price(position_manager, position_row):
+    entry_price = float(position_row.get("entry_price", 0.0) or 0.0)
+    if entry_price <= 0:
+        return None
+    move_target = entry_price + float(position_manager.take_profit_price_move)
+    roi_target = entry_price * (1.0 + float(position_manager.take_profit_roi_pct))
+    return max(move_target, roi_target)
+
+
+def submit_live_exit(order_manager, position_manager, pos_dict, exit_reason):
+    token_id = str(pos_dict.get("token_id", "") or "")
+    exit_size = float(pos_dict.get("shares", 0.0) or 0.0)
+    if exit_size <= 0:
+        logging.warning("Live exit skipped for %s due to invalid size", token_id)
+        return None, None, None
+
+    if exit_reason in {"take_profit_price_move", "take_profit_roi"}:
+        target_price = get_tp_target_price(position_manager, pos_dict)
+        if target_price is None or target_price <= 0:
+            logging.warning("Live TP exit skipped for %s due to invalid target", token_id)
+            return None, None, None
+        exit_row, exit_response = order_manager.monitor_and_trigger_exit(
+            token_id=token_id,
+            target_price=target_price,
+            size=exit_size,
+            condition_id=pos_dict.get("condition_id"),
+            outcome_side=pos_dict.get("outcome_side"),
+        )
+        return exit_row, exit_response, target_price
+
+    exit_price = quote_exit_price(pos_dict)
+    if exit_price <= 0:
+        logging.warning("Live exit skipped for %s due to invalid exit price", token_id)
+        return None, None, None
+    exit_row, exit_response = order_manager.submit_entry(
+        token_id=token_id,
+        price=exit_price,
+        size=exit_size,
+        side="SELL",
+        condition_id=pos_dict.get("condition_id"),
+        outcome_side=pos_dict.get("outcome_side"),
+        execution_style="taker",
+    )
+    return exit_row, exit_response, exit_price
 
 
 def execute_paper_trade(action, signal_row, fill_price=None):
@@ -676,29 +721,16 @@ def main_loop():
                     if not exit_reason:
                         continue
                     logging.info("Live exit rule triggered for %s: %s", token_id, exit_reason)
-                    exit_price = quote_exit_price(pos_dict)
-                    exit_size = float(pos_dict.get("shares", 0.0) or 0.0)
-                    if exit_price <= 0 or exit_size <= 0:
-                        logging.warning("Live exit skipped for %s due to invalid exit price/size", token_id)
-                        continue
-                    exit_row, exit_response = order_manager.submit_entry(
-                        token_id=token_id,
-                        price=exit_price,
-                        size=exit_size,
-                        side="SELL",
-                        condition_id=pos_dict.get("condition_id"),
-                        outcome_side=pos_dict.get("outcome_side"),
-                        execution_style="taker",
-                    )
+                    exit_row, exit_response, exit_price = submit_live_exit(order_manager, position_manager, pos_dict, exit_reason)
                     exit_order_id = (exit_row or {}).get("order_id") or (exit_response or {}).get("orderID") or (exit_response or {}).get("order_id") or (exit_response or {}).get("id")
                     if not exit_order_id:
-                        logging.info("Live exit rejected/skipped for token_id=%s reason=%s", token_id, (exit_row or {}).get("reason"))
+                        logging.info("Live exit waiting/rejected for token_id=%s reason=%s", token_id, (exit_row or {}).get("reason"))
                         continue
                     fill_result = order_manager.wait_for_fill(exit_order_id)
                     if fill_result.get("filled"):
                         fill_payload = fill_result.get("response") or {}
                         actual_fill_price = float(fill_payload.get("price", exit_price) or exit_price)
-                        actual_fill_size = float(fill_payload.get("size", exit_size) or exit_size)
+                        actual_fill_size = float(fill_payload.get("size", pos_dict.get("shares", 0.0)) or pos_dict.get("shares", 0.0))
                         log_live_fill_event(pos_dict, actual_fill_price, float(pos_dict.get("size_usdc", 0.0) or 0.0), action_type="LIVE_EXIT")
                         position_manager.close_position(pos_dict, reason=f"live_{exit_reason}", exit_price=actual_fill_price, filled_shares=actual_fill_size)
             else:
