@@ -70,6 +70,17 @@ class Database:
                 detail TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE INDEX IF NOT EXISTS idx_positions_token_id ON positions(token_id);
+            CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
+            CREATE INDEX IF NOT EXISTS idx_orders_token_id ON orders(token_id);
+            CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at);
+            CREATE INDEX IF NOT EXISTS idx_fills_order_id ON fills(order_id);
+            CREATE INDEX IF NOT EXISTS idx_fills_token_id ON fills(token_id);
+            CREATE INDEX IF NOT EXISTS idx_fills_filled_at ON fills(filled_at);
+            CREATE INDEX IF NOT EXISTS idx_model_decisions_token_id ON model_decisions(token_id);
+            CREATE INDEX IF NOT EXISTS idx_model_decisions_created_at ON model_decisions(created_at);
+            CREATE INDEX IF NOT EXISTS idx_risk_events_token_id ON risk_events(token_id);
+            CREATE INDEX IF NOT EXISTS idx_risk_events_created_at ON risk_events(created_at);
             """
         )
         self.conn.commit()
