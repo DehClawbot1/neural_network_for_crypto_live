@@ -295,9 +295,9 @@ def main() -> None:
         else:
             st.warning("No public profile payload was returned for this address.")
         if positions:
-            st.success("Positions endpoint returned data.")
+            st.success("Positions Data API endpoint returned data.")
         else:
-            st.info("No open positions found, or positions endpoint returned no rows.")
+            st.info("No open positions found, or Data API /positions returned no rows.")
         if activity:
             st.success("Activity endpoint returned recent rows.")
         else:
@@ -308,7 +308,7 @@ def main() -> None:
                 st.caption(item)
 
     if positions:
-        st.subheader("Open positions")
+        st.subheader("Open positions (Data API /positions)")
         pos_df = pd.DataFrame(positions)
         keep_cols = [c for c in ["title", "outcome", "size", "avgPrice", "curPrice", "currentValue", "cashPnl", "percentPnl", "realizedPnl", "endDate"] if c in pos_df.columns]
         st.dataframe(pos_df[keep_cols] if keep_cols else pos_df, use_container_width=True, hide_index=True)
