@@ -44,6 +44,14 @@ class MarketOrderRequest(BaseModel):
     order_type: str = "FOK"
 
 
+class CancelOrdersRequest(BaseModel):
+    order_ids: list[str] = Field(default_factory=list)
+
+
+class BatchOrdersRequest(BaseModel):
+    order_specs: list[dict[str, Any]] = Field(default_factory=list)
+
+
 @router.get("/capabilities")
 def get_capabilities():
     return {"capabilities": list_polymarket_capabilities()}
@@ -200,6 +208,16 @@ def cancel_all_orders():
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/orders/cancel-batch")
+def cancel_batch_orders(request: CancelOrdersRequest):
+    try:
+        client = get_execution_client()
+        result = client.cancel_orders(request.order_ids)
+        return {"ok": True, "order_ids": request.order_ids, "result": result}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/orders/cancel-market")
 def cancel_orders_for_market(request: CancelMarketOrdersRequest):
     try:
@@ -263,6 +281,16 @@ def market_sell_order(request: MarketOrderRequest):
         client = get_execution_client()
         result = client.market_sell_order(token_id=request.token_id, amount=request.amount, order_type=request.order_type)
         return {"ok": True, "result": result}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/orders/batch")
+def batch_orders(request: BatchOrdersRequest):
+    try:
+        client = get_execution_client()
+        result = client.orders(request.order_specs)
+        return {"ok": True, "count": len(request.order_specs), "result": result}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

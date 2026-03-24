@@ -266,11 +266,28 @@ class OrderManager:
         self._append(self.orders_file, {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "status": "CANCELED_ALL"})
         return response
 
+    def cancel_orders(self, order_ids):
+        if not hasattr(self.client, "cancel_orders"):
+            raise AttributeError("Execution client does not expose cancel_orders")
+        order_ids = [str(order_id) for order_id in (order_ids or []) if str(order_id).strip()]
+        response = self.client.cancel_orders(order_ids)
+        for order_id in order_ids:
+            self._append(self.orders_file, {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": order_id, "status": "CANCELED_BATCH"})
+        return response
+
     def cancel_market_orders(self, market="", asset_id=""):
         if not hasattr(self.client, "cancel_market_orders"):
             raise AttributeError("Execution client does not expose cancel_market_orders")
         response = self.client.cancel_market_orders(market=market, asset_id=asset_id)
         self._append(self.orders_file, {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "status": "CANCELED_MARKET", "market": market, "asset_id": asset_id})
+        return response
+
+    def submit_batch_orders(self, order_specs):
+        if not hasattr(self.client, "orders"):
+            raise AttributeError("Execution client does not expose batch orders")
+        order_specs = list(order_specs or [])
+        response = self.client.orders(order_specs)
+        self._append(self.orders_file, {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "status": "BATCH_SUBMITTED", "count": len(order_specs)})
         return response
 
     def list_orders(self):
