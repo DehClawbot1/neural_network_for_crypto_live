@@ -72,3 +72,8 @@ def sync_ops_state_to_db(logs_dir="logs"):
         "service_heartbeats": len(heartbeats_df),
         "system_health": len(health_df),
     }
+
+
+def sync_ops_csv_to_db(logs_dir="logs"):
+    """Backward-compatible alias for older imports."""
+    return sync_ops_state_to_db(logs_dir)

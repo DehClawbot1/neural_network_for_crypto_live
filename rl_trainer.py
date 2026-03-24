@@ -62,6 +62,10 @@ def fine_tune_from_live_buffer(min_rows=100, batch_rows=1000, timesteps=256, sle
     experience, builds a replay env, and fine-tunes the latest PPO weights
     in short batches.
     """
+    if os.getenv("ENABLE_OFFLINE_REPLAY_PPO", "false").strip().lower() not in {"1", "true", "yes", "on"}:
+        print("[!] Offline replay PPO fine-tuning is disabled by default; logged transitions are not a valid control env.")
+        return None
+
     buffer = LiveReplayBuffer()
     model_path = "weights/ppo_polytrader"
     zipped_path = model_path + ".zip"
