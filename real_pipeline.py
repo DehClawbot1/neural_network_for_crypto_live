@@ -22,11 +22,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 
 def run_research_pipeline():
-    logging.info("Building historical dataset...")
-    HistoricalDatasetBuilder().write()
-
     logging.info("Building BTC direction targets...")
     TargetBuilder().write(days=30, horizon_minutes=60)
+
+    logging.info("Building historical dataset...")
+    HistoricalDatasetBuilder().write()
     DatasetAligner().write()
 
     if os.getenv("ENABLE_LEGACY_BTC_DIRECTION_MODEL", "false").strip().lower() in {"1", "true", "yes", "on"}:
