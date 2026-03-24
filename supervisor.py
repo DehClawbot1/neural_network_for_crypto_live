@@ -441,7 +441,7 @@ def main_loop():
                         if not matching.empty:
                             pos_dict = matching.iloc[0].to_dict()
                             if trading_mode == "live" and order_manager is not None:
-                                exit_price = quote_entry_price(pos_dict)
+                                exit_price = quote_exit_price(pos_dict)
                                 exit_size = float(pos_dict.get("shares", 0.0) or 0.0)
                                 if exit_price is not None and exit_size > 0:
                                     exit_row, exit_response = order_manager.submit_entry(
@@ -543,7 +543,7 @@ def main_loop():
 
                     if pos_action_val == 4:
                         if trading_mode == "live" and order_manager is not None:
-                            exit_price = quote_entry_price(pos_dict)
+                            exit_price = quote_exit_price(pos_dict)
                             exit_size = float(pos_dict.get("shares", 0.0) or 0.0) * 0.5
                             if exit_price is not None and exit_size > 0:
                                 reduce_row, reduce_response = order_manager.submit_entry(
@@ -566,7 +566,7 @@ def main_loop():
                             position_manager.reduce_position(pos_dict, fraction=0.5)
                     elif pos_action_val == 5:
                         if trading_mode == "live" and order_manager is not None:
-                            exit_price = quote_entry_price(pos_dict)
+                            exit_price = quote_exit_price(pos_dict)
                             exit_size = float(pos_dict.get("shares", 0.0) or 0.0)
                             if exit_price is not None and exit_size > 0:
                                 exit_row, exit_response = order_manager.submit_entry(
