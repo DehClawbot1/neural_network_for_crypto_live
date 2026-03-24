@@ -285,7 +285,7 @@ def render_freshness(source_frames):
         lt = latest_ts(df); best = max([t for t in [fm, lt] if t], default=None)
         a = int((now - best).total_seconds()) if best else None; s, _ = freshness_status(a)
         rows.append({"source": label, "latest_row": lt.strftime('%Y-%m-%d %H:%M:%S') if lt else "N/A", "file_modified": fm.strftime('%Y-%m-%d %H:%M:%S') if fm else "N/A", "age": f"{a}s" if a and a < 120 else (f"{round(a/60,1)}m" if a else "N/A"), "status": s})
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(ensure_safe(pd.DataFrame(rows)), use_container_width=True, hide_index=True)
 
 def render_health(signals_df, markets_df, positions_df, model_status_df, replay_df, health_df):
     st.markdown('<div class="sec-title">Pipeline Health</div>', unsafe_allow_html=True)
@@ -382,7 +382,7 @@ def render_factor_matrix(signals_df):
     fdf = pd.DataFrame(rows); fdf["numeric"] = pd.to_numeric(fdf["score"], errors="coerce")
     fig = px.bar(fdf, x="numeric", y="factor", orientation="h", color_discrete_sequence=["#06b6d4"])
     st.plotly_chart(sfig(fig, 380).update_layout(title="Factor Breakdown", yaxis={"categoryorder":"total ascending"}), use_container_width=True)
-    st.dataframe(fdf[["factor","score","status"]], use_container_width=True, hide_index=True)
+    st.dataframe(ensure_safe(fdf[["factor","score","status"]]), use_container_width=True, hide_index=True)
 
 def render_opp_table(signals_df):
     st.markdown('<div class="sec-title">Opportunity Ranking Table</div>', unsafe_allow_html=True)
@@ -645,9 +645,9 @@ def render_live_sidebar():
         co = cl.get_balance_allowance(asset_type="COLLATERAL"); bal = float(co.get("balance",co.get("amount",0.0))) if isinstance(co,dict) else 0.0
         addr = cl.funder if cl.funder else os.getenv("POLYMARKET_PUBLIC_ADDRESS","")
         oc = cl.get_onchain_collateral_balance(wallet_address=addr); ob = float((oc or {}).get("total",0.0) or 0.0)
-        st.sidebar.success("Live client connected"); st.sidebar.metric("CLOB Collateral",f"${bal:.2f}"); st.sidebar.metric("On-chain USDC",f"${ob:.2f}")
+        st.sidebar.success("Live client connected"); st.sidebar.metric("On-chain USDC",f"${ob:.2f}"); st.sidebar.metric("Available to Trade (CLOB/API)",f"${bal:.2f}")
         st.sidebar.markdown(f"**Address:** `{addr}`")
-        if ob > 0 and bal <= 0: st.sidebar.warning("On-chain funds detected but CLOB collateral is zero.")
+        if ob > 0 and bal <= 0: st.sidebar.warning("On-chain USDC is present, but Available to Trade from the CLOB/API is still zero.")
     except Exception as e: st.sidebar.error("Live client failed"); st.sidebar.caption(str(e))
 
 

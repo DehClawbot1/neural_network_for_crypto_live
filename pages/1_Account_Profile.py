@@ -298,13 +298,13 @@ def main() -> None:
     c1.metric("Trading mode", "live" if live_state.get("live_mode") else "paper")
     c2.metric("Client connected", "YES" if live_state.get("client_ok") else "NO")
     c3.metric("Exchange reachable", "YES" if live_state.get("exchange_ok") else "NO")
-    c4.metric("Balance source", live_state.get("balance_source") or "none")
+    c4.metric("Balance source", "On-chain USDC + CLOB/API" if live_state.get("live_mode") else (live_state.get("balance_source") or "none"))
 
     c5, c6, c7, c8 = st.columns(4)
     c5.metric("Wallet address", address if address else "missing")
     c6.metric("Address source", live_state.get("address_source") or "missing")
-    c7.metric("CLOB collateral", f"${live_state['collateral_balance']:.2f}" if live_state.get("collateral_balance") is not None else "N/A")
-    c8.metric("On-chain wallet USDC", f"${live_state['onchain_wallet_balance']:.2f}" if live_state.get("onchain_wallet_balance") is not None else "N/A")
+    c7.metric("Available to Trade (CLOB/API)", f"${live_state['collateral_balance']:.2f}" if live_state.get("collateral_balance") is not None else "N/A")
+    c8.metric("On-chain USDC", f"${live_state['onchain_wallet_balance']:.2f}" if live_state.get("onchain_wallet_balance") is not None else "N/A")
 
     lc1, lc2, lc3, lc4 = st.columns(4)
     lc1.metric("Local live orders", len(local_activity.get("orders", pd.DataFrame())))
@@ -313,7 +313,7 @@ def main() -> None:
     lc4.metric("Collateral allowance", f"{live_state['collateral_allowance']:.2f}" if live_state.get("collateral_allowance") is not None else "N/A")
 
     if live_state.get("balance_mismatch"):
-        st.warning("On-chain wallet funds are present, but the CLOB collateral balance is still zero for this account context.")
+        st.warning("On-chain USDC is present, but Available to Trade from the CLOB/API is still zero for this account context.")
     if live_state.get("server_time") is not None:
         st.caption(f"Server time: {live_state['server_time']}")
     if live_state.get("tradable_reason"):
