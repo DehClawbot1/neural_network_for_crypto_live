@@ -12,6 +12,9 @@ LOGS_DIR = BASE_DIR / "logs"
 
 app = FastAPI(title="Neural Network for Crypto API", version="1.0.0")
 
+# BUG FIX: Actually register the Polymarket router so /polymarket/* endpoints work
+app.include_router(polymarket_router)
+
 
 def read_csv(name: str) -> pd.DataFrame:
     path = LOGS_DIR / name
@@ -38,6 +41,9 @@ def root():
             "/analytics",
             "/backtest",
             "/dataset",
+            "/polymarket/capabilities",
+            "/polymarket/status",
+            "/polymarket/health",
         ],
     }
 
@@ -122,4 +128,3 @@ def dataset(limit: int = 100):
     if df.empty:
         return JSONResponse([])
     return JSONResponse(df.tail(limit).to_dict(orient="records"))
-

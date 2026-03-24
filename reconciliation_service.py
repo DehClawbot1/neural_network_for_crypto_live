@@ -3,11 +3,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pandas as pd
+
 from db import Database
 
 
 class ReconciliationService:
-    def __init__(self, execution_client, logs_dir="logs"):
+    def __init__(self, execution_client=None, logs_dir="logs"):
         self.execution_client = execution_client
         self.logs_dir = Path(logs_dir)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -63,7 +65,17 @@ class ReconciliationService:
             "side": str(trade.get("side") or trade.get("taker_side") or "").upper() or None,
         }
 
+    def _safe_read_csv(self, filename):
+        path = self.logs_dir / filename
+        if not path.exists():
+            return pd.DataFrame()
+        try:
+            return pd.read_csv(path, engine="python", on_bad_lines="skip")
+        except Exception:
+            return pd.DataFrame()
+
     def sync_orders_and_fills(self):
+        """Sync exchange orders and fills into the local SQLite database."""
         synced_orders = 0
         synced_fills = 0
 
@@ -115,3 +127,96 @@ class ReconciliationService:
             pass
 
         return {"orders": synced_orders, "fills": synced_fills}
+
+    def reconcile(self):
+        """
+        BUG FIX: This method was missing but expected by tests and the
+        dashboard reconciliation panel.  It compares local CSV state with
+        the exchange's current view and reports mismatches.
+
+        Returns (report_dict, remote_orders_df, remote_trades_df).
+        """
+        local_orders = self._safe_read_csv("live_orders.csv")
+        local_fills = self._safe_read_csv("live_fills.csv")
+
+        # Fetch remote state
+        remote_orders_raw = []
+        remote_trades_raw = []
+        try:
+            remote_orders_raw = self._extract_items(self.execution_client.get_open_orders())
+        except Exception:
+            pass
+        try:
+            remote_trades_raw = self._extract_items(self.execution_client.get_trades())
+        except Exception:
+            pass
+
+        remote_orders = [self._normalize_order(o) for o in remote_orders_raw]
+        remote_orders = [o for o in remote_orders if o is not None]
+        remote_trades = [self._normalize_trade(t) for t in remote_trades_raw]
+        remote_trades = [t for t in remote_trades if t is not None]
+
+        remote_orders_df = pd.DataFrame(remote_orders)
+        remote_trades_df = pd.DataFrame(remote_trades)
+
+        remote_order_ids = set(o["order_id"] for o in remote_orders)
+        remote_trade_ids = set(t["fill_id"] for t in remote_trades)
+
+        # Local open orders (exclude already closed/filled/canceled)
+        closed_statuses = {"FILLED", "CANCELED", "REJECTED", "FAILED", "CANCELED_ALL", "CANCELED_BATCH", "CANCELED_MARKET"}
+        local_open_order_ids = set()
+        if not local_orders.empty and "order_id" in local_orders.columns:
+            for _, row in local_orders.iterrows():
+                status = str(row.get("status", "")).upper()
+                oid = str(row.get("order_id", ""))
+                if oid and oid != "nan" and oid != "None" and status not in closed_statuses:
+                    local_open_order_ids.add(oid)
+
+        local_trade_ids = set()
+        if not local_fills.empty:
+            id_col = "trade_id" if "trade_id" in local_fills.columns else "fill_id" if "fill_id" in local_fills.columns else None
+            if id_col:
+                local_trade_ids = set(local_fills[id_col].dropna().astype(str).tolist())
+
+        missing_remote_orders = sorted(local_open_order_ids - remote_order_ids)
+        missing_local_orders = sorted(remote_order_ids - local_open_order_ids)
+        missing_remote_trades = sorted(local_trade_ids - remote_trade_ids)
+        missing_local_trades = sorted(remote_trade_ids - local_trade_ids)
+
+        # Detect status/size mismatches for orders present on both sides
+        order_mismatches = []
+        if not local_orders.empty and "order_id" in local_orders.columns:
+            remote_order_lookup = {o["order_id"]: o for o in remote_orders}
+            for _, row in local_orders.iterrows():
+                oid = str(row.get("order_id", ""))
+                if oid not in remote_order_lookup:
+                    continue
+                local_status = str(row.get("status", "")).upper()
+                if local_status in closed_statuses:
+                    continue
+                remote = remote_order_lookup[oid]
+                remote_status = str(remote.get("status", "")).upper()
+                local_size = float(row.get("size", 0) or 0)
+                remote_size = float(remote.get("size", 0) or 0)
+                if local_status != remote_status or abs(local_size - remote_size) > 0.001:
+                    order_mismatches.append({
+                        "order_id": oid,
+                        "local_status": local_status,
+                        "remote_status": remote_status,
+                        "local_size": local_size,
+                        "remote_size": remote_size,
+                    })
+
+        report = {
+            "local_order_rows": len(local_orders),
+            "local_fill_rows": len(local_fills),
+            "remote_open_orders": len(remote_orders),
+            "remote_trades": len(remote_trades),
+            "missing_remote_orders": missing_remote_orders,
+            "missing_local_orders": missing_local_orders,
+            "missing_remote_trades": missing_remote_trades,
+            "missing_local_trades": missing_local_trades,
+            "order_mismatches": order_mismatches,
+        }
+
+        return report, remote_orders_df, remote_trades_df

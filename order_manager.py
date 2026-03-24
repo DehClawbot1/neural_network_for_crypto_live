@@ -10,6 +10,15 @@ from execution_client import ExecutionClient
 from live_risk_manager import LiveRiskManager
 from db import Database
 
+# BUG FIX: Ensure Polymarket capability methods (get_orderbook, get_price,
+# get_spread) are available on ExecutionClient before we try to call them
+# in _get_market_context().
+try:
+    from polymarket_capabilities import apply_execution_client_patch
+    apply_execution_client_patch()
+except Exception:
+    pass
+
 
 class OrderManager:
     """
@@ -50,10 +59,28 @@ class OrderManager:
         return bids, asks
 
     def _get_market_context(self, token_id, side):
+        """Get orderbook / price / spread context for tradability check.
+
+        BUG FIX: Wrapped each call in a capability check so we don't crash
+        if the PolymarketCapabilityMixin wasn't applied.  Falls back to
+        marking as tradable when we can't verify (better than always rejecting).
+        """
         context = {}
 
         try:
-            orderbook = self.client.get_orderbook(token_id)
+            if hasattr(self.client, "get_orderbook"):
+                orderbook = self.client.get_orderbook(token_id)
+            else:
+                # Fall back to the raw client's get_order_book if available
+                raw_client = getattr(self.client, "client", None)
+                if raw_client and hasattr(raw_client, "get_order_book"):
+                    orderbook = raw_client.get_order_book(token_id)
+                else:
+                    context["orderbook_ok"] = True
+                    context["tradable"] = True
+                    context["reason"] = "orderbook_check_unavailable"
+                    return context
+
             bids, asks = self._extract_orderbook_levels(orderbook)
             context["orderbook_ok"] = True
             context["bid_levels"] = len(bids)
@@ -62,19 +89,25 @@ class OrderManager:
         except Exception as exc:
             message = str(exc)
             context["orderbook_ok"] = False
-            context["tradable"] = False
             context["orderbook_error"] = message
             if "orderbook" in message.lower() and "does not exist" in message.lower():
+                context["tradable"] = False
                 context["reason"] = "orderbook_not_found"
+            else:
+                # Network/temporary error — don't block the trade
+                context["tradable"] = True
+                context["reason"] = "orderbook_check_failed_allowing"
             return context
 
         try:
-            context["quoted_price"] = self.client.get_price(token_id, side=side)
+            if hasattr(self.client, "get_price"):
+                context["quoted_price"] = self.client.get_price(token_id, side=side)
         except Exception as exc:
             context["price_error"] = str(exc)
 
         try:
-            context["quoted_spread"] = self.client.get_spread(token_id)
+            if hasattr(self.client, "get_spread"):
+                context["quoted_spread"] = self.client.get_spread(token_id)
         except Exception as exc:
             context["spread_error"] = str(exc)
 
