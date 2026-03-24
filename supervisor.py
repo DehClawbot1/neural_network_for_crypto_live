@@ -25,7 +25,8 @@ from autonomous_monitor import AutonomousMonitor
 from retrainer import Retrainer
 from execution_client import ExecutionClient
 from order_manager import OrderManager
-from position_manager import PositionManager
+from trade_manager import TradeManager
+from trade_lifecycle import TradeLifecycle
 from polytrade_env import PolyTradeEnv
 from model_inference import ModelInference
 from stage1_inference import Stage1Inference
@@ -38,6 +39,7 @@ from rl_position_inference import PositionRLInference
 from rl_observation_schemas import prepare_entry_observation, prepare_position_observation
 from shadow_purgatory import ShadowPurgatory
 from live_position_book import LivePositionBook
+from reconciliation_service import ReconciliationService
 from db import Database
 
 # Configure logging for zero-intervention monitoring
@@ -391,11 +393,12 @@ def main_loop():
     trader_analytics = TraderAnalytics()
     dataset_builder = HistoricalDatasetBuilder()
     backtester = StrategyBacktester()
-    position_manager = PositionManager()
     trading_mode = os.getenv("TRADING_MODE", "paper").strip().lower()
     execution_client = ExecutionClient() if trading_mode == "live" else None
     order_manager = OrderManager() if trading_mode == "live" else None
     live_position_book = LivePositionBook() if trading_mode == "live" else None
+    reconciliation_service = ReconciliationService(execution_client) if trading_mode == "live" and execution_client is not None else None
+    trade_manager = TradeManager()
     autonomous_monitor = AutonomousMonitor()
     retrainer = Retrainer()
     previous_markets_df = None
@@ -410,6 +413,12 @@ def main_loop():
         try:
             if trading_mode == "live" and order_manager is not None and hasattr(order_manager, "risk") and hasattr(order_manager.risk, "reset_failed_orders"):
                 order_manager.risk.reset_failed_orders()
+            if trading_mode == "live" and reconciliation_service is not None:
+                try:
+                    sync_summary = reconciliation_service.sync_orders_and_fills()
+                    logging.info("Exchange reconciliation synced orders=%s fills=%s", sync_summary.get("orders", 0), sync_summary.get("fills", 0))
+                except Exception as exc:
+                    logging.warning("Exchange reconciliation failed: %s", exc)
             logging.info("--- Starting Research + Paper-Trading Evaluation Cycle ---")
 
             # 1. Gather public market context + public wallet activity
@@ -510,55 +519,29 @@ def main_loop():
                 log_ranked_signal(ranked_row.to_dict())
             print("======================================\n")
 
-            # 4A. Candidate-entry path for tokens without open positions
-            if trading_mode == "live" and live_position_book is not None:
-                live_position_book.rebuild_from_db()
-                open_positions_df = live_position_book.get_enriched_open_positions(scored_df=scored_df, fallback_df=position_manager.get_open_positions())
-            else:
-                open_positions_df = position_manager.get_open_positions()
-            open_token_ids = set(open_positions_df.get("token_id", pd.Series(dtype=str)).dropna().astype(str).tolist()) if not open_positions_df.empty else set()
+            # 4A. Candidate-entry path for new signals
+            current_active_trades = trade_manager.get_open_positions()
+            active_trade_keys = {f"{trade.market}-{trade.outcome_side}" for trade in current_active_trades}
+
             for _, row in scored_df.iterrows():
                 signal_row = row.to_dict()
                 token_id = str(signal_row.get("token_id", "") or "")
                 entry_intent = str(signal_row.get("entry_intent", "OPEN_LONG") or "OPEN_LONG").upper()
+                market_key = f"{signal_row.get('market_title')}-{signal_row.get('outcome_side')}"
 
                 if not token_id:
                     logging.warning("Skipping signal with missing token_id: %s", signal_row.get("market_title", signal_row.get("market", "unknown_market")))
                     continue
 
+                # Handle CLOSE_LONG intent for existing trades
                 if entry_intent == "CLOSE_LONG":
-                    if token_id and token_id in open_token_ids:
-                        matching = open_positions_df[open_positions_df.get("token_id", pd.Series(dtype=str)).astype(str) == token_id]
-                        if not matching.empty:
-                            pos_dict = matching.iloc[0].to_dict()
-                            if trading_mode == "live" and order_manager is not None:
-                                exit_price = quote_exit_price(pos_dict)
-                                exit_size = float(pos_dict.get("shares", 0.0) or 0.0)
-                                if exit_price is not None and exit_size > 0:
-                                    exit_row, exit_response = order_manager.submit_entry(
-                                        token_id=token_id,
-                                        price=exit_price,
-                                        size=exit_size,
-                                        side="SELL",
-                                        condition_id=pos_dict.get("condition_id"),
-                                        outcome_side=pos_dict.get("outcome_side"),
-                                    )
-                                    exit_order_id = (exit_row or {}).get("order_id") or (exit_response or {}).get("orderID") or (exit_response or {}).get("order_id") or (exit_response or {}).get("id")
-                                    if exit_order_id:
-                                        fill_result = order_manager.wait_for_fill(exit_order_id)
-                                        if fill_result.get("filled"):
-                                            fill_payload = fill_result.get("response") or {}
-                                            actual_fill_price = float(fill_payload.get("price", exit_price) or exit_price)
-                                            actual_fill_size = float(fill_payload.get("size", exit_size) or exit_size)
-                                            log_live_fill_event(pos_dict, actual_fill_price, float(pos_dict.get("size_usdc", 0.0) or 0.0), action_type="LIVE_EXIT")
-                                            position_manager.close_position(pos_dict, reason="whale_sell_exit", exit_price=actual_fill_price, filled_shares=actual_fill_size)
-                                else:
-                                    logging.warning("Live CLOSE_LONG skipped for %s due to missing exit price/size", token_id)
-                            else:
-                                position_manager.close_position(pos_dict, reason="whale_sell_exit")
-                    continue
+                    if market_key in active_trade_keys:
+                        logging.info("Signal for CLOSE_LONG received for %s. Will be processed by trade_manager.process_exits.", market_key)
+                        # The actual closing will be handled by trade_manager.process_exits
+                    continue # Skip further processing for this signal
 
-                if token_id and token_id in open_token_ids:
+                # Skip if already have an open trade for this market/side
+                if market_key in active_trade_keys:
                     continue
 
                 action_val = choose_action(
@@ -590,16 +573,27 @@ def main_loop():
                     logging.warning("Model decision logging failed for %s: %s", token_id, exc)
 
                 if action_val != 0:
-                    size = 10 if action_val == 1 else 50
+                    size_usdc = 10 if action_val == 1 else 50
+                    confidence = float(signal_row.get("confidence", 0.0) or 0.0)
                     fill_price = quote_entry_price(signal_row)
+                    
                     if fill_price is None or pd.isna(fill_price):
                         logging.warning("Skipping signal with missing fill price for token_id=%s", token_id)
                         continue
+
+                    # Delegate trade entry to TradeManager
+                    trade = trade_manager.handle_signal(signal_row=pd.Series(signal_row), confidence=confidence, size_usdc=size_usdc)
+                    
+                    if trade is None:
+                        logging.warning("TradeManager did not initiate a trade for signal %s.", token_id)
+                        continue
+                    
                     if trading_mode == "live" and order_manager is not None:
+                        # For live mode, actually submit the order and await fill
                         entry_row, entry_response = order_manager.submit_entry(
-                            token_id=signal_row.get("token_id"),
+                            token_id=token_id,
                             price=fill_price,
-                            size=size,
+                            size=trade.shares, # Use shares from TradeLifecycle
                             side=signal_row.get("order_side", "BUY"),
                             condition_id=signal_row.get("condition_id"),
                             outcome_side=signal_row.get("outcome_side", signal_row.get("side")),
@@ -607,7 +601,10 @@ def main_loop():
                         entry_order_id = (entry_row or {}).get("order_id") or (entry_response or {}).get("orderID") or (entry_response or {}).get("order_id") or (entry_response or {}).get("id")
                         if not entry_order_id:
                             logging.info("Live entry rejected/skipped for token_id=%s reason=%s", token_id, (entry_row or {}).get("reason"))
+                            # If order is rejected/skipped, we should potentially revert trade creation in TradeManager
+                            # For simplicity, we'll let process_exits handle cleanup later if trade is not filled
                             continue
+                        
                         fill_result = order_manager.wait_for_fill(entry_order_id)
                         if not fill_result.get("filled"):
                             logging.info("Live entry not filled for token_id=%s; attempting cancel for order_id=%s", token_id, entry_order_id)
@@ -616,25 +613,44 @@ def main_loop():
                             except Exception as exc:
                                 logging.warning("Failed to cancel stale live entry order %s: %s", entry_order_id, exc)
                             continue
+                        
                         fill_payload = fill_result.get("response") or {}
                         actual_fill_price = float(fill_payload.get("price", fill_price) or fill_price)
-                        log_live_fill_event(signal_row, actual_fill_price, size, action_type="LIVE_TRADE")
-                        position_manager.open_position(signal_row, size_usdc=size, fill_price=actual_fill_price)
+                        actual_fill_size = float(fill_payload.get("size", trade.shares) or trade.shares)
+                        
+                        log_live_fill_event(signal_row, actual_fill_price, size_usdc, action_type="LIVE_TRADE")
+                        # Update TradeLifecycle with actual fill details
+                        trade.enter(size_usdc=size_usdc, entry_price=actual_fill_price) # Re-enter with actual fill, or add update_fill method to TradeLifecycle
+                        trade.shares = actual_fill_size # Ensure shares match fill
+                        trade_manager.active_trades[market_key] = trade # Update manager with modified trade
+                        logging.info("Live trade filled for %s at %s. Shares: %s", token_id, actual_fill_price, actual_fill_size)
                     else:
-                        execute_paper_trade(action_val, signal_row, fill_price=fill_price)
-                        position_manager.open_position(signal_row, size_usdc=size, fill_price=fill_price)
+                        # Paper trade, TradeManager.handle_signal already simulated entry
+                        logging.info("Paper trade initiated for %s with %s USDC at %s.", token_id, size_usdc, fill_price)
 
             # 4B. Open-position management path for hold / reduce / exit
-            local_positions_df = position_manager.update_mark_to_market(scored_df)
-            if trading_mode == "live" and live_position_book is not None:
-                live_position_book.rebuild_from_db()
-                open_positions_df = live_position_book.get_enriched_open_positions(scored_df=scored_df, fallback_df=local_positions_df)
-            else:
-                open_positions_df = local_positions_df
-            if not open_positions_df.empty and (position_brain is not None or legacy_brain is not None):
-                for _, pos_row in open_positions_df.iterrows():
-                    pos_dict = pos_row.to_dict()
-                    token_id = str(pos_dict.get("token_id", "") or "")
+            market_prices = markets_df.set_index("market_title")["current_price"].dropna().to_dict()
+            trade_manager.update_markets(market_prices)
+
+            # If in live mode, reconcile with exchange before making decisions
+            if trading_mode == "live" and execution_client is not None:
+                trade_manager.reconcile_live_positions(execution_client)
+            
+            current_open_trades = trade_manager.get_open_positions()
+            if current_open_trades and (position_brain is not None or legacy_brain is not None):
+                for trade in current_open_trades:
+                    pos_dict = {
+                        "token_id": trade.token_id,
+                        "condition_id": trade.condition_id,
+                        "outcome_side": trade.outcome_side,
+                        "entry_price": trade.entry_price,
+                        "current_price": trade.current_price,
+                        "size_usdc": trade.size_usdc,
+                        "shares": trade.shares,
+                        "market_title": trade.market,
+                        "confidence": 0.5 # Placeholder or fetch from signal
+                    }
+                    token_id = str(trade.token_id or "")
                     try:
                         if position_brain is not None:
                             pos_action_val = position_brain.predict(pos_dict)
@@ -642,8 +658,9 @@ def main_loop():
                             obs = prepare_position_observation(pos_dict)
                             pos_action, _ = legacy_brain.predict(obs, deterministic=True)
                             pos_action_val = int(pos_action.item() if hasattr(pos_action, "item") else pos_action[0])
-                    except Exception:
-                        pos_action_val = 3
+                    except Exception as e:
+                        logging.warning("Position brain prediction failed for %s: %s. Defaulting to HOLD.", token_id, e)
+                        pos_action_val = 3 # HOLD
 
                     pos_action_map = {3: "HOLD", 4: "REDUCE", 5: "EXIT"}
                     action_str = pos_action_map.get(pos_action_val, "HOLD")
@@ -652,8 +669,8 @@ def main_loop():
                             "INSERT INTO model_decisions (token_id, condition_id, outcome_side, model_name, score, action, feature_snapshot, model_artifact, normalization_artifact) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                             (
                                 token_id,
-                                pos_dict.get("condition_id"),
-                                pos_dict.get("outcome_side"),
+                                trade.condition_id,
+                                trade.outcome_side,
                                 position_model_name,
                                 float(pos_dict.get("confidence", 0.5) or 0.5),
                                 action_str,
@@ -665,18 +682,19 @@ def main_loop():
                     except Exception as exc:
                         logging.warning("Failed to log management decision for %s: %s", token_id, exc)
 
-                    if pos_action_val == 4:
+                    if pos_action_val == 4: # REDUCE
+                        logging.info("[%s] Reducing position for %s", trading_mode.upper(), token_id)
                         if trading_mode == "live" and order_manager is not None:
                             exit_price = quote_exit_price(pos_dict)
-                            exit_size = float(pos_dict.get("shares", 0.0) or 0.0) * 0.5
-                            if exit_price is not None and exit_size > 0:
+                            exit_shares = trade.shares * 0.5
+                            if exit_price is not None and exit_shares > 0:
                                 reduce_row, reduce_response = order_manager.submit_entry(
                                     token_id=token_id,
                                     price=exit_price,
-                                    size=exit_size,
+                                    size=exit_shares,
                                     side="SELL",
-                                    condition_id=pos_dict.get("condition_id"),
-                                    outcome_side=pos_dict.get("outcome_side"),
+                                    condition_id=trade.condition_id,
+                                    outcome_side=trade.outcome_side,
                                 )
                                 reduce_order_id = (reduce_row or {}).get("order_id") or (reduce_response or {}).get("orderID") or (reduce_response or {}).get("order_id") or (reduce_response or {}).get("id")
                                 if reduce_order_id:
@@ -684,23 +702,33 @@ def main_loop():
                                     if fill_result.get("filled"):
                                         fill_payload = fill_result.get("response") or {}
                                         actual_fill_price = float(fill_payload.get("price", exit_price) or exit_price)
-                                        actual_fill_size = float(fill_payload.get("size", exit_size) or exit_size)
-                                        log_live_fill_event(pos_dict, actual_fill_price, float(pos_dict.get("size_usdc", 0.0) or 0.0) * 0.5, action_type="LIVE_REDUCE")
-                                        position_manager.reduce_position(pos_dict, fraction=0.5, exit_price=actual_fill_price, filled_shares=actual_fill_size)
+                                        actual_fill_size = float(fill_payload.get("size", exit_shares) or exit_shares)
+                                        log_live_fill_event(pos_dict, actual_fill_price, actual_fill_size, action_type="LIVE_REDUCE")
+                                        trade.partial_exit(fraction=actual_fill_size / trade.shares, exit_price=actual_fill_price) # Update TradeLifecycle
+                                    else:
+                                        logging.warning("Live REDUCE not filled for %s; attempting cancel for order_id=%s", token_id, reduce_order_id)
+                                        try:
+                                            order_manager.cancel_stale_order(reduce_order_id)
+                                        except Exception as exc:
+                                            logging.warning("Failed to cancel stale live reduce order %s: %s", reduce_order_id, exc)
+                            else:
+                                logging.warning("Live REDUCE skipped for %s due to invalid exit price/size", token_id)
                         else:
-                            position_manager.reduce_position(pos_dict, fraction=0.5)
-                    elif pos_action_val == 5:
+                            trade.partial_exit(fraction=0.5, exit_price=trade.current_price) # Paper reduce
+                            logging.info("Paper REDUCE for %s. Current PnL: %.2f", token_id, trade.realized_pnl)
+                    elif pos_action_val == 5: # EXIT
+                        logging.info("[%s] Exiting position for %s", trading_mode.upper(), token_id)
                         if trading_mode == "live" and order_manager is not None:
                             exit_price = quote_exit_price(pos_dict)
-                            exit_size = float(pos_dict.get("shares", 0.0) or 0.0)
-                            if exit_price is not None and exit_size > 0:
+                            exit_shares = trade.shares
+                            if exit_price is not None and exit_shares > 0:
                                 exit_row, exit_response = order_manager.submit_entry(
                                     token_id=token_id,
                                     price=exit_price,
-                                    size=exit_size,
+                                    size=exit_shares,
                                     side="SELL",
-                                    condition_id=pos_dict.get("condition_id"),
-                                    outcome_side=pos_dict.get("outcome_side"),
+                                    condition_id=trade.condition_id,
+                                    outcome_side=trade.outcome_side,
                                 )
                                 exit_order_id = (exit_row or {}).get("order_id") or (exit_response or {}).get("orderID") or (exit_response or {}).get("order_id") or (exit_response or {}).get("id")
                                 if exit_order_id:
@@ -708,9 +736,22 @@ def main_loop():
                                     if fill_result.get("filled"):
                                         fill_payload = fill_result.get("response") or {}
                                         actual_fill_price = float(fill_payload.get("price", exit_price) or exit_price)
-                                        actual_fill_size = float(fill_payload.get("size", exit_size) or exit_size)
-                                        log_live_fill_event(pos_dict, actual_fill_price, float(pos_dict.get("size_usdc", 0.0) or 0.0), action_type="LIVE_EXIT")
-                                        position_manager.close_position(pos_dict, reason="rl_exit", exit_price=actual_fill_price, filled_shares=actual_fill_size)
+                                        actual_fill_size = float(fill_payload.get("size", exit_shares) or exit_shares)
+                                        log_live_fill_event(pos_dict, actual_fill_price, actual_fill_size, action_type="LIVE_EXIT")
+                                        trade.close(exit_price=actual_fill_price) # Update TradeLifecycle
+                                        trade_manager.active_trades.pop(f"{trade.market}-{trade.outcome_side}", None) # Remove from active trades
+                                    else:
+                                        logging.warning("Live EXIT not filled for %s; attempting cancel for order_id=%s", token_id, exit_order_id)
+                                        try:
+                                            order_manager.cancel_stale_order(exit_order_id)
+                                        except Exception as exc:
+                                            logging.warning("Failed to cancel stale live exit order %s: %s", exit_order_id, exc)
+                            else:
+                                logging.warning("Live EXIT skipped for %s due to invalid exit price/size", token_id)
+                        else:
+                            trade.close(exit_price=trade.current_price) # Paper close
+                            logging.info("Paper EXIT for %s. Realized PnL: %.2f", token_id, trade.realized_pnl)
+                            trade_manager.active_trades.pop(f"{trade.market}-{trade.outcome_side}", None) # Remove from active trades
                         else:
                             position_manager.close_position(pos_dict, reason="rl_exit")
 
