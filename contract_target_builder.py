@@ -106,7 +106,9 @@ class ContractTargetBuilder:
         signals_df["timestamp"] = self._normalize_timestamp_series(signals_df["timestamp"])
         history_df = history_df.copy()
         history_df["timestamp"] = self._normalize_timestamp_series(history_df["timestamp"])
-        history_df = history_df.dropna(subset=["timestamp", "token_id"]).sort_values(["token_id", "timestamp"]).reset_index(drop=True)
+        history_df = history_df.dropna(subset=["timestamp", "token_id"]).copy()
+        history_df["token_id_norm"] = history_df["token_id"].map(lambda v: str(v).strip() if pd.notna(v) else "")
+        history_df = history_df[history_df["token_id_norm"] != ""].sort_values(["token_id_norm", "timestamp"]).reset_index(drop=True)
 
         market_lookup = markets_df.drop_duplicates(subset=[question_col], keep="last").set_index(question_col).to_dict("index")
 
@@ -123,7 +125,10 @@ class ContractTargetBuilder:
             if not token_id or pd.isna(token_id):
                 continue
 
-            token_history = history_df[history_df["token_id"].astype(str) == str(token_id)].copy()
+            token_key = str(token_id).strip()
+            if not token_key:
+                continue
+            token_history = history_df[history_df["token_id_norm"] == token_key].copy()
             if token_history.empty:
                 continue
 
