@@ -187,6 +187,33 @@ class OrderManager:
         )
         return row, response
 
+    def _update_order_status(self, order_id, status, fill_price=None, fill_size=None):
+        order_id = str(order_id) if order_id is not None else None
+        if not order_id:
+            return
+        if self.orders_file.exists():
+            try:
+                df = pd.read_csv(self.orders_file, engine="python", on_bad_lines="skip")
+                if not df.empty and "order_id" in df.columns:
+                    mask = df["order_id"].astype(str) == order_id
+                    if mask.any():
+                        df.loc[mask, "status"] = status
+                        df.loc[mask, "updated_at"] = datetime.now(timezone.utc).isoformat()
+                        if fill_price is not None:
+                            df.loc[mask, "fill_price"] = fill_price
+                        if fill_size is not None:
+                            df.loc[mask, "fill_size"] = fill_size
+                        df.to_csv(self.orders_file, index=False)
+            except Exception:
+                pass
+        try:
+            self.db.execute(
+                "UPDATE orders SET status = ? WHERE order_id = ?",
+                (status, order_id),
+            )
+        except Exception:
+            pass
+
     def get_order_status(self, order_id):
         response = self.client.get_order(order_id)
         return response
@@ -208,9 +235,11 @@ class OrderManager:
                     "price": float((last_response or {}).get("price", 0.0) or 0.0),
                     "size": float((last_response or {}).get("size", 0.0) or 0.0),
                 }
+                self._update_order_status(order_id, "FILLED", fill_price=fill_payload["price"], fill_size=fill_payload["size"])
                 self.record_fill(fill_payload)
                 return {"filled": True, "response": last_response}
             if status in ["CANCELED", "FAILED", "REJECTED"]:
+                self._update_order_status(order_id, status)
                 return {"filled": False, "response": last_response}
             time.sleep(float(poll_seconds))
         return {"filled": False, "response": last_response, "reason": "timeout_waiting_for_fill"}
@@ -274,6 +303,7 @@ class OrderManager:
 
     def cancel_stale_order(self, order_id):
         response = self.client.cancel_order(order_id)
+        self._update_order_status(order_id, "CANCELED")
         self._append(self.orders_file, {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": order_id, "status": "CANCELED"})
         return response
 
@@ -290,6 +320,7 @@ class OrderManager:
         order_ids = [str(order_id) for order_id in (order_ids or []) if str(order_id).strip()]
         response = self.client.cancel_orders(order_ids)
         for order_id in order_ids:
+            self._update_order_status(order_id, "CANCELED")
             self._append(self.orders_file, {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": order_id, "status": "CANCELED_BATCH"})
         return response
 
