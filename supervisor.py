@@ -267,6 +267,26 @@ def execute_paper_trade(action, signal_row, fill_price=None):
         logging.error(f"[-] Failed to write to {EXECUTION_FILE}: {e}")
 
 
+def build_feature_snapshot(row):
+    keys = [
+        "token_id",
+        "condition_id",
+        "outcome_side",
+        "market_title",
+        "confidence",
+        "edge_score",
+        "expected_return",
+        "p_tp_before_sl",
+        "temporal_p_tp_before_sl",
+        "meta_prob",
+        "current_price",
+        "entry_price",
+        "spread",
+    ]
+    payload = {k: row.get(k) for k in keys if k in row}
+    return json.dumps(payload, default=str)
+
+
 def log_live_fill_event(signal_row, fill_price, size_usdc, action_type="LIVE_TRADE"):
     trade_record = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -498,12 +518,15 @@ def main_loop():
                 action_map = {0: "IGNORE", 1: "SMALL_BUY", 2: "LARGE_BUY"}
                 try:
                     db.execute(
-                        "INSERT INTO model_decisions (token_id, model_name, score, action) VALUES (?, ?, ?, ?)",
+                        "INSERT INTO model_decisions (token_id, condition_id, outcome_side, model_name, score, action, feature_snapshot) VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (
                             token_id,
+                            signal_row.get("condition_id"),
+                            signal_row.get("outcome_side", signal_row.get("side")),
                             entry_model_name,
                             float(signal_row.get("confidence", 0.0) or 0.0),
                             action_map.get(action_val, "UNKNOWN"),
+                            build_feature_snapshot(signal_row),
                         ),
                     )
                 except Exception as exc:
@@ -564,8 +587,16 @@ def main_loop():
                     action_str = pos_action_map.get(pos_action_val, "HOLD")
                     try:
                         db.execute(
-                            "INSERT INTO model_decisions (token_id, model_name, score, action) VALUES (?, ?, ?, ?)",
-                            (token_id, position_model_name, float(pos_dict.get("confidence", 0.5) or 0.5), action_str),
+                            "INSERT INTO model_decisions (token_id, condition_id, outcome_side, model_name, score, action, feature_snapshot) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                token_id,
+                                pos_dict.get("condition_id"),
+                                pos_dict.get("outcome_side"),
+                                position_model_name,
+                                float(pos_dict.get("confidence", 0.5) or 0.5),
+                                action_str,
+                                build_feature_snapshot(pos_dict),
+                            ),
                         )
                     except Exception as exc:
                         logging.warning("Failed to log management decision for %s: %s", token_id, exc)

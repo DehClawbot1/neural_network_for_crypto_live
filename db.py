@@ -12,6 +12,9 @@ class Database:
         self.conn.execute("PRAGMA busy_timeout=30000;")
         self.conn.execute("PRAGMA synchronous=NORMAL;")
         self._init_schema()
+        self._ensure_column("model_decisions", "condition_id", "TEXT")
+        self._ensure_column("model_decisions", "outcome_side", "TEXT")
+        self._ensure_column("model_decisions", "feature_snapshot", "TEXT")
 
     def _init_schema(self):
         cur = self.conn.cursor()
