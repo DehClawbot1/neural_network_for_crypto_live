@@ -14,7 +14,10 @@ except Exception:  # optional dependency scaffold
     TensorDataset = None
 
 
-class SequenceGRU(nn.Module):
+_BaseModule = nn.Module if nn is not None else object
+
+
+class SequenceGRU(_BaseModule):
     def __init__(self, input_size, hidden_size=64, output_size=1, task="classification"):
         super().__init__()
         self.gru = nn.GRU(input_size=input_size, hidden_size=hidden_size, batch_first=True)
