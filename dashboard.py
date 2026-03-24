@@ -495,17 +495,24 @@ def render_overview(signals_df, trades_df, markets_df, alerts_df, positions_df, 
     freshness_age_max = max(available_feed_ages) if available_feed_ages else None
     stale_feeds = sum(1 for age in available_feed_ages if age > stale_threshold_seconds)
 
+    signals_metric = signals_last_60m if feed_ages["signals"] is not None and feed_ages["signals"] <= stale_threshold_seconds else "N/A"
+    open_positions_metric = open_positions if feed_ages["positions"] is not None and feed_ages["positions"] <= stale_threshold_seconds else "N/A"
+    unrealized_pnl_metric = f"{unrealized_pnl:.2f}" if feed_ages["positions"] is not None and feed_ages["positions"] <= stale_threshold_seconds else "N/A"
+    critical_alerts_metric = critical_alerts_open if feed_ages["alerts"] is not None and feed_ages["alerts"] <= stale_threshold_seconds else "N/A"
+    latest_conf_metric = latest_conf_max if feed_ages["signals"] is not None and feed_ages["signals"] <= stale_threshold_seconds else "N/A"
+    markets_watched_metric = markets_actively_watched if feed_ages["markets"] is not None and feed_ages["markets"] <= stale_threshold_seconds else "N/A"
+
     rows = [
-        ("Signals generated (last 60 min)", signals_last_60m),
-        ("Open paper positions", open_positions),
+        ("Signals generated (last 60 min)", signals_metric),
+        ("Open paper positions", open_positions_metric),
         ("Realized PnL today", f"{realized_pnl_today:.2f}"),
-        ("Unrealized PnL now", f"{unrealized_pnl:.2f}"),
-        ("Critical alerts open", critical_alerts_open),
+        ("Unrealized PnL now", unrealized_pnl_metric),
+        ("Critical alerts open", critical_alerts_metric),
         ("Freshness age (max seconds)", freshness_age_max if freshness_age_max is not None else "-"),
         ("Win rate today", win_rate_today),
         ("Number of stale feeds", stale_feeds),
-        ("Latest confidence max", latest_conf_max),
-        ("Markets actively watched", markets_actively_watched),
+        ("Latest confidence max", latest_conf_metric),
+        ("Markets actively watched", markets_watched_metric),
     ]
 
     cols = st.columns(5)
