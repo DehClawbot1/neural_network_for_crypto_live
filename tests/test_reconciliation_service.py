@@ -1,12 +1,11 @@
-from unittest.mock import patch
-
 import pandas as pd
+import pytest
+from unittest.mock import MagicMock
 
 from reconciliation_service import ReconciliationService
 
 
-@patch("reconciliation_service.ExecutionClient")
-def test_reconcile_detects_missing_remote_open_order(mock_client_cls, tmp_path):
+def test_reconcile_detects_missing_remote_open_order(tmp_path):
     pd.DataFrame(
         [
             {"order_id": "order_1", "status": "OPEN", "size": 10.0},
@@ -15,11 +14,11 @@ def test_reconcile_detects_missing_remote_open_order(mock_client_cls, tmp_path):
     ).to_csv(tmp_path / "live_orders.csv", index=False)
     pd.DataFrame([]).to_csv(tmp_path / "live_fills.csv", index=False)
 
-    client = mock_client_cls.return_value
-    client.get_open_orders.return_value = [{"order_id": "order_1", "status": "OPEN", "size": 10.0}]
+    client = MagicMock()
+    client.get_open_orders.return_value = [{"order_id": "order_1", "status": "OPEN", "size": 10.0, "token_id": "tok-1"}]
     client.get_trades.return_value = []
 
-    service = ReconciliationService(logs_dir=tmp_path)
+    service = ReconciliationService(execution_client=client, logs_dir=tmp_path)
     report, _, _ = service.reconcile()
 
     assert report["local_order_rows"] == 2
@@ -28,24 +27,21 @@ def test_reconcile_detects_missing_remote_open_order(mock_client_cls, tmp_path):
     assert len(report["order_mismatches"]) == 0
 
 
-@patch("reconciliation_service.ExecutionClient")
-def test_reconcile_filters_out_closed_local_orders(mock_client_cls, tmp_path):
-    logs = tmp_path
-
+def test_reconcile_filters_out_closed_local_orders(tmp_path):
     pd.DataFrame(
         [
             {"order_id": "open-1", "status": "SUBMITTED"},
             {"order_id": "filled-1", "status": "FILLED"},
             {"order_id": "closed-1", "status": "CANCELED"},
         ]
-    ).to_csv(logs / "live_orders.csv", index=False)
-    pd.DataFrame([{"trade_id": "trade-1", "order_id": "filled-1"}]).to_csv(logs / "live_fills.csv", index=False)
+    ).to_csv(tmp_path / "live_orders.csv", index=False)
+    pd.DataFrame([{"trade_id": "trade-1", "order_id": "filled-1"}]).to_csv(tmp_path / "live_fills.csv", index=False)
 
-    client = mock_client_cls.return_value
-    client.get_open_orders.return_value = [{"order_id": "open-1", "status": "OPEN"}]
-    client.get_trades.return_value = [{"trade_id": "trade-1", "order_id": "filled-1"}]
+    client = MagicMock()
+    client.get_open_orders.return_value = [{"order_id": "open-1", "status": "OPEN", "token_id": "tok-1"}]
+    client.get_trades.return_value = [{"id": "trade-1", "order_id": "filled-1", "token_id": "tok-1", "price": 0.5, "size": 10}]
 
-    service = ReconciliationService(logs_dir=logs)
+    service = ReconciliationService(execution_client=client, logs_dir=tmp_path)
     report, remote_orders_df, remote_trades_df = service.reconcile()
 
     assert report["missing_remote_orders"] == []
@@ -56,18 +52,17 @@ def test_reconcile_filters_out_closed_local_orders(mock_client_cls, tmp_path):
     assert len(remote_trades_df) == 1
 
 
-@patch("reconciliation_service.ExecutionClient")
-def test_reconcile_reports_status_and_size_mismatch_for_open_orders(mock_client_cls, tmp_path):
+def test_reconcile_reports_status_and_size_mismatch_for_open_orders(tmp_path):
     pd.DataFrame(
         [{"order_id": "open-1", "status": "SUBMITTED", "size": 10}]
     ).to_csv(tmp_path / "live_orders.csv", index=False)
     pd.DataFrame([]).to_csv(tmp_path / "live_fills.csv", index=False)
 
-    client = mock_client_cls.return_value
-    client.get_open_orders.return_value = [{"order_id": "open-1", "status": "OPEN", "size": 12}]
+    client = MagicMock()
+    client.get_open_orders.return_value = [{"order_id": "open-1", "status": "OPEN", "size": 12, "token_id": "tok-1"}]
     client.get_trades.return_value = []
 
-    service = ReconciliationService(logs_dir=tmp_path)
+    service = ReconciliationService(execution_client=client, logs_dir=tmp_path)
     report, _, _ = service.reconcile()
 
     assert len(report["order_mismatches"]) == 1
