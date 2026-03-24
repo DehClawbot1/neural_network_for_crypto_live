@@ -88,6 +88,11 @@ def ensure_optional_rl_model():
 
 
 def maybe_retrain_before_start():
+    startup_retrain_enabled = os.getenv("ENABLE_STARTUP_RETRAIN", "false").strip().lower() in {"1", "true", "yes", "on"}
+    if not startup_retrain_enabled:
+        print("[2.5/4] Skipping pre-start retraining (ENABLE_STARTUP_RETRAIN is off).\n")
+        return False
+
     print("[2.5/4] Checking whether the model should retrain from accumulated data...")
     retrainer = Retrainer()
     try:
