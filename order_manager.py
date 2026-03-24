@@ -79,7 +79,11 @@ class OrderManager:
         return context
 
     def submit_entry(self, token_id, price, size, side="BUY", condition_id=None, outcome_side=None, spread=None, open_orders=0, daily_pnl=0.0, order_type="GTC", post_only=False, execution_style="maker"):
-        decision = self.risk.pre_trade_check(token_id=token_id, price=price, size=size, spread=spread, open_orders=open_orders, daily_pnl=daily_pnl)
+        normalized_side = str(side).upper()
+        requested_size = float(size)
+        notional_usdc = requested_size if normalized_side == "BUY" else requested_size * float(price)
+        order_size_shares = requested_size / max(float(price), 1e-9) if normalized_side == "BUY" else requested_size
+        decision = self.risk.pre_trade_check(token_id=token_id, price=price, size=notional_usdc, spread=spread, open_orders=open_orders, daily_pnl=daily_pnl)
         idempotency_key = f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M')}|{token_id}|{condition_id}|{side}|{size}|{round(float(price), 4)}"
         existing = self.list_orders()
         if not existing.empty and "idempotency_key" in existing.columns and (existing["idempotency_key"].astype(str) == idempotency_key).any():
@@ -89,7 +93,6 @@ class OrderManager:
             self._append(self.orders_file, row)
             return row, None
 
-        normalized_side = str(side).upper()
         readiness = self.check_readiness(asset_type="COLLATERAL") if normalized_side == "BUY" else None
         available_balance = float(readiness.get("balance", readiness.get("amount", 0.0))) if isinstance(readiness, dict) else None
         if normalized_side == "BUY":
@@ -97,8 +100,8 @@ class OrderManager:
                 row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": "missing_readiness"}
                 self._append(self.orders_file, row)
                 return row, None
-            if (available_balance or 0.0) < float(size):
-                row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": "insufficient_funds", "available_balance": available_balance}
+            if (available_balance or 0.0) < float(notional_usdc):
+                row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "size_usdc": notional_usdc, "order_size_shares": order_size_shares, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": "insufficient_funds", "available_balance": available_balance}
                 self._append(self.orders_file, row)
                 return row, None
 
@@ -114,6 +117,8 @@ class OrderManager:
                 "order_side": side,
                 "price": price,
                 "size": size,
+                "size_usdc": notional_usdc,
+                "order_size_shares": order_size_shares,
                 "order_type": order_type,
                 "post_only": post_only,
                 "execution_style": execution_style,
@@ -135,14 +140,14 @@ class OrderManager:
         try:
             if str(order_type).upper() == "GTD" and hasattr(self.client, "GTD_order"):
                 expiration = int((datetime.now(timezone.utc).timestamp()) + 3600)
-                response = self.client.GTD_order(token_id=token_id, price=price, size=size, expiration=expiration, side=side, post_only=bool(post_only))
+                response = self.client.GTD_order(token_id=token_id, price=price, size=order_size_shares, expiration=expiration, side=side, post_only=bool(post_only))
             elif bool(post_only) and hasattr(self.client, "post_only_order"):
-                response = self.client.post_only_order(token_id=token_id, price=price, size=size, side=side, order_type=order_type)
+                response = self.client.post_only_order(token_id=token_id, price=price, size=order_size_shares, side=side, order_type=order_type)
             else:
-                response = self.client.create_and_post_order(token_id=token_id, price=price, size=size, side=side, order_type=order_type, options={"post_only": bool(post_only)})
+                response = self.client.create_and_post_order(token_id=token_id, price=price, size=order_size_shares, side=side, order_type=order_type, options={"post_only": bool(post_only)})
         except Exception as exc:
             self.risk.record_failed_order()
-            row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "FAILED", "reason": str(exc), "readiness": readiness, **market_context}
+            row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "size_usdc": notional_usdc, "order_size_shares": order_size_shares, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "FAILED", "reason": str(exc), "readiness": readiness, **market_context}
             self._append(self.orders_file, row)
             return row, None
 
@@ -157,6 +162,8 @@ class OrderManager:
             "order_side": side,
             "price": price,
             "size": size,
+            "size_usdc": notional_usdc,
+            "order_size_shares": order_size_shares,
             "order_type": order_type,
             "post_only": post_only,
             "execution_style": execution_style,
