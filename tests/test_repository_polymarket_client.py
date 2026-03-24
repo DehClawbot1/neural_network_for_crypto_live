@@ -1,0 +1,6 @@
+from polymarket_capabilities import SUPPORTED_POLYMARKET_EXAMPLE_METHODS
+from repository_polymarket import RepositoryPolymarketClient
+
+
+def test_repository_polymarket_client_exposes_capability_introspection():
+    assert set(RepositoryPolymarketClient.list_capabilities(None)) == set(SUPPORTED_POLYMARKET_EXAMPLE_METHODS)
