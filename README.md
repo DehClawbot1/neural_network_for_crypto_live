@@ -128,8 +128,8 @@ pnl = shares * (exit_price - entry_price) - fees
 - `stage1_models.py`
 - `stage1_inference.py`
 - `stage2_temporal_models.py` — temporal sklearn baseline with scaling, class balancing, walk-forward validation, regularization
-- `stage2_sequence_models.py` — GRU-based PyTorch sequence scaffold
-- `stage2_transformer_models.py` — transformer / attention scaffold
+- `stage2_sequence_models.py` — GRU-based PyTorch sequence scaffold (research-only; not wired into current runtime inference)
+- `stage2_transformer_models.py` — transformer / attention scaffold (research-only; not wired into current runtime inference)
 - `stage2_temporal_inference.py`
 - `stage3_hybrid.py` — hybrid scorer + ensemble agreement gating
 - `evaluator.py`
@@ -261,8 +261,8 @@ The dashboard is now organized into:
 - regularization / early stopping / learning-rate tuning hooks
 
 ### Deep-learning scaffolds
-- GRU sequence model scaffold
-- transformer / attention scaffold
+- GRU sequence model scaffold (research-only; not part of the active runtime scoring path)
+- transformer / attention scaffold (research-only; not part of the active runtime scoring path)
 - profit-weighted loss scaffold
 - autoencoder latent-feature builder
 
@@ -397,9 +397,9 @@ Generated in `weights/`:
 - `return_regressor.joblib`
 - `stage2_temporal_classifier.joblib`
 - `stage2_temporal_regressor.joblib`
-- `stage2_sequence_classifier.pt`
-- `stage2_sequence_regressor.pt`
-- `stage2_transformer.pt`
+- `stage2_sequence_classifier.pt` (research-only artifact; not loaded by current runtime inference)
+- `stage2_sequence_regressor.pt` (research-only artifact; not loaded by current runtime inference)
+- `stage2_transformer.pt` (research-only artifact; not loaded by current runtime inference)
 - `feature_autoencoder.pt`
 - `meta_model_bundle_*.pkl`
 - `model_registry.csv`
