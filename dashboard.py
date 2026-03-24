@@ -915,13 +915,37 @@ def render_positions_pnl_summary(positions_df, closed_positions_df):
 
 def render_positions(positions_df, closed_positions_df):
     st.markdown('<div class="section-title">Paper Positions</div>', unsafe_allow_html=True)
+
+    def _recent_subset(df, preferred=None, max_age_hours=6):
+        if df is None or df.empty:
+            return pd.DataFrame()
+        candidates = []
+        if preferred:
+            candidates.extend(preferred)
+        candidates.extend(["timestamp", "updated_at", "created_at", "logged_at", "closed_at", "opened_at"])
+        seen = set()
+        for col in candidates:
+            if col in seen:
+                continue
+            seen.add(col)
+            if col in df.columns:
+                ts = pd.to_datetime(df[col], errors="coerce", utc=True)
+                if ts.notna().any():
+                    mask = ts >= (pd.Timestamp.utcnow() - pd.Timedelta(hours=max_age_hours))
+                    recent = df.loc[mask.fillna(False)].copy()
+                    return recent if not recent.empty else pd.DataFrame()
+        return pd.DataFrame()
+
+    recent_positions = _recent_subset(positions_df, preferred=["updated_at", "timestamp", "opened_at"], max_age_hours=6)
+    recent_closed = _recent_subset(closed_positions_df, preferred=["closed_at", "timestamp", "updated_at"], max_age_hours=24)
+
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("**Open Positions**")
-        if positions_df.empty:
-            st.info("No open paper positions.")
+        if recent_positions.empty:
+            st.info("No recent open paper positions.")
         else:
-            open_view = positions_df.copy().tail(20)
+            open_view = recent_positions.copy().tail(20)
             if "opened_at" in open_view.columns:
                 opened_ts = pd.to_datetime(open_view["opened_at"], errors="coerce", utc=True)
                 open_view["position_age"] = (((pd.Timestamp.utcnow() - opened_ts).dt.total_seconds()) / 60).round(1)
@@ -953,10 +977,10 @@ def render_positions(positions_df, closed_positions_df):
             st.dataframe(open_view.style.apply(_row_style, axis=1), use_container_width=True)
     with c2:
         st.markdown("**Closed Positions**")
-        if closed_positions_df.empty:
-            st.info("No closed paper positions yet.")
+        if recent_closed.empty:
+            st.info("No recent closed paper positions.")
         else:
-            closed_view = closed_positions_df.copy().tail(20)
+            closed_view = recent_closed.copy().tail(20)
             if "opened_at" in closed_view.columns and "closed_at" in closed_view.columns:
                 opened_ts = pd.to_datetime(closed_view["opened_at"], errors="coerce", utc=True)
                 closed_ts = pd.to_datetime(closed_view["closed_at"], errors="coerce", utc=True)

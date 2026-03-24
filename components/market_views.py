@@ -158,5 +158,5 @@ def render_whale_tracker(whales_df):
         activity_df[time_col] = pd.to_datetime(activity_df[time_col], errors="coerce")
         activity_df = activity_df.dropna(subset=[time_col])
         if not activity_df.empty:
-            timeline = activity_df.groupby(activity_df[time_col].dt.floor("H")).size().reset_index(name="activity_count")
+            timeline = activity_df.groupby(activity_df[time_col].dt.floor("h")).size().reset_index(name="activity_count")
             st.plotly_chart(px.line(timeline, x=time_col, y="activity_count", title="Wallet Activity Over Time"), use_container_width=True)
