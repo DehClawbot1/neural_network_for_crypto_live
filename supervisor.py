@@ -1,4 +1,5 @@
 import os
+import json
 import time
 import logging
 import numpy as np
@@ -367,6 +368,13 @@ def main_loop():
         logging.warning("ShadowPurgatory unavailable at startup: %s", exc)
     db = Database()
 
+
+    def _trade_key_from_signal(signal_row):
+        """Consistent trade key matching TradeManager._get_trade_key."""
+        market = signal_row.get("market_title") or signal_row.get("market")
+        outcome_side = signal_row.get("outcome_side") or signal_row.get("side")
+        return f"{market}-{outcome_side}" if market and outcome_side else None
+
     while True:
         try:
             if trading_mode == "live" and order_manager is not None and hasattr(order_manager, "risk") and hasattr(order_manager.risk, "reset_failed_orders"):
@@ -479,7 +487,7 @@ def main_loop():
 
             # 4A. Candidate-entry path for new signals
             current_active_trades = trade_manager.get_open_positions()
-            active_trade_keys = {f"{trade.market}-{trade.outcome_side}" for trade in current_active_trades}
+            active_trade_keys = {_trade_key_from_signal({"market_title": trade.market, "outcome_side": trade.outcome_side}) for trade in current_active_trades if trade.market}
             live_entry_freeze = False
             if trading_mode == "live" and live_position_book is not None:
                 live_position_book.rebuild_from_db()
@@ -496,7 +504,9 @@ def main_loop():
                 signal_row = row.to_dict()
                 token_id = str(signal_row.get("token_id", "") or "")
                 entry_intent = str(signal_row.get("entry_intent", "OPEN_LONG") or "OPEN_LONG").upper()
-                market_key = f"{signal_row.get('market_title')}-{signal_row.get('outcome_side')}"
+                market_key = _trade_key_from_signal(signal_row)
+                if not market_key:
+                    continue
 
                 if not token_id:
                     logging.warning("Skipping signal with missing token_id: %s", signal_row.get("market_title", signal_row.get("market", "unknown_market")))
@@ -553,19 +563,15 @@ def main_loop():
                         logging.warning("Skipping signal with missing fill price for token_id=%s", token_id)
                         continue
 
-                    # Delegate trade entry to TradeManager
-                    trade = trade_manager.handle_signal(signal_row=pd.Series(signal_row), confidence=confidence, size_usdc=size_usdc)
-                    
-                    if trade is None:
-                        logging.warning("TradeManager did not initiate a trade for signal %s.", token_id)
-                        continue
-                    
+
                     if trading_mode == "live" and order_manager is not None:
-                        # For live mode, actually submit the order and await fill
+                        # For live mode: submit order first, register trade only on fill
+                        from pnl_engine import PNLEngine as _PNLEngine
+                        _order_shares = _PNLEngine.shares_from_capital(size_usdc, fill_price)
                         entry_row, entry_response = order_manager.submit_entry(
                             token_id=token_id,
                             price=fill_price,
-                            size=trade.shares, # Use shares from TradeLifecycle
+                            size=size_usdc,
                             side=signal_row.get("order_side", "BUY"),
                             condition_id=signal_row.get("condition_id"),
                             outcome_side=signal_row.get("outcome_side", signal_row.get("side")),
@@ -591,14 +597,23 @@ def main_loop():
                         actual_fill_size = float(fill_payload.get("size", trade.shares) or trade.shares)
                         
                         log_live_fill_event(signal_row, actual_fill_price, size_usdc, action_type="LIVE_TRADE")
-                        # Update TradeLifecycle with actual fill details
-                        trade.enter(size_usdc=size_usdc, entry_price=actual_fill_price) # Re-enter with actual fill, or add update_fill method to TradeLifecycle
-                        trade.shares = actual_fill_size # Ensure shares match fill
-                        trade_manager.active_trades[market_key] = trade # Update manager with modified trade
+                        # Register trade AFTER confirmed fill (not before)
+                        trade = TradeLifecycle(
+                            market=signal_row.get("market_title", signal_row.get("market", "Unknown")),
+                            token_id=token_id,
+                            condition_id=signal_row.get("condition_id"),
+                            outcome_side=signal_row.get("outcome_side", signal_row.get("side", "YES")),
+                        )
+                        trade.enter(size_usdc=size_usdc, entry_price=actual_fill_price)
+                        trade.shares = actual_fill_size
+                        trade_manager.active_trades[market_key] = trade
                         logging.info("Live trade filled for %s at %s. Shares: %s", token_id, actual_fill_price, actual_fill_size)
                     else:
-                        # Paper trade, TradeManager.handle_signal already simulated entry
-                        logging.info("Paper trade initiated for %s with %s USDC at %s.", token_id, size_usdc, fill_price)
+                        # Paper trade: register in TradeManager and log
+                        trade = trade_manager.handle_signal(signal_row=pd.Series(signal_row), confidence=confidence, size_usdc=size_usdc)
+                        if trade is not None:
+                            execute_paper_trade(action_val, signal_row, fill_price=fill_price)
+                            logging.info("Paper trade initiated for %s with %s USDC at %s.", token_id, size_usdc, fill_price)
 
             # 4B. Open-position management path for hold / reduce / exit
             market_prices = markets_df.set_index("market_title")["current_price"].dropna().to_dict()
