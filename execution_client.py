@@ -202,9 +202,18 @@ class ExecutionClient:
 
     def get_available_balance(self, asset_type=None):
         payload = self.get_balance_allowance(asset_type=asset_type)
+        api_balance = 0.0
         if isinstance(payload, dict):
             for key in ["balance", "available", "available_balance", "amount"]:
                 if payload.get(key) is not None:
-                    return float(payload[key])
-        return 0.0
+                    api_balance = float(payload[key])
+                    break
+        if str(asset_type or "COLLATERAL").upper() == "COLLATERAL":
+            try:
+                onchain = self.get_onchain_collateral_balance()
+                onchain_total = float((onchain or {}).get("total", 0.0) or 0.0)
+                return max(api_balance, onchain_total)
+            except Exception:
+                return api_balance
+        return api_balance
 
