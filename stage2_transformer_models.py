@@ -109,6 +109,12 @@ class Stage2TransformerModels:
                 loss.backward()
                 optimizer.step()
 
-        torch.save(model.state_dict(), self.model_file)
+        torch.save({
+            "state_dict": model.state_dict(),
+            "feature_cols": feature_cols,
+            "input_dim": X.shape[2],
+            "model_type": "transformer_classifier",
+            "task": "classification",
+        }, self.model_file)
         return self.model_file
 

@@ -128,7 +128,13 @@ class Stage2SequenceModels:
             y_train, y_test = y[:split_idx], y[split_idx:]
             clf = SequenceGRU(input_size=X.shape[2], output_size=1, task="classification")
             self._fit_model(clf, X_train, y_train, w_train, epochs, batch_size, learning_rate, task="classification")
-            torch.save(clf.state_dict(), self.classifier_file)
+            torch.save({
+                "state_dict": clf.state_dict(),
+                "feature_cols": feature_cols,
+                "input_dim": X.shape[2],
+                "model_type": "gru_classifier",
+                "task": "classification",
+            }, self.classifier_file)
             results["sequence_classifier_trained"] = True
 
         if "forward_return_15m" in df.columns:
@@ -136,7 +142,13 @@ class Stage2SequenceModels:
             y_train, y_test = y[:split_idx], y[split_idx:]
             reg = SequenceGRU(input_size=X.shape[2], output_size=1, task="regression")
             self._fit_model(reg, X_train, y_train, w_train, epochs, batch_size, learning_rate, task="regression")
-            torch.save(reg.state_dict(), self.regressor_file)
+            torch.save({
+                "state_dict": reg.state_dict(),
+                "feature_cols": feature_cols,
+                "input_dim": X.shape[2],
+                "model_type": "gru_regressor",
+                "task": "regression",
+            }, self.regressor_file)
             results["sequence_regressor_trained"] = True
 
         return pd.DataFrame([results]) if results else pd.DataFrame()
