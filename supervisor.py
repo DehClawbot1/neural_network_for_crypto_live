@@ -37,6 +37,7 @@ from rl_entry_inference import EntryRLInference
 from rl_position_inference import PositionRLInference
 from rl_observation_schemas import prepare_entry_observation, prepare_position_observation
 from shadow_purgatory import ShadowPurgatory
+from live_position_book import LivePositionBook
 from db import Database
 
 # Configure logging for zero-intervention monitoring
@@ -394,6 +395,7 @@ def main_loop():
     trading_mode = os.getenv("TRADING_MODE", "paper").strip().lower()
     execution_client = ExecutionClient() if trading_mode == "live" else None
     order_manager = OrderManager() if trading_mode == "live" else None
+    live_position_book = LivePositionBook() if trading_mode == "live" else None
     autonomous_monitor = AutonomousMonitor()
     retrainer = Retrainer()
     previous_markets_df = None
@@ -509,7 +511,11 @@ def main_loop():
             print("======================================\n")
 
             # 4A. Candidate-entry path for tokens without open positions
-            open_positions_df = position_manager.get_open_positions()
+            if trading_mode == "live" and live_position_book is not None:
+                live_position_book.rebuild_from_db()
+                open_positions_df = live_position_book.get_enriched_open_positions(scored_df=scored_df, fallback_df=position_manager.get_open_positions())
+            else:
+                open_positions_df = position_manager.get_open_positions()
             open_token_ids = set(open_positions_df.get("token_id", pd.Series(dtype=str)).dropna().astype(str).tolist()) if not open_positions_df.empty else set()
             for _, row in scored_df.iterrows():
                 signal_row = row.to_dict()
@@ -619,7 +625,12 @@ def main_loop():
                         position_manager.open_position(signal_row, size_usdc=size, fill_price=fill_price)
 
             # 4B. Open-position management path for hold / reduce / exit
-            open_positions_df = position_manager.update_mark_to_market(scored_df)
+            local_positions_df = position_manager.update_mark_to_market(scored_df)
+            if trading_mode == "live" and live_position_book is not None:
+                live_position_book.rebuild_from_db()
+                open_positions_df = live_position_book.get_enriched_open_positions(scored_df=scored_df, fallback_df=local_positions_df)
+            else:
+                open_positions_df = local_positions_df
             if not open_positions_df.empty and (position_brain is not None or legacy_brain is not None):
                 for _, pos_row in open_positions_df.iterrows():
                     pos_dict = pos_row.to_dict()
@@ -711,7 +722,11 @@ def main_loop():
             dataset_builder.write()
 
             alerts_df = safe_read_csv("logs/alerts.csv")
-            open_positions_df = position_manager.get_open_positions()
+            if trading_mode == "live" and live_position_book is not None:
+                live_position_book.rebuild_from_db()
+                open_positions_df = live_position_book.get_enriched_open_positions(scored_df=scored_df, fallback_df=position_manager.get_open_positions())
+            else:
+                open_positions_df = position_manager.get_open_positions()
             if trading_mode == "live" and order_manager is not None and not open_positions_df.empty:
                 logging.info("Checking live exit rules for %s positions...", len(open_positions_df))
                 for _, pos_row in open_positions_df.iterrows():
@@ -735,7 +750,11 @@ def main_loop():
                         position_manager.close_position(pos_dict, reason=f"live_{exit_reason}", exit_price=actual_fill_price, filled_shares=actual_fill_size)
             else:
                 position_manager.apply_exit_rules(alerts_df)
-            open_positions_df = position_manager.get_open_positions()
+            if trading_mode == "live" and live_position_book is not None:
+                live_position_book.rebuild_from_db()
+                open_positions_df = live_position_book.get_enriched_open_positions(scored_df=scored_df, fallback_df=position_manager.get_open_positions())
+            else:
+                open_positions_df = position_manager.get_open_positions()
             autonomous_monitor.write_heartbeat("position_manager", status="ok", message="positions_updated", extra={"open_positions": len(open_positions_df) if open_positions_df is not None else 0})
             autonomous_monitor.write_status(trader_signals_df, trades_df, alerts_df, open_positions_df)
             try:
