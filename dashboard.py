@@ -1407,8 +1407,8 @@ def render_data_quality_panel(signals_df, trades_df, markets_df, whales_df, aler
     st.markdown("**Schema Health**")
     schema_checks = [
         ("confidence", signals_df is not None and "confidence" in signals_df.columns),
-        ("edge_score", signals_df is not None and "edge_score" in signals_df.columns),
-        ("p_tp_before_sl", signals_df is not None and "p_tp_before_sl" in signals_df.columns),
+        ("edge_score / expected_return", signals_df is not None and any(c in signals_df.columns for c in ["edge_score", "expected_return", "temporal_expected_return"])),
+        ("p_tp_before_sl / temporal_p_tp_before_sl / meta_prob", signals_df is not None and any(c in signals_df.columns for c in ["p_tp_before_sl", "temporal_p_tp_before_sl", "meta_prob"])),
         ("market", (signals_df is not None and "market" in signals_df.columns) or (markets_df is not None and "market" in markets_df.columns) or (signals_df is not None and "market_title" in signals_df.columns)),
         ("wallet_copied / trader_wallet", (signals_df is not None and "wallet_copied" in signals_df.columns) or (signals_df is not None and "trader_wallet" in signals_df.columns) or (trades_df is not None and "wallet_copied" in trades_df.columns)),
         ("current_price", (signals_df is not None and "current_price" in signals_df.columns) or (positions_df is not None and "current_price" in positions_df.columns)),
@@ -1443,12 +1443,22 @@ def render_data_quality_panel(signals_df, trades_df, markets_df, whales_df, aler
         dup_signal_tokens = int(signals_df["token_id"].astype(str).duplicated().sum())
         if dup_signal_tokens > 0:
             anomaly_flags.append(f"duplicate signal tokens={dup_signal_tokens}")
-    if positions_df is not None and not positions_df.empty and "current_price" in positions_df.columns:
-        stale_quote_rows = int(positions_df["current_price"].isna().sum())
+    recent_positions_for_anomaly = pd.DataFrame()
+    if positions_df is not None and not positions_df.empty:
+        recent_positions_for_anomaly = positions_df.copy()
+        time_candidates = [c for c in ["updated_at", "timestamp", "opened_at"] if c in recent_positions_for_anomaly.columns]
+        for col in time_candidates:
+            ts = pd.to_datetime(recent_positions_for_anomaly[col], errors="coerce", utc=True)
+            if ts.notna().any():
+                mask = ts >= (pd.Timestamp.utcnow() - pd.Timedelta(hours=6))
+                recent_positions_for_anomaly = recent_positions_for_anomaly.loc[mask.fillna(False)].copy()
+                break
+    if not recent_positions_for_anomaly.empty and "current_price" in recent_positions_for_anomaly.columns:
+        stale_quote_rows = int(recent_positions_for_anomaly["current_price"].isna().sum())
         if stale_quote_rows > 0:
             anomaly_flags.append(f"stale/missing position quotes={stale_quote_rows}")
-    if positions_df is not None and not positions_df.empty and "opened_at" in positions_df.columns:
-        opened_ts = pd.to_datetime(positions_df["opened_at"], errors="coerce", utc=True)
+    if not recent_positions_for_anomaly.empty and "opened_at" in recent_positions_for_anomaly.columns:
+        opened_ts = pd.to_datetime(recent_positions_for_anomaly["opened_at"], errors="coerce", utc=True)
         long_open = int(((pd.Timestamp.utcnow() - opened_ts).dt.total_seconds() > 86400).fillna(False).sum())
         if long_open > 0:
             anomaly_flags.append(f"positions open >24h={long_open}")
