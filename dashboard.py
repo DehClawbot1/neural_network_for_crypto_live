@@ -372,9 +372,12 @@ def render_live_account_status():
             pass
 
         collat_data = client.get_balance_allowance(asset_type="COLLATERAL")
-        usdc_balance = float(collat_data.get("balance", collat_data.get("amount", 0.0))) if isinstance(collat_data, dict) else 0.0
+        clob_balance = float(collat_data.get("balance", collat_data.get("amount", 0.0))) if isinstance(collat_data, dict) else 0.0
         collat_allowance = float(collat_data.get("allowance", 0.0)) if isinstance(collat_data, dict) else 0.0
         address = client.funder if client.funder else os.getenv("POLYMARKET_PUBLIC_ADDRESS", "") or "Loaded from Private Key"
+        onchain_data = client.get_onchain_collateral_balance(wallet_address=address)
+        onchain_balance = float((onchain_data or {}).get("total", 0.0) or 0.0)
+        balance_mismatch = onchain_balance > 0 and clob_balance <= 0
         exchange_ok = False
         server_time = None
         if raw_client is not None and hasattr(raw_client, "get_ok"):
@@ -383,10 +386,13 @@ def render_live_account_status():
             server_time = raw_client.get_server_time()
 
         st.sidebar.success("✅ Live client connected")
-        st.sidebar.metric("Balance source", "API: COLLATERAL")
-        st.sidebar.metric("USDC Balance", f"${usdc_balance:.2f}")
+        st.sidebar.metric("Balance source", "CLOB + on-chain wallet")
+        st.sidebar.metric("CLOB Collateral", f"${clob_balance:.2f}")
+        st.sidebar.metric("On-chain Wallet USDC", f"${onchain_balance:.2f}")
         st.sidebar.metric("Collateral Allowance", f"{collat_allowance:.2f}")
         st.sidebar.metric("Exchange reachable", "YES" if exchange_ok else "NO")
+        if balance_mismatch:
+            st.sidebar.warning("On-chain funds detected but CLOB collateral is zero.")
         st.sidebar.markdown(f"**Account Address:**\n`{address}`")
         if server_time is not None:
             st.sidebar.caption(f"Server time: {server_time}")

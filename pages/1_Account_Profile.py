@@ -123,6 +123,8 @@ def _read_live_client_state(local_activity: Optional[Dict[str, pd.DataFrame]] = 
         "balance_source": "none",
         "collateral_balance": None,
         "collateral_allowance": None,
+        "onchain_wallet_balance": None,
+        "balance_mismatch": False,
     }
     fallback_address, fallback_source = _get_candidate_address_with_source()
     result["address_source"] = fallback_source
@@ -148,10 +150,19 @@ def _read_live_client_state(local_activity: Optional[Dict[str, pd.DataFrame]] = 
             result["server_time"] = raw_client.get_server_time()
         collat = client.get_balance_allowance(asset_type="COLLATERAL")
         result["client_ok"] = True
-        result["balance_source"] = "api:COLLATERAL"
+        result["balance_source"] = "api:COLLATERAL + wallet:onchain"
         if isinstance(collat, dict):
             result["collateral_balance"] = _safe_float(collat.get("balance", collat.get("amount")))
             result["collateral_allowance"] = _safe_float(collat.get("allowance"))
+        try:
+            onchain = client.get_onchain_collateral_balance(wallet_address=result["funder"])
+            if isinstance(onchain, dict):
+                result["onchain_wallet_balance"] = _safe_float(onchain.get("total"))
+        except Exception:
+            pass
+        collat_balance = result.get("collateral_balance") or 0.0
+        onchain_balance = result.get("onchain_wallet_balance") or 0.0
+        result["balance_mismatch"] = onchain_balance > 0 and collat_balance <= 0
     except Exception as exc:
         result["client_error"] = str(exc)
     return result
@@ -292,14 +303,17 @@ def main() -> None:
     c5, c6, c7, c8 = st.columns(4)
     c5.metric("Wallet address", address if address else "missing")
     c6.metric("Address source", live_state.get("address_source") or "missing")
-    c7.metric("Collateral balance", f"${live_state['collateral_balance']:.2f}" if live_state.get("collateral_balance") is not None else "N/A")
-    c8.metric("Collateral allowance", f"{live_state['collateral_allowance']:.2f}" if live_state.get("collateral_allowance") is not None else "N/A")
+    c7.metric("CLOB collateral", f"${live_state['collateral_balance']:.2f}" if live_state.get("collateral_balance") is not None else "N/A")
+    c8.metric("On-chain wallet USDC", f"${live_state['onchain_wallet_balance']:.2f}" if live_state.get("onchain_wallet_balance") is not None else "N/A")
 
-    lc1, lc2, lc3 = st.columns(3)
+    lc1, lc2, lc3, lc4 = st.columns(4)
     lc1.metric("Local live orders", len(local_activity.get("orders", pd.DataFrame())))
     lc2.metric("Local live fills", len(local_activity.get("fills", pd.DataFrame())))
     lc3.metric("Latest tradability", live_state.get("tradable_status") or "N/A")
+    lc4.metric("Collateral allowance", f"{live_state['collateral_allowance']:.2f}" if live_state.get("collateral_allowance") is not None else "N/A")
 
+    if live_state.get("balance_mismatch"):
+        st.warning("On-chain wallet funds are present, but the CLOB collateral balance is still zero for this account context.")
     if live_state.get("server_time") is not None:
         st.caption(f"Server time: {live_state['server_time']}")
     if live_state.get("tradable_reason"):

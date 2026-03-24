@@ -176,6 +176,12 @@ The `live-test` branch now includes:
 - live experience logging to `logs/live_experience.csv`
 - nearline fine-tuning scaffold from live replay buffer
 - unified execution + training launcher via multiprocessing
+- reconciled live positions in SQLite via `live_position_book.py`
+- exchange order/fill reconciliation via `reconciliation_service.py`
+- reconciled live PnL reporting via `live_pnl.py`
+- mismatch freeze guard via `mismatch_detector.py`
+- optional buy-side on-chain collateral fallback via `ALLOW_ONCHAIN_USDC_FALLBACK=true`
+- dashboard/account surfaces that show both CLOB collateral and on-chain wallet stablecoin balance
 
 ### Live learning scaffolds
 - `LivePolyTradeEnv` in `polytrade_env.py`
