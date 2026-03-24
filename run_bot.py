@@ -18,6 +18,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 load_dotenv()
 
 WEIGHTS_PATH = Path("weights/ppo_polytrader.zip")
+LOGS_DIR = Path("logs")
+RESEARCH_ARTIFACTS = [
+    LOGS_DIR / "historical_dataset.csv",
+    LOGS_DIR / "contract_targets.csv",
+    LOGS_DIR / "wallet_alpha_history.csv",
+    LOGS_DIR / "supervised_eval.csv",
+    LOGS_DIR / "time_split_eval.csv",
+    LOGS_DIR / "path_replay_backtest.csv",
+]
 
 
 def print_banner():
@@ -55,9 +64,8 @@ def ensure_live_client_ready():
             return False
         balance = collateral.get("balance", collateral.get("amount", collateral.get("available_balance")))
         source = getattr(client, 'credential_source', 'unknown')
-        if source != "stored_env":
-            print(f"[!] Live client only connected via fallback credential source: {source}")
-            print("[!] Update your .env with the freshly derived L2 credentials before proceeding.\n")
+        if source not in {"stored_env", "derived_refreshed_env"}:
+            print(f"[!] Live client connected through unsupported credential source: {source}\n")
             return False
         print(f"[+] Live client connected. Collateral balance payload received: {balance}")
         print(f"[+] Credential source in use: {source}\n")
@@ -94,8 +102,26 @@ def maybe_retrain_before_start():
     return retrained
 
 
+def should_refresh_research_artifacts(max_age_minutes=60):
+    force_refresh = os.getenv("FORCE_RESEARCH_REFRESH", "").strip().lower() in {"1", "true", "yes", "on"}
+    if force_refresh:
+        return True, "FORCE_RESEARCH_REFRESH enabled"
+    missing = [str(path) for path in RESEARCH_ARTIFACTS if not path.exists()]
+    if missing:
+        return True, f"missing artifacts: {', '.join(missing[:3])}"
+    latest_mtime = min(path.stat().st_mtime for path in RESEARCH_ARTIFACTS)
+    age_seconds = max(0, int(__import__("time").time() - latest_mtime))
+    if age_seconds > max_age_minutes * 60:
+        return True, f"artifacts are stale ({age_seconds}s old)"
+    return False, f"artifacts are fresh ({age_seconds}s old)"
+
+
 def build_research_artifacts():
-    print("[3/4] Building research datasets / supervised artifacts...")
+    refresh, reason = should_refresh_research_artifacts()
+    if not refresh:
+        print(f"[3/4] Skipping research rebuild: {reason}.\n")
+        return
+    print(f"[3/4] Building research datasets / supervised artifacts... ({reason})")
     try:
         run_research_pipeline()
         print("[+] Research pipeline refreshed (historical dataset, targets, eval files).\n")
