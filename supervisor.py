@@ -23,6 +23,7 @@ from backtester import StrategyBacktester
 from autonomous_monitor import AutonomousMonitor
 from retrainer import Retrainer
 from execution_client import ExecutionClient
+from order_manager import OrderManager
 from position_manager import PositionManager
 from model_inference import ModelInference
 from stage1_inference import Stage1Inference
@@ -285,6 +286,7 @@ def main_loop():
     position_manager = PositionManager()
     trading_mode = os.getenv("TRADING_MODE", "paper").strip().lower()
     execution_client = ExecutionClient() if trading_mode == "live" else None
+    order_manager = OrderManager() if trading_mode == "live" else None
     autonomous_monitor = AutonomousMonitor()
     retrainer = Retrainer()
     previous_markets_df = None
@@ -413,7 +415,28 @@ def main_loop():
                     if token_id and token_id in open_token_ids:
                         matching = open_positions_df[open_positions_df.get("token_id", pd.Series(dtype=str)).astype(str) == token_id]
                         if not matching.empty:
-                            position_manager.close_position(matching.iloc[0].to_dict(), reason="whale_sell_exit")
+                            pos_dict = matching.iloc[0].to_dict()
+                            if trading_mode == "live" and order_manager is not None:
+                                exit_price = quote_entry_price(pos_dict)
+                                exit_size = float(pos_dict.get("shares", 0.0) or 0.0)
+                                if exit_price is not None and exit_size > 0:
+                                    exit_row, exit_response = order_manager.submit_entry(
+                                        token_id=token_id,
+                                        price=exit_price,
+                                        size=exit_size,
+                                        side="SELL",
+                                        condition_id=pos_dict.get("condition_id"),
+                                        outcome_side=pos_dict.get("outcome_side"),
+                                    )
+                                    exit_order_id = (exit_row or {}).get("order_id") or (exit_response or {}).get("orderID") or (exit_response or {}).get("order_id") or (exit_response or {}).get("id")
+                                    if exit_order_id:
+                                        fill_result = order_manager.wait_for_fill(exit_order_id)
+                                        if fill_result.get("filled"):
+                                            position_manager.close_position(pos_dict, reason="whale_sell_exit")
+                                else:
+                                    logging.warning("Live CLOSE_LONG skipped for %s due to missing exit price/size", token_id)
+                            else:
+                                position_manager.close_position(pos_dict, reason="whale_sell_exit")
                     continue
 
                 if token_id and token_id in open_token_ids:
@@ -443,16 +466,29 @@ def main_loop():
                     if fill_price is None or pd.isna(fill_price):
                         logging.warning("Skipping signal with missing fill price for token_id=%s", token_id)
                         continue
-                    if trading_mode == "live" and execution_client is not None:
-                        execution_client.create_and_post_order(
+                    if trading_mode == "live" and order_manager is not None:
+                        entry_row, entry_response = order_manager.submit_entry(
                             token_id=signal_row.get("token_id"),
                             price=fill_price,
                             size=size,
                             side=signal_row.get("order_side", "BUY"),
+                            condition_id=signal_row.get("condition_id"),
+                            outcome_side=signal_row.get("outcome_side", signal_row.get("side")),
                         )
+                        entry_order_id = (entry_row or {}).get("order_id") or (entry_response or {}).get("orderID") or (entry_response or {}).get("order_id") or (entry_response or {}).get("id")
+                        if not entry_order_id:
+                            logging.info("Live entry rejected/skipped for token_id=%s reason=%s", token_id, (entry_row or {}).get("reason"))
+                            continue
+                        fill_result = order_manager.wait_for_fill(entry_order_id)
+                        if not fill_result.get("filled"):
+                            logging.info("Live entry not filled for token_id=%s", token_id)
+                            continue
+                        fill_payload = fill_result.get("response") or {}
+                        actual_fill_price = float(fill_payload.get("price", fill_price) or fill_price)
+                        position_manager.open_position(signal_row, size_usdc=size, fill_price=actual_fill_price)
                     else:
                         execute_paper_trade(action_val, signal_row, fill_price=fill_price)
-                    position_manager.open_position(signal_row, size_usdc=size, fill_price=fill_price)
+                        position_manager.open_position(signal_row, size_usdc=size, fill_price=fill_price)
 
             # 4B. Open-position management path for hold / reduce / exit
             open_positions_df = position_manager.update_mark_to_market(scored_df)
@@ -478,9 +514,45 @@ def main_loop():
                         logging.warning("Failed to log management decision for %s: %s", token_id, exc)
 
                     if pos_action_val == 4:
-                        position_manager.reduce_position(pos_dict, fraction=0.5)
+                        if trading_mode == "live" and order_manager is not None:
+                            exit_price = quote_entry_price(pos_dict)
+                            exit_size = float(pos_dict.get("shares", 0.0) or 0.0) * 0.5
+                            if exit_price is not None and exit_size > 0:
+                                reduce_row, reduce_response = order_manager.submit_entry(
+                                    token_id=token_id,
+                                    price=exit_price,
+                                    size=exit_size,
+                                    side="SELL",
+                                    condition_id=pos_dict.get("condition_id"),
+                                    outcome_side=pos_dict.get("outcome_side"),
+                                )
+                                reduce_order_id = (reduce_row or {}).get("order_id") or (reduce_response or {}).get("orderID") or (reduce_response or {}).get("order_id") or (reduce_response or {}).get("id")
+                                if reduce_order_id:
+                                    fill_result = order_manager.wait_for_fill(reduce_order_id)
+                                    if fill_result.get("filled"):
+                                        position_manager.reduce_position(pos_dict, fraction=0.5)
+                        else:
+                            position_manager.reduce_position(pos_dict, fraction=0.5)
                     elif pos_action_val == 5:
-                        position_manager.close_position(pos_dict, reason="rl_exit")
+                        if trading_mode == "live" and order_manager is not None:
+                            exit_price = quote_entry_price(pos_dict)
+                            exit_size = float(pos_dict.get("shares", 0.0) or 0.0)
+                            if exit_price is not None and exit_size > 0:
+                                exit_row, exit_response = order_manager.submit_entry(
+                                    token_id=token_id,
+                                    price=exit_price,
+                                    size=exit_size,
+                                    side="SELL",
+                                    condition_id=pos_dict.get("condition_id"),
+                                    outcome_side=pos_dict.get("outcome_side"),
+                                )
+                                exit_order_id = (exit_row or {}).get("order_id") or (exit_response or {}).get("orderID") or (exit_response or {}).get("order_id") or (exit_response or {}).get("id")
+                                if exit_order_id:
+                                    fill_result = order_manager.wait_for_fill(exit_order_id)
+                                    if fill_result.get("filled"):
+                                        position_manager.close_position(pos_dict, reason="rl_exit")
+                        else:
+                            position_manager.close_position(pos_dict, reason="rl_exit")
 
             # 5. Phase 2 analytics outputs
             trades_df = safe_read_csv(EXECUTION_FILE)
@@ -491,7 +563,8 @@ def main_loop():
 
             alerts_df = safe_read_csv("logs/alerts.csv")
             position_manager.update_mark_to_market(scored_df)
-            position_manager.apply_exit_rules(alerts_df)
+            if trading_mode != "live":
+                position_manager.apply_exit_rules(alerts_df)
             open_positions_df = position_manager.get_open_positions()
             autonomous_monitor.write_heartbeat("position_manager", status="ok", message="positions_updated", extra={"open_positions": len(open_positions_df) if open_positions_df is not None else 0})
             autonomous_monitor.write_status(trader_signals_df, trades_df, alerts_df, open_positions_df)
