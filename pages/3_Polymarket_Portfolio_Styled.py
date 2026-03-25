@@ -72,14 +72,19 @@ def _addr() -> Optional[str]:
 
 @st.cache_data(show_spinner=False, ttl=20)
 def _live() -> dict:
-    out = {"balance": 0.0, "available": 0.0, "orders": [], "trades": [], "address": _addr(), "error": None}
+    out = {"balance": 0.0, "available": 0.0, "onchain_total": 0.0, "orders": [], "trades": [], "address": _addr(), "error": None}
     try:
         client = get_execution_client()
         bal = client.get_balance_allowance(asset_type="COLLATERAL")
         out["address"] = getattr(client, "funder", None) or out["address"]
         if isinstance(bal, dict):
             out["balance"] = _safe_float(bal.get("balance", bal.get("amount")), 0.0)
-            out["available"] = _safe_float(bal.get("available", bal.get("available_balance", bal.get("balance", bal.get("amount")))), out["balance"])
+        try:
+            onchain = client.get_onchain_collateral_balance(wallet_address=out["address"])
+            out["onchain_total"] = _safe_float((onchain or {}).get("total"), 0.0) or 0.0
+        except Exception:
+            out["onchain_total"] = 0.0
+        out["available"] = out["onchain_total"] if out["onchain_total"] else out["balance"]
         out["orders"] = client.get_orders() or []
         out["trades"] = client.get_trades() or []
     except Exception as exc:
@@ -253,6 +258,7 @@ pnl_pct = (current_pnl / float(portfolio_value)) if portfolio_value else 0.0
 c1, c2 = st.columns(2)
 with c1:
     st.markdown(f'<div class="pm-box"><div class="pm-top"><div><div class="pm-label">Portfolio</div><div class="pm-big">{_money(portfolio_value)}</div><div class="pm-sub">{_money(current_pnl)} ({_pct(pnl_pct)}) past {curve_span.lower()}</div></div><div><div class="pm-label">Available to trade</div><div class="pm-big">{_money(available)}</div></div></div></div>', unsafe_allow_html=True)
+    st.caption(f"CLOB/API collateral: {_money(live.get('balance', 0.0))} | On-chain USDC: {_money(live.get('onchain_total', 0.0))}")
     d1, d2 = st.columns(2)
     d1.button("Deposit", use_container_width=True, disabled=True)
     d2.button("Withdraw", use_container_width=True, disabled=True)

@@ -56,7 +56,7 @@ def _load_local_closed() -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False, ttl=20)
 def _live_bundle() -> dict:
-    out = {"ok": False, "balance": 0.0, "available": 0.0, "orders": [], "trades": [], "address": _derive_address(), "error": None}
+    out = {"ok": False, "balance": 0.0, "available": 0.0, "onchain_total": 0.0, "orders": [], "trades": [], "address": _derive_address(), "error": None}
     try:
         client = get_execution_client()
         bal = client.get_balance_allowance(asset_type="COLLATERAL")
@@ -64,7 +64,12 @@ def _live_bundle() -> dict:
         out["address"] = getattr(client, "funder", None) or out["address"]
         if isinstance(bal, dict):
             out["balance"] = _safe_float(bal.get("balance", bal.get("amount")), 0.0)
-            out["available"] = _safe_float(bal.get("available", bal.get("available_balance", bal.get("balance", bal.get("amount")))), out["balance"])
+        try:
+            onchain = client.get_onchain_collateral_balance(wallet_address=out["address"])
+            out["onchain_total"] = _safe_float((onchain or {}).get("total"), 0.0) or 0.0
+        except Exception:
+            out["onchain_total"] = 0.0
+        out["available"] = out["onchain_total"] if out["onchain_total"] else out["balance"]
         orders = client.get_orders()
         trades = client.get_trades()
         out["orders"] = orders if isinstance(orders, list) else []
@@ -201,6 +206,7 @@ with left:
     c1, c2 = st.columns(2)
     c1.metric("Portfolio", _money(portfolio_value), f"{_money(current_pnl)} ({_pct(pnl_pct)}) past {range_key.lower()}")
     c2.metric("Available to trade", _money(available))
+    st.caption(f"CLOB/API collateral: {_money(live.get('balance', 0.0))} | On-chain USDC: {_money(live.get('onchain_total', 0.0))}")
     b1, b2 = st.columns(2)
     b1.button("Deposit", use_container_width=True, disabled=True)
     b2.button("Withdraw", use_container_width=True, disabled=True)

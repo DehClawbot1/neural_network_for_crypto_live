@@ -391,7 +391,7 @@ def render_opp_table(signals_df):
     if "confidence" in v.columns: v = v.sort_values("confidence", ascending=False)
     rm = {"market_title":"Market","outcome_side":"Side","signal_label":"Label","confidence":"Conf","p_tp_before_sl":"P(TP)","edge_score":"Edge","expected_return":"E[R]","wallet_copied":"Wallet","market_last_trade_price":"Price","recommended_action":"Action","timestamp":"Time"}
     cs = [c for c in rm if c in v.columns]; d = v[cs].rename(columns=rm).head(50)
-    st.dataframe(d, use_container_width=True, hide_index=True)
+    st.dataframe(ensure_safe(d), use_container_width=True, hide_index=True)
     st.download_button("Export CSV", d.to_csv(index=False).encode(), "opportunities.csv", "text/csv")
 
 def render_action_board(signals_df, positions_df):
@@ -453,11 +453,11 @@ def render_best_trades(closed_df, replay_df):
     src = closed_df if not closed_df.empty else replay_df
     if src.empty: st.info("No trade history yet."); return
     pc = next((c for c in ["net_realized_pnl","realized_pnl","net_pnl"] if c in src.columns), None)
-    if not pc: st.dataframe(src.head(10), use_container_width=True); return
+    if not pc: st.dataframe(ensure_safe(src.head(10)), use_container_width=True); return
     cs = [c for c in ["market","entry_price","exit_price",pc,"wallet_copied","close_reason"] if c in src.columns]
     l, r = st.columns(2)
-    with l: st.markdown("**Top Winners**"); st.dataframe(src.sort_values(pc, ascending=False).head(10)[cs], use_container_width=True, hide_index=True)
-    with r: st.markdown("**Top Losers**"); st.dataframe(src.sort_values(pc, ascending=True).head(10)[cs], use_container_width=True, hide_index=True)
+    with l: st.markdown("**Top Winners**"); st.dataframe(ensure_safe(src.sort_values(pc, ascending=False).head(10)[cs]), use_container_width=True, hide_index=True)
+    with r: st.markdown("**Top Losers**"); st.dataframe(ensure_safe(src.sort_values(pc, ascending=True).head(10)[cs]), use_container_width=True, hide_index=True)
 
 def render_markets(markets_df):
     st.markdown('<div class="sec-title">BTC Market Tracker</div>', unsafe_allow_html=True)
@@ -477,7 +477,7 @@ def render_markets(markets_df):
         hv = str(v.loc[i, mc]) if i in v.index else "-"
     c3.metric("Highest Volume", hv)
     cs = [c for c in [mc, pc, "liquidity", "volume", "spread", "market_id", "url", "updated_at"] if c and c in v.columns]
-    st.dataframe(v[cs].head(50), use_container_width=True, hide_index=True)
+    st.dataframe(ensure_safe(v[cs].head(50)), use_container_width=True, hide_index=True)
     if mc and "liquidity" in v.columns:
         ld = v.dropna(subset=[mc]).head(12).copy(); ld["liquidity"] = pd.to_numeric(ld["liquidity"],errors="coerce")
         ld = ld.dropna(subset=["liquidity"]).sort_values("liquidity", ascending=True)
@@ -506,7 +506,7 @@ def render_whales(whales_df):
     c2.metric("Most Active", str(whales_df[wc].astype(str).value_counts().idxmax()) if wc else "-")
     c3.metric("Top Market", str(whales_df[mc].astype(str).value_counts().idxmax()) if mc else "-")
     cs = [c for c in [wc,"trade_count","avg_size","unique_markets","alpha_score","profit","timestamp"] if c and c in whales_df.columns]
-    st.dataframe(whales_df[cs].head(25) if cs else whales_df.head(25), use_container_width=True, hide_index=True)
+    st.dataframe(ensure_safe(whales_df[cs].head(25) if cs else whales_df.head(25)), use_container_width=True, hide_index=True)
     if wc:
         wcc = whales_df[wc].astype(str).value_counts().head(15).reset_index(); wcc.columns = ["Wallet","Actions"]
         fig = px.bar(wcc, x="Wallet", y="Actions", color_discrete_sequence=["#3b82f6"])
