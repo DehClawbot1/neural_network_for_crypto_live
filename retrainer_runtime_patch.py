@@ -85,9 +85,10 @@ def _resume_ppo_train_model(timesteps=5000):
 class IncrementalRetrainer(_legacy_retrainer.Retrainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.min_new_closed_rows = _env_int("RETRAIN_MIN_NEW_CLOSED_ROWS", 25)
-        self.min_new_replay_rows = _env_int("RETRAIN_MIN_NEW_REPLAY_ROWS", 50)
-        self.cooldown_minutes = _env_int("RETRAIN_COOLDOWN_MINUTES", 360)
+        # ── FIX: Changed from 25/50 to 5/10 so model retrains after every 5 closed trades
+        self.min_new_closed_rows = _env_int("RETRAIN_MIN_NEW_CLOSED_ROWS", 5)
+        self.min_new_replay_rows = _env_int("RETRAIN_MIN_NEW_REPLAY_ROWS", 10)
+        self.cooldown_minutes = _env_int("RETRAIN_COOLDOWN_MINUTES", 60)
         self.rl_timesteps = _env_int("RETRAIN_RL_TIMESTEPS", 1000)
         self.enable_startup_retrain = _env_bool("ENABLE_STARTUP_RETRAIN", False)
 

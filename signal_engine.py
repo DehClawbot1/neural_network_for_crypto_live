@@ -11,6 +11,10 @@ class SignalEngine:
     Safe research/paper-trading signal scorer.
     Uses grouped feature sub-scores and outputs observation labels and confidence,
     not live betting instructions.
+
+    FIX: Lowered thresholds from 0.45/0.60/0.78 to 0.35/0.50/0.70
+    so early-stage signals with modest model scores still produce trades
+    that the system can learn from.
     """
 
     LABELS = {
@@ -38,11 +42,12 @@ class SignalEngine:
         model_confidence = np.clip((p_tp * 0.75) + np.clip(expected_return * 5.0, -1.0, 1.0) * 0.10 + np.clip(edge_score * 8.0, -1.0, 1.0) * 0.15, 0.0, 1.0)
         confidence = float(np.clip(max(heuristic_confidence, model_confidence), 0.0, 1.0))
 
-        if confidence < 0.45:
+        # ── FIX: Lowered thresholds so trades actually happen
+        if confidence < 0.35:
             action_code = 0
-        elif confidence < 0.60:
+        elif confidence < 0.50:
             action_code = 1
-        elif confidence < 0.78:
+        elif confidence < 0.70:
             action_code = 2
         else:
             action_code = 3
@@ -72,6 +77,12 @@ class SignalEngine:
         scored = [self.score_row(row.to_dict()) for _, row in features_df.iterrows()]
         scored_df = pd.DataFrame(scored)
         logging.info("Scored %s grouped feature rows.", len(scored_df))
+
+        # ── FIX: Log distribution so user can see what's happening
+        if not scored_df.empty and "signal_label" in scored_df.columns:
+            label_counts = scored_df["signal_label"].value_counts().to_dict()
+            logging.info("Signal distribution: %s", label_counts)
+
         return scored_df
 
 
@@ -90,4 +101,3 @@ if __name__ == "__main__":
     )
     engine = SignalEngine()
     print(engine.score_features(sample)[["market_title", "signal_label", "confidence", "reason"]])
-

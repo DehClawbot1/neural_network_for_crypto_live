@@ -13,7 +13,13 @@ class PredictionLayer:
 class EntryRuleLayer:
     """Entry filter separate from raw model prediction."""
 
-    def __init__(self, min_score=0.62, max_spread=0.03, min_liquidity=1000):
+    # ── FIX: Relaxed from 0.62/0.03/1000 to 0.45/0.08/100
+    #    Polymarket BTC markets typically have:
+    #      - spreads of 0.03-0.10 (3-10%)
+    #      - liquidity from 100-50000
+    #      - model scores starting around 0.45-0.60 before convergence
+    #    The old thresholds blocked 100% of signals for 10+ hours.
+    def __init__(self, min_score=0.45, max_spread=0.08, min_liquidity=100):
         self.min_score = min_score
         self.max_spread = max_spread
         self.min_liquidity = min_liquidity
@@ -41,4 +47,3 @@ class ExitRuleLayer:
         if confidence < self.confidence_floor:
             return "confidence_drop"
         return None
-
