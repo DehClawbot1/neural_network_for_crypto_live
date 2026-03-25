@@ -357,7 +357,7 @@ def main_loop():
     live_pnl = LivePnLCalculator() if trading_mode == "live" else None
     reconciliation_service = ReconciliationService(execution_client) if trading_mode == "live" and execution_client is not None else None
     mismatch_detector = StateMismatchDetector() if trading_mode == "live" else None
-    trade_manager = TradeManager()
+    trade_manager = TradeManager(logs_dir="logs")
     autonomous_monitor = AutonomousMonitor()
     retrainer = Retrainer()
     previous_markets_df = None
@@ -778,6 +778,7 @@ def main_loop():
                 autonomous_monitor.write_heartbeat("trade_manager", status="ok", message="trades_updated", extra={"open_positions": len(open_positions_for_status)})
 
             autonomous_monitor.write_status(trader_signals_df, trades_df, alerts_df, open_positions_df_for_status)
+            trade_manager.persist_open_positions()
             try:
                 sync_ops_state_to_db("logs")
             except Exception as exc:
