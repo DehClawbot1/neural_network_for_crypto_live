@@ -45,7 +45,9 @@ class ContractTargetBuilder:
         if explicit_token_id is not None and not pd.isna(explicit_token_id) and str(explicit_token_id).strip():
             return explicit_token_id
 
-        outcome_side = str(signal_row.get("outcome_side", "")).upper().strip()
+        outcome_side = str(
+            signal_row.get("outcome_side", signal_row.get("side", signal_row.get("trade_side", "")))
+        ).upper().strip()
         if outcome_side == "NO":
             return market_row.get("no_token_id")
         if outcome_side == "YES":
