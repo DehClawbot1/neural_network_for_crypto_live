@@ -3,7 +3,14 @@ import sys
 import logging
 from pathlib import Path
 
-from dotenv import load_dotenv
+# ── Only load .env if NOT in interactive mode ──
+if not os.environ.get("_INTERACTIVE_MODE"):
+    from dotenv import load_dotenv
+    load_dotenv()
+else:
+    # In interactive mode, credentials are already in os.environ
+    pass
+
 from api_setup import validate_environment
 
 # ── BUG FIX I: Set CPU threading env vars BEFORE any numpy/sklearn import ──
@@ -25,8 +32,6 @@ from execution_client import ExecutionClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-load_dotenv()
-
 LEGACY_WEIGHTS_PATH = Path("weights/ppo_polytrader.zip")
 ENTRY_WEIGHTS_PATH = Path("weights/ppo_entry_policy.zip")
 POSITION_WEIGHTS_PATH = Path("weights/ppo_position_policy.zip")
@@ -41,10 +46,17 @@ RESEARCH_ARTIFACTS = [
 ]
 
 
+def is_interactive():
+    return os.environ.get("_INTERACTIVE_MODE") == "1"
+
+
 def print_banner():
     print("\n=== NEURAL NETWORK FOR CRYPTO ===")
     print("Mode: LIVE-TEST / REAL-TIME DATA")
-    print("TRADING_MODE required here: live")
+    if is_interactive():
+        print("Credentials: FROM USER INPUT (interactive mode)")
+    else:
+        print("Credentials: FROM .env FILE")
     print("This launcher validates the environment, checks model weights, and starts the supervisor.\n")
 
 
@@ -55,6 +67,17 @@ def ensure_environment():
         print(f"[!] Invalid TRADING_MODE='{trading_mode or 'missing'}'.")
         print("[!] This launcher now requires TRADING_MODE=live.\n")
         return False
+
+    if is_interactive():
+        # In interactive mode, skip .env file validation — creds are in memory
+        private_key = os.getenv("PRIVATE_KEY")
+        funder = os.getenv("POLYMARKET_FUNDER")
+        if private_key and funder:
+            print("[+] Environment OK (interactive mode — credentials in memory)\n")
+            return True
+        else:
+            print("[!] Missing PRIVATE_KEY or POLYMARKET_FUNDER.\n")
+            return False
 
     valid = validate_environment()
     if not valid:

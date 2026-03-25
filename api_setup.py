@@ -2,9 +2,12 @@ import os
 import sys
 import logging
 import subprocess
-from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+def _is_interactive():
+    return os.environ.get("_INTERACTIVE_MODE") == "1"
 
 
 def prompt_runtime_config():
@@ -40,10 +43,29 @@ def prompt_runtime_config():
 
 def validate_environment():
     """
-    Validates the presence and structure of the .env file for paper or live-test mode.
+    Validates the environment for paper or live-test mode.
+    In interactive mode, skips .env file checks entirely.
     """
     logging.info("Validating local environment setup...")
 
+    # ── Interactive mode: credentials are already in os.environ ──
+    if _is_interactive():
+        trading_mode = os.getenv("TRADING_MODE", "paper").strip().lower()
+        if trading_mode == "live":
+            private_key = os.getenv("PRIVATE_KEY")
+            funder = os.getenv("POLYMARKET_FUNDER")
+            if private_key and funder:
+                logging.info("[+] Environment validated for live mode (interactive — no .env file used).")
+                return True
+            logging.error("[-] Interactive mode missing PRIVATE_KEY or POLYMARKET_FUNDER.")
+            return False
+        if trading_mode == "paper":
+            logging.info("[+] Environment validated for paper mode (interactive).")
+            return True
+        logging.error("[-] Invalid TRADING_MODE in interactive mode: %s", trading_mode)
+        return False
+
+    # ── File mode: original .env-based validation ──
     env_path = ".env"
 
     if not os.path.exists(env_path):
@@ -63,6 +85,7 @@ def validate_environment():
         logging.info("[+] Starter .env template created. Please review variables.")
         return False
 
+    from dotenv import load_dotenv
     load_dotenv()
 
     trading_mode = prompt_runtime_config()
@@ -114,4 +137,3 @@ if __name__ == "__main__":
                 print("[+] Setup complete. You may start run_bot.py and dashboard.py manually.")
     else:
         print("\n[-] Validation failed or template generated. Please check your .env file and run again.")
-

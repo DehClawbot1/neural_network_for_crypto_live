@@ -4,13 +4,24 @@ from pathlib import Path
 
 import requests
 
-from dotenv import set_key
+# Only import set_key if we'll actually write to .env
+try:
+    from dotenv import set_key
+except ImportError:
+    set_key = None
+
+
+def _is_interactive():
+    return os.environ.get("_INTERACTIVE_MODE") == "1"
 
 
 class ExecutionClient:
     """
     Live-test execution wrapper around Polymarket's py-clob-client.
     Intended only for the isolated live-test branch.
+
+    In interactive mode, derived credentials are kept in memory only
+    and never persisted to .env files.
     """
 
     def __init__(self, host=None, chain_id=None, private_key=None, funder=None, signature_type=None):
@@ -82,11 +93,34 @@ class ExecutionClient:
         )
 
     def _persist_creds_to_env(self, creds):
+        """Save derived credentials.
+
+        In interactive mode: store in os.environ only (memory).
+        In .env mode: persist to .env file on disk.
+        """
+        key = getattr(creds, "api_key", getattr(creds, "key", ""))
+        secret = getattr(creds, "api_secret", getattr(creds, "secret", ""))
+        passphrase = getattr(creds, "api_passphrase", getattr(creds, "passphrase", ""))
+
+        # Always update in-memory env vars so subsequent calls work
+        os.environ["POLYMARKET_API_KEY"] = key
+        os.environ["POLYMARKET_API_SECRET"] = secret
+        os.environ["POLYMARKET_API_PASSPHRASE"] = passphrase
+
+        if _is_interactive():
+            # Interactive mode: keep creds in memory only, never write to disk
+            logging.info("Derived L2 API creds stored in memory (interactive mode — not written to disk).")
+            return
+
+        # File mode: persist to .env on disk
+        if set_key is None:
+            logging.warning("python-dotenv not available; cannot persist creds to .env.")
+            return
         if not self.env_file.exists():
             self.env_file.touch()
-        set_key(str(self.env_file), "POLYMARKET_API_KEY", getattr(creds, "api_key", getattr(creds, "key", "")))
-        set_key(str(self.env_file), "POLYMARKET_API_SECRET", getattr(creds, "api_secret", getattr(creds, "secret", "")))
-        set_key(str(self.env_file), "POLYMARKET_API_PASSPHRASE", getattr(creds, "api_passphrase", getattr(creds, "passphrase", "")))
+        set_key(str(self.env_file), "POLYMARKET_API_KEY", key)
+        set_key(str(self.env_file), "POLYMARKET_API_SECRET", secret)
+        set_key(str(self.env_file), "POLYMARKET_API_PASSPHRASE", passphrase)
 
     def _initialize_credentials(self):
         stored_creds = self._build_stored_creds()
@@ -107,7 +141,10 @@ class ExecutionClient:
             self.api_creds = derived_creds
             self.credential_source = "derived_refreshed_env"
             self._persist_creds_to_env(derived_creds)
-            print("REFRESHED .ENV WITH DERIVED L2 CREDS (values persisted, hidden in logs).")
+            if _is_interactive():
+                print("DERIVED L2 CREDS (stored in memory only, not on disk).")
+            else:
+                print("REFRESHED .ENV WITH DERIVED L2 CREDS (values persisted, hidden in logs).")
             return
         except Exception as exc:
             raise exc
@@ -117,7 +154,7 @@ class ExecutionClient:
         order_type_const = getattr(self.OrderType, str(order_type).upper())
         args = self.OrderArgs(token_id=token_id, price=float(price), size=float(size), side=side_const)
         # BUG FIX: py_clob_client.create_order expects PartialCreateOrderOptions or None,
-        # not a raw dict.  Extract post_only and pass it to post_order instead.
+        # not a raw dict.
         post_only = False
         create_options = None
         if isinstance(options, dict):
@@ -233,4 +270,3 @@ class ExecutionClient:
             except Exception:
                 return api_balance
         return api_balance
-
