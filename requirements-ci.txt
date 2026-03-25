@@ -1,0 +1,13 @@
+# CI-only requirements: lightweight subset for scoped coverage tests.
+# Skips heavy/optional deps (torch, stable-baselines3, catboost, streamlit)
+# that are not needed by the 5 coverage-scoped modules:
+#   order_manager, execution_client, reconciliation_service,
+#   position_manager, contract_target_builder
+python-dotenv==1.0.1
+requests==2.32.3
+pandas==2.2.3
+numpy==2.1.3
+scikit-learn==1.6.1
+joblib==1.4.2
+pytest==8.3.5
+pytest-cov==6.1.1

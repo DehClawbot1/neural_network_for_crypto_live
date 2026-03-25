@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Dict, List, Optional
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 
@@ -18,16 +19,16 @@ class TradeManager:
     runtime trade manager for the supervisor.
     """
 
-    def __init__(self):
+    def __init__(self, logs_dir="logs"):
         self.active_trades: Dict[str, TradeLifecycle] = {}
+        self.logs_dir = Path(logs_dir)
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self.positions_file = self.logs_dir / "positions.csv"
+        self.closed_file = self.logs_dir / "closed_positions.csv"
         logger.info("[+] Initialized TradeManager.")
 
     def _get_trade_key(self, signal_row: pd.Series) -> Optional[str]:
-        """Generates a unique key for a trade based on market and outcome.
-
-        BUG FIX: Use the same column priority as the supervisor so keys
-        are consistent.  Return None instead of raising on missing fields.
-        """
+        """Generates a unique key for a trade based on market and outcome."""
         market = signal_row.get("market_title") or signal_row.get("market")
         outcome_side = signal_row.get("outcome_side") or signal_row.get("side")
         if not market or not outcome_side:
@@ -36,24 +37,15 @@ class TradeManager:
         return f"{market}-{outcome_side}"
 
     def handle_signal(self, signal_row: pd.Series, confidence: float, size_usdc: float) -> Optional[TradeLifecycle]:
-        """
-        Processes a new signal. If a trade already exists for this market/side,
-        it updates it. Otherwise, it creates a new TradeLifecycle instance.
-        """
         trade_key = self._get_trade_key(signal_row)
         if trade_key is None:
             return None
 
         market = signal_row.get("market_title") or signal_row.get("market")
         outcome_side = signal_row.get("outcome_side") or signal_row.get("side")
-
-        # BUG FIX: use "token_id" not "outcome_token_id" — that key doesn't
-        # exist anywhere in the pipeline.
         token_id = signal_row.get("token_id")
         condition_id = signal_row.get("condition_id")
 
-        # BUG FIX: the scoring pipeline produces "current_price" / "entry_price",
-        # not bare "price".  Fall through the chain so we never get None.
         entry_price = (
             signal_row.get("current_price")
             or signal_row.get("entry_price")
@@ -84,24 +76,12 @@ class TradeManager:
             return trade
 
     def update_markets(self, market_prices: Dict[str, float]):
-        """
-        Updates current prices for all active trades and computes unrealized PnL.
-        market_prices: a dict of {market_name: current_price}
-        """
         for trade_key, trade in list(self.active_trades.items()):
             if trade.market in market_prices:
                 live_price = market_prices[trade.market]
                 trade.update_market(live_price)
-            # Also try looking up by the full key if market name alone didn't match
-            # (handles cases where market_prices uses market_title)
 
     def process_exits(self, current_timestamp: datetime, alerts_df: pd.DataFrame = None):
-        """
-        Evaluates exit conditions for all active trades.
-
-        BUG FIX: Added real exit logic (take-profit, stop-loss, trailing stop,
-        time stop) instead of only the 7-day placeholder.
-        """
         closed_trades: List[TradeLifecycle] = []
 
         for trade_key, trade in list(self.active_trades.items()):
@@ -127,24 +107,14 @@ class TradeManager:
 
             close_reason = None
 
-            # Take-profit on ROI
             if roi >= TradingConfig.PAPER_TP_ROI:
                 close_reason = "take_profit_roi"
-
-            # Take-profit on absolute price move
             elif (current_price - entry_price) >= TradingConfig.SHADOW_TP_DELTA:
                 close_reason = "take_profit_price_move"
-
-            # Stop-loss on absolute price move
             elif (entry_price - current_price) >= TradingConfig.SHADOW_SL_DELTA:
                 close_reason = "stop_loss"
-
-            # Time stop — 3 hours for paper trades
             elif minutes_open >= 180:
                 close_reason = "time_stop"
-
-            # Trailing stop (basic: if we've been positive and dropped back)
-            # Note: TradeLifecycle doesn't track peak_price, so this is approximate
             elif roi < -TradingConfig.PAPER_TRAILING_STOP and minutes_open > 15:
                 close_reason = "trailing_stop"
 
@@ -154,19 +124,20 @@ class TradeManager:
                             trade.market, trade.outcome_side, close_reason, trade.realized_pnl)
                 closed_trades.append(trade)
 
-        # Remove closed trades from active set
         for trade in closed_trades:
             key = f"{trade.market}-{trade.outcome_side}"
             self.active_trades.pop(key, None)
 
+        # ── BUG FIX: Persist closed trades to CSV so dashboard can read them ──
+        if closed_trades:
+            self._append_closed_trades(closed_trades)
+
         return closed_trades
 
     def get_open_positions(self) -> List[TradeLifecycle]:
-        """Returns a list of all currently active TradeLifecycle instances."""
         return [t for t in self.active_trades.values() if t.state != TradeState.CLOSED]
 
     def get_metrics(self) -> Dict[str, any]:
-        """Aggregates key metrics from active trades."""
         open_trades = self.get_open_positions()
         total_unrealized_pnl = sum(trade.unrealized_pnl for trade in open_trades)
         return {
@@ -175,10 +146,75 @@ class TradeManager:
             "last_reconciled_at": datetime.now().isoformat(),
         }
 
+    # ── NEW: CSV serialization helpers for dashboard data wiring ──
+
+    def _trade_to_dict(self, trade: TradeLifecycle) -> dict:
+        """Convert a TradeLifecycle to a dict matching the dashboard CSV schema."""
+        return {
+            "position_id": f"{trade.market}-{trade.outcome_side}",
+            "market": trade.market,
+            "market_title": trade.market,
+            "token_id": trade.token_id,
+            "condition_id": trade.condition_id,
+            "outcome_side": trade.outcome_side,
+            "order_side": "BUY",
+            "entry_price": trade.entry_price,
+            "current_price": trade.current_price,
+            "size_usdc": trade.size_usdc,
+            "shares": trade.shares,
+            "market_value": trade.shares * trade.current_price if trade.current_price else 0.0,
+            "unrealized_pnl": trade.unrealized_pnl,
+            "realized_pnl": trade.realized_pnl,
+            "opened_at": trade.opened_at,
+            "closed_at": trade.closed_at,
+            "status": trade.state.value if hasattr(trade.state, 'value') else str(trade.state),
+        }
+
+    def persist_open_positions(self):
+        """
+        BUG FIX: Write active trade state to positions.csv so the dashboard
+        can display current open positions.  Called at the end of each
+        supervisor cycle.
+        """
+        open_trades = self.get_open_positions()
+        if not open_trades:
+            pd.DataFrame(columns=[
+                "position_id", "market", "market_title", "token_id",
+                "condition_id", "outcome_side", "order_side",
+                "entry_price", "current_price", "size_usdc", "shares",
+                "market_value", "unrealized_pnl", "realized_pnl",
+                "opened_at", "status",
+            ]).to_csv(self.positions_file, index=False)
+            return
+
+        rows = [self._trade_to_dict(t) for t in open_trades]
+        pd.DataFrame(rows).to_csv(self.positions_file, index=False)
+
+    def _append_closed_trades(self, closed_trades: List[TradeLifecycle]):
+        """
+        BUG FIX: Append closed trades to closed_positions.csv so the
+        dashboard can display PnL history and trade outcomes.
+        """
+        if not closed_trades:
+            return
+
+        rows = []
+        for trade in closed_trades:
+            row = self._trade_to_dict(trade)
+            row["close_reason"] = "policy_exit"
+            row["exit_price"] = trade.current_price
+            row["net_realized_pnl"] = trade.realized_pnl
+            row["status"] = "CLOSED"
+            rows.append(row)
+
+        pd.DataFrame(rows).to_csv(
+            self.closed_file, mode="a",
+            header=not self.closed_file.exists(), index=False,
+        )
+
+    # ── END CSV serialization helpers ──
+
     def reconcile_live_positions(self, execution_client=None, reconciled_positions_df: pd.DataFrame | None = None):
-        """
-        Reconcile active trades from a reconciled live position book when available.
-        """
         if reconciled_positions_df is None or reconciled_positions_df.empty:
             logger.info("[~] Reconciling live positions with exchange (no reconciled positions supplied).")
             return
