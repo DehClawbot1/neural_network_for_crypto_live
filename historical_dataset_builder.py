@@ -51,6 +51,17 @@ class HistoricalDatasetBuilder:
         }
         dataset = dataset.rename(columns={k: v for k, v in rename_map.items() if k in dataset.columns})
 
+        for df_obj, cols in [
+            (dataset, ["market_title", "trader_wallet"]),
+            (trades_df, ["market_title", "trader_wallet", "wallet_copied"]),
+            (markets_df, ["question", "market_title"]),
+            (alerts_df, ["market"]),
+            (wallet_alpha_history_df, ["wallet_copied"]),
+        ]:
+            for col in cols:
+                if col in df_obj.columns:
+                    df_obj[col] = df_obj[col].map(lambda v: str(v).strip() if pd.notna(v) else None)
+
         if "timestamp" not in dataset.columns:
             dataset["timestamp"] = pd.NaT
 
