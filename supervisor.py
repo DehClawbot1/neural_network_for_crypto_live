@@ -616,7 +616,11 @@ def main_loop():
                             logging.info("Paper trade initiated for %s with %s USDC at %s.", token_id, size_usdc, fill_price)
 
             # 4B. Open-position management path for hold / reduce / exit
-            market_prices = markets_df.set_index("market_title")["current_price"].dropna().to_dict()
+            market_price_key = next((c for c in ["market_title", "market", "question"] if c in markets_df.columns), None)
+            if market_price_key and "current_price" in markets_df.columns:
+                market_prices = markets_df.set_index(market_price_key)["current_price"].dropna().to_dict()
+            else:
+                market_prices = {}
             trade_manager.update_markets(market_prices)
 
             # If in live mode, reconcile with exchange before making decisions
