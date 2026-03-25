@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -5,6 +6,8 @@ import pandas as pd
 import requests
 
 CLOB_URL = "https://clob.polymarket.com/prices-history"
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 
 class CLOBHistoryClient:
@@ -27,7 +30,7 @@ class CLOBHistoryClient:
                 "interval": interval,
                 "fidelity": fidelity,
             },
-            timeout=30,
+            timeout=15,  # BUG FIX: reduced from 30 to 15s per token
         )
         response.raise_for_status()
         payload = response.json()
@@ -45,15 +48,19 @@ class CLOBHistoryClient:
 
     def append_history(self, token_ids, days=7, interval="1m"):
         frames = []
-        for token_id in token_ids:
+        total = len(token_ids)
+        for idx, token_id in enumerate(token_ids):
             if not token_id:
                 continue
             try:
+                logging.info("CLOB fetch %d/%d: %s...", idx + 1, total, str(token_id)[:16])
                 frames.append(self.fetch_history(token_id, days=days, interval=interval))
-            except Exception:
+            except Exception as exc:
+                # BUG FIX: Log and skip instead of silently continuing
+                logging.warning("CLOB fetch failed for token %s: %s (skipping)", str(token_id)[:16], exc)
                 continue
         df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         if not df.empty:
             df.to_csv(self.output_file, mode="a", header=not self.output_file.exists(), index=False)
+        logging.info("CLOB history: fetched %d rows across %d/%d tokens.", len(df), len(frames), total)
         return df
-

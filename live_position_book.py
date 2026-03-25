@@ -75,30 +75,42 @@ class LivePositionBook:
                 if book["shares"] <= 0:
                     book["avg_entry_price"] = 0.0
 
-        self.db.execute("DELETE FROM live_positions")
+        # ── BUG FIX (BUG 4): Atomic rebuild using a transaction.
+        #    Previously did DELETE then INSERT in separate commits.
+        #    If the process crashed between DELETE and INSERT, all position
+        #    data was lost. Now both happen in a single transaction. ──
         now = datetime.now(timezone.utc).isoformat()
-        for row in books.values():
-            row["status"] = "OPEN" if float(row["shares"]) > 0 else "CLOSED"
-            self.db.execute(
-                """
-                INSERT OR REPLACE INTO live_positions
-                (position_key, token_id, condition_id, outcome_side, shares, avg_entry_price, realized_pnl, last_fill_at, source, status, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    row["position_key"],
-                    row["token_id"],
-                    row["condition_id"],
-                    row["outcome_side"],
-                    row["shares"],
-                    row["avg_entry_price"],
-                    row["realized_pnl"],
-                    row["last_fill_at"],
-                    row["source"],
-                    row["status"],
-                    now,
-                ),
-            )
+        cursor = self.db.conn.cursor()
+        try:
+            cursor.execute("BEGIN IMMEDIATE")
+            cursor.execute("DELETE FROM live_positions")
+            for row in books.values():
+                row["status"] = "OPEN" if float(row["shares"]) > 0 else "CLOSED"
+                cursor.execute(
+                    """
+                    INSERT OR REPLACE INTO live_positions
+                    (position_key, token_id, condition_id, outcome_side, shares, avg_entry_price, realized_pnl, last_fill_at, source, status, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["position_key"],
+                        row["token_id"],
+                        row["condition_id"],
+                        row["outcome_side"],
+                        row["shares"],
+                        row["avg_entry_price"],
+                        row["realized_pnl"],
+                        row["last_fill_at"],
+                        row["source"],
+                        row["status"],
+                        now,
+                    ),
+                )
+            self.db.conn.commit()
+        except Exception:
+            self.db.conn.rollback()
+            raise
+
         return pd.DataFrame(list(books.values()))
 
     def get_open_positions(self):

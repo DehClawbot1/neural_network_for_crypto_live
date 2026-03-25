@@ -107,8 +107,18 @@ class ContractTargetBuilder:
         history_df = history_df.copy()
         history_df["timestamp"] = self._normalize_timestamp_series(history_df["timestamp"])
         history_df = history_df.dropna(subset=["timestamp", "token_id"]).copy()
-        history_df["token_id_norm"] = history_df["token_id"].map(lambda v: str(v).strip() if pd.notna(v) else "")
-        history_df = history_df[history_df["token_id_norm"] != ""].sort_values(["token_id_norm", "timestamp"]).reset_index(drop=True)
+
+        # ── BUG FIX (BUG 1 & 9): pre-normalize token_id to string ONCE,
+        #    then GROUP BY token_id for O(1) lookups instead of filtering
+        #    the entire DataFrame on every signal row. ──
+        history_df["token_id"] = history_df["token_id"].astype(str).str.strip()
+        history_df = history_df[history_df["token_id"] != ""].sort_values(["token_id", "timestamp"]).reset_index(drop=True)
+
+        # Pre-group history by token_id → dict of DataFrames (O(n) once)
+        history_by_token = {
+            token_key: group_df.reset_index(drop=True)
+            for token_key, group_df in history_df.groupby("token_id")
+        }
 
         market_lookup = markets_df.drop_duplicates(subset=[question_col], keep="last").set_index(question_col).to_dict("index")
 
@@ -128,8 +138,10 @@ class ContractTargetBuilder:
             token_key = str(token_id).strip()
             if not token_key:
                 continue
-            token_history = history_df[history_df["token_id_norm"] == token_key].copy()
-            if token_history.empty:
+
+            # O(1) dict lookup instead of O(m) DataFrame filter
+            token_history = history_by_token.get(token_key)
+            if token_history is None or token_history.empty:
                 continue
 
             signal_ts = signal_row.get("timestamp")
@@ -188,4 +200,3 @@ class ContractTargetBuilder:
         if not df.empty:
             df.to_csv(self.output_file, index=False)
         return df
-

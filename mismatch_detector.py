@@ -4,7 +4,21 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pandas as pd
+
 from db import Database
+
+
+def _safe_str(value) -> str:
+    """Normalize None/NaN/empty to consistent empty string for key comparison."""
+    if value is None:
+        return ""
+    if isinstance(value, float) and pd.isna(value):
+        return ""
+    s = str(value).strip()
+    if s.lower() in ("nan", "none", ""):
+        return ""
+    return s
 
 
 class StateMismatchDetector:
@@ -14,22 +28,27 @@ class StateMismatchDetector:
         self.db = Database(self.logs_dir / "trading.db")
 
     def _trade_key(self, trade):
+        # ── BUG FIX (BUG 8): Use _safe_str to normalize both TradeLifecycle
+        #    attrs and DataFrame row values consistently ──
         return (
-            str(getattr(trade, "token_id", "") or ""),
-            str(getattr(trade, "condition_id", "") or ""),
-            str(getattr(trade, "outcome_side", "") or ""),
+            _safe_str(getattr(trade, "token_id", "")),
+            _safe_str(getattr(trade, "condition_id", "")),
+            _safe_str(getattr(trade, "outcome_side", "")),
         )
 
     def detect(self, active_trades, live_positions_df):
-        local_keys = {self._trade_key(trade) for trade in (active_trades or []) if getattr(trade, "token_id", None)}
+        local_keys = {self._trade_key(trade) for trade in (active_trades or []) if _safe_str(getattr(trade, "token_id", ""))}
         live_keys = set()
         if live_positions_df is not None and not live_positions_df.empty:
             for _, row in live_positions_df.iterrows():
+                token_id = _safe_str(row.get("token_id", ""))
+                if not token_id:
+                    continue
                 live_keys.add(
                     (
-                        str(row.get("token_id", "") or ""),
-                        str(row.get("condition_id", "") or ""),
-                        str(row.get("outcome_side", "") or ""),
+                        token_id,
+                        _safe_str(row.get("condition_id", "")),
+                        _safe_str(row.get("outcome_side", "")),
                     )
                 )
 
