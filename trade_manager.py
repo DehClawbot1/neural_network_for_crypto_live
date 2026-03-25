@@ -17,6 +17,13 @@ class TradeManager:
     """
     Manages a collection of TradeLifecycle instances, acting as the central
     runtime trade manager for the supervisor.
+
+    BUG FIXES APPLIED:
+      C - persist confidence_at_entry + signal_label to positions.csv
+      D - pass real close_reason (not hardcoded "policy_exit")
+      E - TradeLifecycle.close() now accepts reason param
+      F - write both realized_pnl AND net_realized_pnl to closed_positions.csv
+      H - consistent ISO timestamp format
     """
 
     def __init__(self, logs_dir="logs"):
@@ -28,7 +35,6 @@ class TradeManager:
         logger.info("[+] Initialized TradeManager.")
 
     def _get_trade_key(self, signal_row: pd.Series) -> Optional[str]:
-        """Generates a unique key for a trade based on market and outcome."""
         market = signal_row.get("market_title") or signal_row.get("market")
         outcome_side = signal_row.get("outcome_side") or signal_row.get("side")
         if not market or not outcome_side:
@@ -69,6 +75,9 @@ class TradeManager:
                 outcome_side=outcome_side,
             )
             trade.on_signal(signal_row.to_dict() if hasattr(signal_row, 'to_dict') else dict(signal_row))
+            # ── BUG FIX C: Store confidence and label on the trade object ──
+            trade.confidence_at_entry = float(confidence)
+            trade.signal_label = str(signal_row.get("signal_label", "UNKNOWN") or "UNKNOWN")
             trade.enter(size_usdc=size_usdc, entry_price=entry_price)
             self.active_trades[trade_key] = trade
             logger.info("[+] New trade initiated for %s (%s) with %s USDC at %.4f.",
@@ -83,10 +92,12 @@ class TradeManager:
 
     def process_exits(self, current_timestamp: datetime, alerts_df: pd.DataFrame = None):
         closed_trades: List[TradeLifecycle] = []
+        close_reasons: Dict[str, str] = {}  # ── BUG FIX D: track reasons ──
 
         for trade_key, trade in list(self.active_trades.items()):
             if trade.state == TradeState.CLOSED:
                 closed_trades.append(trade)
+                close_reasons[trade_key] = trade.close_reason or "already_closed"
                 continue
 
             if not trade.opened_at:
@@ -119,16 +130,17 @@ class TradeManager:
                 close_reason = "trailing_stop"
 
             if close_reason:
-                trade.close(current_price)
+                # ── BUG FIX E: pass reason to trade.close() ──
+                trade.close(current_price, reason=close_reason)
                 logger.info("[->] Closed trade for %s (%s). Reason: %s. PnL: %.4f",
                             trade.market, trade.outcome_side, close_reason, trade.realized_pnl)
                 closed_trades.append(trade)
+                close_reasons[trade_key] = close_reason
 
         for trade in closed_trades:
             key = f"{trade.market}-{trade.outcome_side}"
             self.active_trades.pop(key, None)
 
-        # ── BUG FIX: Persist closed trades to CSV so dashboard can read them ──
         if closed_trades:
             self._append_closed_trades(closed_trades)
 
@@ -146,10 +158,12 @@ class TradeManager:
             "last_reconciled_at": datetime.now().isoformat(),
         }
 
-    # ── NEW: CSV serialization helpers for dashboard data wiring ──
-
     def _trade_to_dict(self, trade: TradeLifecycle) -> dict:
-        """Convert a TradeLifecycle to a dict matching the dashboard CSV schema."""
+        """
+        Convert a TradeLifecycle to a dict matching the dashboard CSV schema.
+        BUG FIX C: includes confidence_at_entry and signal_label.
+        BUG FIX H: consistent ISO timestamps.
+        """
         return {
             "position_id": f"{trade.market}-{trade.outcome_side}",
             "market": trade.market,
@@ -163,19 +177,20 @@ class TradeManager:
             "size_usdc": trade.size_usdc,
             "shares": trade.shares,
             "market_value": trade.shares * trade.current_price if trade.current_price else 0.0,
-            "unrealized_pnl": trade.unrealized_pnl,
-            "realized_pnl": trade.realized_pnl,
+            "unrealized_pnl": round(trade.unrealized_pnl, 4),
+            "realized_pnl": round(trade.realized_pnl, 4),
+            # ── BUG FIX F: write both column names so dashboard finds it ──
+            "net_realized_pnl": round(trade.realized_pnl, 4),
             "opened_at": trade.opened_at,
             "closed_at": trade.closed_at,
             "status": trade.state.value if hasattr(trade.state, 'value') else str(trade.state),
+            # ── BUG FIX C: persist confidence and signal label ──
+            "confidence": trade.confidence_at_entry,
+            "confidence_at_entry": trade.confidence_at_entry,
+            "signal_label": trade.signal_label,
         }
 
     def persist_open_positions(self):
-        """
-        BUG FIX: Write active trade state to positions.csv so the dashboard
-        can display current open positions.  Called at the end of each
-        supervisor cycle.
-        """
         open_trades = self.get_open_positions()
         if not open_trades:
             pd.DataFrame(columns=[
@@ -183,7 +198,8 @@ class TradeManager:
                 "condition_id", "outcome_side", "order_side",
                 "entry_price", "current_price", "size_usdc", "shares",
                 "market_value", "unrealized_pnl", "realized_pnl",
-                "opened_at", "status",
+                "net_realized_pnl", "opened_at", "status",
+                "confidence", "confidence_at_entry", "signal_label",
             ]).to_csv(self.positions_file, index=False)
             return
 
@@ -192,8 +208,8 @@ class TradeManager:
 
     def _append_closed_trades(self, closed_trades: List[TradeLifecycle]):
         """
-        BUG FIX: Append closed trades to closed_positions.csv so the
-        dashboard can display PnL history and trade outcomes.
+        BUG FIX D: Use actual close_reason from TradeLifecycle, not hardcoded.
+        BUG FIX F: Write both realized_pnl AND net_realized_pnl.
         """
         if not closed_trades:
             return
@@ -201,9 +217,12 @@ class TradeManager:
         rows = []
         for trade in closed_trades:
             row = self._trade_to_dict(trade)
-            row["close_reason"] = "policy_exit"
+            # ── BUG FIX D: Use actual reason stored on the trade ──
+            row["close_reason"] = trade.close_reason or "policy_exit"
             row["exit_price"] = trade.current_price
-            row["net_realized_pnl"] = trade.realized_pnl
+            # ── BUG FIX F: Write both column names ──
+            row["realized_pnl"] = round(trade.realized_pnl, 4)
+            row["net_realized_pnl"] = round(trade.realized_pnl, 4)
             row["status"] = "CLOSED"
             rows.append(row)
 
@@ -211,8 +230,6 @@ class TradeManager:
             self.closed_file, mode="a",
             header=not self.closed_file.exists(), index=False,
         )
-
-    # ── END CSV serialization helpers ──
 
     def reconcile_live_positions(self, execution_client=None, reconciled_positions_df: pd.DataFrame | None = None):
         if reconciled_positions_df is None or reconciled_positions_df.empty:

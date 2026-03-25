@@ -33,6 +33,10 @@ class TradeLifecycle:
     unrealized_pnl: float = 0.0
     opened_at: str | None = None
     closed_at: str | None = None
+    # ── BUG FIX C/D/E: Track close reason and entry confidence ──
+    close_reason: str | None = None
+    confidence_at_entry: float = 0.0
+    signal_label: str = "UNKNOWN"
     ledger: list = field(default_factory=list)
 
     def _write_execution_event(self, payload: dict):
@@ -46,6 +50,9 @@ class TradeLifecycle:
         self.ledger.append({**payload, "signal": signal_row})
         self._write_execution_event(payload)
         self.state = TradeState.NEW_SIGNAL
+        # ── BUG FIX C: Capture confidence and label from the signal ──
+        self.confidence_at_entry = float(signal_row.get("confidence", 0.0) or 0.0)
+        self.signal_label = str(signal_row.get("signal_label", "UNKNOWN") or "UNKNOWN")
 
     def enter(self, size_usdc: float, entry_price: float):
         self.size_usdc = size_usdc
@@ -78,7 +85,8 @@ class TradeLifecycle:
         self.ledger.append({"event": "partial_exit", "timestamp": datetime.now().isoformat(), "fraction": fraction, "exit_price": exit_price, "realized_pnl": pnl})
         return pnl
 
-    def close(self, exit_price: float):
+    def close(self, exit_price: float, reason: str = "policy_exit"):
+        """Close the trade. BUG FIX E: now accepts and stores close_reason."""
         pnl = self.shares * (float(exit_price) - float(self.entry_price))
         self.realized_pnl += pnl
         self.current_price = exit_price
@@ -86,7 +94,8 @@ class TradeLifecycle:
         self.closed_at = datetime.now().isoformat()
         self.shares = 0.0
         self.state = TradeState.CLOSED
-        self.ledger.append({"event": "close", "timestamp": self.closed_at, "exit_price": exit_price, "realized_pnl": pnl})
+        self.close_reason = reason
+        self.ledger.append({"event": "close", "timestamp": self.closed_at, "exit_price": exit_price, "realized_pnl": pnl, "close_reason": reason})
         return pnl
 
     def resolve(self, token_won: bool):
@@ -95,4 +104,3 @@ class TradeLifecycle:
         self.state = TradeState.RESOLVED
         self.ledger.append({"event": "resolve", "timestamp": datetime.now().isoformat(), "token_won": token_won, "realized_pnl": self.realized_pnl})
         return self.realized_pnl
-

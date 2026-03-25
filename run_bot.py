@@ -5,6 +5,16 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from api_setup import validate_environment
+
+# ── BUG FIX I: Set CPU threading env vars BEFORE any numpy/sklearn import ──
+try:
+    from hardware_config import get_parallel_env_vars, get_sklearn_jobs, get_torch_device, PHYSICAL_CORES, LOGICAL_CORES
+    get_parallel_env_vars()
+    logging.info("[HW] CPU: %d cores / %d threads | sklearn n_jobs=%d | torch device=%s",
+                 PHYSICAL_CORES, LOGICAL_CORES, get_sklearn_jobs(), get_torch_device())
+except ImportError:
+    pass
+
 from rl_trainer import train_model
 from supervisor import main_loop, load_brain
 import supervisor as supervisor_module
@@ -39,7 +49,7 @@ def print_banner():
 
 
 def ensure_environment():
-    print("[1/3] Checking environment...")
+    print("[1/5] Checking environment...")
     trading_mode = os.getenv("TRADING_MODE", "").strip().lower()
     if trading_mode != "live":
         print(f"[!] Invalid TRADING_MODE='{trading_mode or 'missing'}'.")
@@ -57,20 +67,51 @@ def ensure_environment():
 
 
 def ensure_live_client_ready():
-    print("[1.5/4] Verifying live client connectivity...")
+    """
+    BUG FIX B: Print clear USDC balance at startup.
+    """
+    print("[2/5] Verifying live client connectivity and balance...")
     try:
         client = ExecutionClient()
         collateral = client.get_balance_allowance(asset_type="COLLATERAL")
         if not isinstance(collateral, dict):
             print("[!] Live client failed: collateral balance payload missing or invalid.\n")
             return False
-        balance = collateral.get("balance", collateral.get("amount", collateral.get("available_balance")))
+
+        # ── BUG FIX B: Extract and display actual balance clearly ──
+        clob_balance = 0.0
+        for key in ["balance", "available", "available_balance", "amount"]:
+            if collateral.get(key) is not None:
+                clob_balance = float(collateral[key])
+                break
+
+        onchain_balance = 0.0
+        try:
+            onchain = client.get_onchain_collateral_balance()
+            onchain_balance = float((onchain or {}).get("total", 0.0) or 0.0)
+        except Exception:
+            pass
+
+        available = max(clob_balance, onchain_balance)
         source = getattr(client, 'credential_source', 'unknown')
+
         if source not in {"stored_env", "derived_refreshed_env"}:
             print(f"[!] Live client connected through unsupported credential source: {source}\n")
             return False
-        print(f"[+] Live client connected. Collateral balance payload received: {balance}")
-        print(f"[+] Credential source in use: {source}\n")
+
+        print(f"[+] Live client connected successfully!")
+        print(f"    Credential source: {source}")
+        print(f"    ┌─────────────────────────────────────────┐")
+        print(f"    │  CLOB/API Balance:    ${clob_balance:>12,.2f}   │")
+        print(f"    │  On-chain USDC:       ${onchain_balance:>12,.2f}   │")
+        print(f"    │  ─────────────────────────────────────  │")
+        print(f"    │  AVAILABLE TO TRADE:  ${available:>12,.2f}   │")
+        print(f"    └─────────────────────────────────────────┘")
+        print()
+
+        if available <= 0:
+            print("[!] WARNING: No funds available to trade. Deposit USDC to your Polymarket wallet.\n")
+
         return True
     except Exception as exc:
         print(f"[!] Live client verification failed: {exc}\n")
@@ -78,7 +119,11 @@ def ensure_live_client_ready():
 
 
 def ensure_optional_rl_model():
-    print("[2/3] Checking optional RL model weights...")
+    """
+    BUG FIX A: If no RL weights exist at all, train initial bootstrap weights
+    so the model doesn't start from scratch every time.
+    """
+    print("[3/5] Checking RL model weights...")
 
     legacy_exists = LEGACY_WEIGHTS_PATH.exists()
     entry_exists = ENTRY_WEIGHTS_PATH.exists()
@@ -88,30 +133,45 @@ def ensure_optional_rl_model():
         if entry_exists:
             print(f"[+] Found entry RL weights: {ENTRY_WEIGHTS_PATH}")
         else:
-            print("[!] Entry RL weights missing: weights\\ppo_entry_policy.zip")
+            print("[!] Entry RL weights missing: weights/ppo_entry_policy.zip")
         if position_exists:
             print(f"[+] Found position RL weights: {POSITION_WEIGHTS_PATH}")
         else:
-            print("[!] Position RL weights missing: weights\\ppo_position_policy.zip")
+            print("[!] Position RL weights missing: weights/ppo_position_policy.zip")
         print("")
         return True
 
     if legacy_exists:
-        print(f"[+] Found legacy shared RL weights: {LEGACY_WEIGHTS_PATH} (compatibility fallback)\n")
+        print(f"[+] Found existing RL weights: {LEGACY_WEIGHTS_PATH}")
+        print(f"    (Will resume training from these weights on retrain)\n")
         return True
 
-    print("[!] No RL weights found.")
-    print("[+] Continuing anyway: supervised / event-driven pipeline is the default path.\n")
-    return True
+    # ── BUG FIX A: Bootstrap initial RL weights so they persist ──
+    print("[!] No RL weights found. Training initial bootstrap weights (1000 steps)...")
+    print("    This is a one-time operation. Future runs will resume from saved weights.")
+    try:
+        os.makedirs("weights", exist_ok=True)
+        train_model(timesteps=1000)
+        if LEGACY_WEIGHTS_PATH.exists():
+            print(f"[+] Initial RL weights saved to {LEGACY_WEIGHTS_PATH}")
+            print("    Future retrains will resume from these weights (not start from scratch).\n")
+            return True
+        else:
+            print("[!] RL training completed but weights file not found. Continuing with supervised mode.\n")
+            return True
+    except Exception as exc:
+        print(f"[!] Initial RL training failed: {exc}")
+        print("[+] Continuing with supervised-first mode (RL is optional).\n")
+        return True
 
 
 def maybe_retrain_before_start():
     startup_retrain_enabled = os.getenv("ENABLE_STARTUP_RETRAIN", "false").strip().lower() in {"1", "true", "yes", "on"}
     if not startup_retrain_enabled:
-        print("[2.5/4] Skipping pre-start retraining (ENABLE_STARTUP_RETRAIN is off).\n")
+        print("[3.5/5] Skipping pre-start retraining (ENABLE_STARTUP_RETRAIN is off).\n")
         return False
 
-    print("[2.5/4] Checking whether the model should retrain from accumulated data...")
+    print("[3.5/5] Checking whether the model should retrain from accumulated data...")
     retrainer = Retrainer()
     try:
         retrained = retrainer.maybe_retrain()
@@ -142,9 +202,9 @@ def should_refresh_research_artifacts(max_age_minutes=240):
 def build_research_artifacts():
     refresh, reason = should_refresh_research_artifacts()
     if not refresh:
-        print(f"[3/4] Skipping research rebuild: {reason}.\n")
+        print(f"[4/5] Skipping research rebuild: {reason}.\n")
         return
-    print(f"[3/4] Building research datasets / supervised artifacts... ({reason})")
+    print(f"[4/5] Building research datasets / supervised artifacts... ({reason})")
     try:
         run_research_pipeline()
         print("[+] Research pipeline refreshed (historical dataset, targets, eval files).\n")
@@ -154,7 +214,7 @@ def build_research_artifacts():
 
 def start_supervisor():
     apply_supervisor_ui_patch(supervisor_module)
-    print("[4/4] Starting supervisor...")
+    print("[5/5] Starting supervisor...")
     print("[+] Status: RUNNING")
     print("[+] Expected behavior:")
     print("    - fetch public BTC-related market/account activity")
@@ -180,7 +240,6 @@ def main():
     if not ensure_optional_rl_model():
         sys.exit(1)
 
-    # Final quick sanity check before loop
     maybe_retrain_before_start()
     build_research_artifacts()
 
@@ -192,4 +251,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
