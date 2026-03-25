@@ -213,7 +213,7 @@ class OrderManager:
             elif bool(post_only) and hasattr(self.client, "post_only_order"):
                 response = self.client.post_only_order(token_id=token_id, price=price, size=order_size_shares, side=side, order_type=order_type)
             else:
-                response = self.client.create_and_post_order(token_id=token_id, price=price, size=order_size_shares, side=side, order_type=order_type, options={"post_only": bool(post_only)})
+                response = self.client.create_and_post_order(token_id=token_id, price=price, size=order_size_shares, side=side, order_type=order_type, options=None)
         except Exception as exc:
             self.risk.record_failed_order()
             row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "size_usdc": notional_usdc, "order_size_shares": order_size_shares, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "FAILED", "reason": str(exc), "readiness": readiness, **market_context}

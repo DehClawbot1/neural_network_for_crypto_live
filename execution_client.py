@@ -116,7 +116,24 @@ class ExecutionClient:
         side_const = self.BUY if str(side).upper() == "BUY" else self.SELL
         order_type_const = getattr(self.OrderType, str(order_type).upper())
         args = self.OrderArgs(token_id=token_id, price=float(price), size=float(size), side=side_const)
-        signed_order = self.client.create_order(args, options=options or {})
+        # BUG FIX: py_clob_client.create_order expects PartialCreateOrderOptions or None,
+        # not a raw dict.  Extract post_only and pass it to post_order instead.
+        post_only = False
+        create_options = None
+        if isinstance(options, dict):
+            post_only = bool(options.pop("post_only", False))
+            tick_size = options.get("tick_size")
+            neg_risk = options.get("neg_risk")
+            if tick_size is not None or neg_risk is not None:
+                try:
+                    from py_clob_client.clob_types import PartialCreateOrderOptions
+                    create_options = PartialCreateOrderOptions(tick_size=tick_size, neg_risk=neg_risk)
+                except Exception:
+                    create_options = None
+        elif options is not None:
+            create_options = options
+
+        signed_order = self.client.create_order(args, options=create_options)
         return self.client.post_order(signed_order, order_type_const)
 
     def create_and_post_market_order(self, token_id, amount, side="BUY", order_type="FOK"):
