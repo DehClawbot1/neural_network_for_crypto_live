@@ -1,24 +1,21 @@
 """
 apply_tutorial_fixes.py
 ========================
-Patches the codebase to align with the official Polymarket Python tutorial
-(https://github.com/RobotTraders/bits_and_bobs/blob/main/polymarket_python.ipynb)
+Patches the codebase to align with the official Polymarket Python tutorial.
 
 Usage:
-    python apply_tutorial_fixes.py
+    1. CLOSE your IDE / stop run_bot.py / stop any Python processes first
+    2. python apply_tutorial_fixes.py
 
-Fixes applied:
-  1. execution_client.py — Auth flow aligned with tutorial (derive_api_key),
-     USDC balance normalization, tutorial-compatible convenience methods
-  2. market_monitor.py — Tutorial-style market discovery, proper clobTokenIds
-     parsing, volume24hr sorting, outcomePrices extraction
-  3. market_price_service.py — Order book analysis matching tutorial pattern
-     (sorted bids/asks, imbalance calculation)
-  4. price_tracker.py — NEW: Tutorial BONUS 1 & 2 (real-time price tracking,
-     address position tracking, market deep dive)
+If you still get PermissionError, run:
+    python apply_tutorial_fixes.py --force
 """
 
+import os
+import sys
 import shutil
+import time
+import gc
 from pathlib import Path
 from datetime import datetime
 
@@ -26,107 +23,160 @@ PROJECT_ROOT = Path(".")
 BACKUP_DIR = PROJECT_ROOT / "backups" / f"tutorial_fix_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
 FILES_TO_PATCH = {
-    "execution_client.py": {
-        "description": "Auth flow: derive_api_key(), USDC normalization, order book methods",
-        "fixes": [
-            "Uses derive_api_key() as primary credential derivation (tutorial method)",
-            "Falls back to create_or_derive_api_creds() for older client versions",
-            "Added _normalize_usdc_balance() for proper /1e6 conversion",
-            "Added get_order_book(), get_midpoint(), get_price(), get_spread() convenience methods",
-            "Added cancel_all() matching tutorial pattern",
-            "Fixed get_open_orders() to use OpenOrderParams() (tutorial pattern)",
-        ],
-    },
-    "market_monitor.py": {
-        "description": "Market discovery: clobTokenIds, volume sorting, outcomePrices",
-        "fixes": [
-            "clobTokenIds[0]/[1] preferred over tokens array (tutorial pattern)",
-            "Added volume24hr field from Gamma API",
-            "Added outcomePrices parsing (tutorial shows this as useful field)",
-            "Added fetch_active_markets_by_volume() (tutorial Section 2 pattern)",
-            "Better fallback for lastTradePrice from outcomePrices",
-        ],
-    },
-    "market_price_service.py": {
-        "description": "Order book analysis: sorted bids/asks, depth, imbalance",
-        "fixes": [
-            "Added get_order_book_analysis() with tutorial-style bid/ask sorting",
-            "Calculates order book imbalance, bid/ask volume",
-            "Lazy ClobClient initialization for read-only order book queries",
-            "get_midpoint() now tries order book analysis first (more accurate)",
-        ],
-    },
-    "price_tracker.py": {
-        "description": "NEW: Tutorial BONUS utilities",
-        "fixes": [
-            "track_price(): Real-time CLOB midpoint polling (Tutorial BONUS 1)",
-            "get_user_positions(): Data API position tracking (Tutorial BONUS 2)",
-            "get_market_deep_dive(): Combined order book + price analysis",
-        ],
-    },
+    "execution_client.py": "Auth flow: derive_api_key(), USDC normalization, order book methods",
+    "market_monitor.py": "Market discovery: clobTokenIds, volume sorting, outcomePrices",
+    "market_price_service.py": "Order book analysis: sorted bids/asks, depth, imbalance",
+    "price_tracker.py": "NEW: Tutorial BONUS utilities (price tracking, positions)",
 }
 
 FIXES_DIR = Path(__file__).parent
+
+
+def safe_copy(source, target, max_retries=5):
+    """Copy with retry logic for Windows file locks."""
+    for attempt in range(max_retries):
+        try:
+            gc.collect()
+
+            temp_target = target.with_suffix(".tmp_patch")
+            shutil.copy2(source, temp_target)
+
+            if target.exists():
+                try:
+                    target.unlink()
+                except PermissionError:
+                    stale = target.with_suffix(".old")
+                    if stale.exists():
+                        try:
+                            stale.unlink()
+                        except Exception:
+                            pass
+                    try:
+                        target.rename(stale)
+                        print(f"    (moved locked file to {stale.name})")
+                    except Exception:
+                        raise
+
+            temp_target.rename(target)
+            return True
+
+        except PermissionError as exc:
+            if attempt < max_retries - 1:
+                wait = 2 * (attempt + 1)
+                print(f"    [LOCKED] Retry {attempt+1}/{max_retries} in {wait}s... (close IDE/bot)")
+                time.sleep(wait)
+            else:
+                print(f"    [FAILED] Cannot write {target.name}: {exc}")
+                print(f"    --> Manual fix: copy the .tmp_patch file yourself")
+                return False
+    return False
+
+
+def show_tips():
+    print("Before running, close these if files are locked:")
+    print("  - VS Code / PyCharm / any editor with the project open")
+    print("  - Any running python.exe (run_bot.py, streamlit, etc.)")
+    print("  - Task Manager > Details > python.exe > End Task")
+    print()
+
+
+def force_kill_python():
+    print("[--force] Killing other Python processes...\n")
+    try:
+        import subprocess
+        this_pid = os.getpid()
+        result = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq python.exe", "/FO", "CSV"],
+            capture_output=True, text=True
+        )
+        killed = 0
+        for line in result.stdout.strip().split("\n")[1:]:
+            parts = line.replace('"', '').split(",")
+            if len(parts) >= 2:
+                try:
+                    pid = int(parts[1])
+                except ValueError:
+                    continue
+                if pid != this_pid:
+                    subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                                   capture_output=True)
+                    killed += 1
+        if killed:
+            print(f"  Killed {killed} python process(es). Waiting 3s...\n")
+            time.sleep(3)
+        else:
+            print("  No other python processes found.\n")
+    except Exception as exc:
+        print(f"  Could not kill processes: {exc}\n")
 
 
 def backup_and_copy():
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     print(f"Backing up originals to {BACKUP_DIR}/\n")
 
-    for filename, info in FILES_TO_PATCH.items():
+    success_count = 0
+    fail_count = 0
+
+    for filename, description in FILES_TO_PATCH.items():
         source = FIXES_DIR / filename
         target = PROJECT_ROOT / filename
         backup = BACKUP_DIR / filename
 
         if not source.exists():
-            print(f"  [SKIP] {filename} — fix file not found at {source}")
+            print(f"  [SKIP] {filename} -- fix file not found")
             continue
 
         if target.exists():
-            shutil.copy2(target, backup)
-            print(f"  [BACKUP] {filename} → {BACKUP_DIR.name}/")
+            try:
+                shutil.copy2(target, backup)
+                print(f"  [BACKUP] {filename}")
+            except Exception as exc:
+                print(f"  [BACKUP WARN] {filename}: {exc}")
         else:
-            print(f"  [NEW]    {filename} (no original to back up)")
+            print(f"  [NEW]    {filename}")
 
-        shutil.copy2(source, target)
-        print(f"  [PATCH]  {filename} — {info['description']}")
-        for fix in info["fixes"]:
-            print(f"           • {fix}")
+        if safe_copy(source, target):
+            print(f"  [PATCHED] {filename} -- {description}")
+            success_count += 1
+        else:
+            fail_count += 1
         print()
 
+    return success_count, fail_count
 
-def print_summary():
-    print("=" * 64)
-    print("ALL TUTORIAL-ALIGNED FIXES APPLIED")
-    print("=" * 64)
+
+def print_summary(success, failed):
+    print("=" * 60)
+    if failed == 0:
+        print(f"ALL {success} FIXES APPLIED SUCCESSFULLY")
+    else:
+        print(f"APPLIED {success}/{success+failed} FIXES ({failed} FAILED)")
+    print("=" * 60)
     print()
-    print("What changed:")
-    print()
-    print("  1. AUTHENTICATION (execution_client.py)")
-    print("     Tutorial pattern: derive_api_key() → set_api_creds()")
-    print("     Now tries derive_api_key() first, falls back gracefully.")
-    print("     USDC balance properly normalized (raw int vs float).")
-    print()
-    print("  2. MARKET DISCOVERY (market_monitor.py)")
-    print("     Tutorial pattern: Gamma API with volume24hr sorting")
-    print("     Token IDs extracted from clobTokenIds (JSON string).")
-    print("     New: fetch_active_markets_by_volume() utility.")
-    print()
-    print("  3. ORDER BOOK ANALYSIS (market_price_service.py)")
-    print("     Tutorial pattern: get_order_book → sorted bids/asks")
-    print("     New: Full order book analysis with depth & imbalance.")
-    print()
-    print("  4. PRICE & POSITION TRACKING (price_tracker.py)")
-    print("     Tutorial BONUS 1: Real-time CLOB midpoint polling.")
-    print("     Tutorial BONUS 2: Data API wallet position lookup.")
-    print("     New: Market deep dive combining all analysis.")
-    print()
-    print("To restore originals:")
-    print(f"  Copy files from {BACKUP_DIR}/ back to project root")
+
+    if failed > 0:
+        print("For failed files, either:")
+        print("  1. Close all editors/processes and re-run this script")
+        print("  2. Run: python apply_tutorial_fixes.py --force")
+        print("  3. Manually rename .tmp_patch files to their real names")
+        print()
+        return
+
+    print("Key changes:")
+    print("  - execution_client.py: derive_api_key() auth + USDC normalization")
+    print("  - market_monitor.py: clobTokenIds parsing + volume sorting")
+    print("  - market_price_service.py: order book depth analysis")
+    print("  - price_tracker.py: real-time price + position tracking")
     print()
     print("Restart run_bot.py to apply all changes.")
+    print(f"\nTo restore originals: copy from {BACKUP_DIR}/")
 
 
 if __name__ == "__main__":
-    backup_and_copy()
-    print_summary()
+    show_tips()
+
+    if "--force" in sys.argv:
+        force_kill_python()
+
+    success, failed = backup_and_copy()
+    print_summary(success, failed)
