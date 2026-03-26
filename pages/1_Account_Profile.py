@@ -1,25 +1,39 @@
+"""
+pages/1_Account_Profile.py — FIXED
+
+FIXES:
+  1. Uses safe_load_dotenv() instead of load_dotenv()
+  2. Uses cached ExecutionClient from dashboard_auth
+  3. Works in paper mode too (shows available log data)
+  4. No longer crashes when live credentials are missing
+"""
+
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
-from dotenv import load_dotenv
 
-try:
-    from execution_client import ExecutionClient
-except Exception:
-    ExecutionClient = None
+# ── FIX 1: Use shared auth utility ──
+from dashboard_auth import (
+    safe_load_dotenv,
+    get_trading_mode,
+    is_live_mode,
+    is_interactive_mode,
+    get_execution_client_cached,
+    get_wallet_address,
+    get_balance_info,
+)
+
+safe_load_dotenv()
 
 try:
     from polymarket_profile_client import PolymarketProfileClient
 except Exception:
     PolymarketProfileClient = None
 
-
-load_dotenv()
-
-st.set_page_config(page_title="Account Profile", page_icon="🪪", layout="wide")
+st.set_page_config(page_title="Account Profile", page_icon="N", layout="wide")
 
 
 def _safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
@@ -43,31 +57,6 @@ def _profile_name(profile: Dict[str, Any]) -> str:
         if value:
             return str(value)
     return "Unknown profile"
-
-
-def _derive_address_from_private_key() -> Optional[str]:
-    private_key = os.getenv("PRIVATE_KEY", "").strip()
-    if not private_key:
-        return None
-    try:
-        from eth_account import Account
-        acct = Account.from_key(private_key)
-        return str(acct.address)
-    except Exception:
-        return None
-
-
-def _get_candidate_address_with_source() -> tuple[Optional[str], str]:
-    public_address = os.getenv("POLYMARKET_PUBLIC_ADDRESS", "").strip()
-    if public_address:
-        return public_address, "env:POLYMARKET_PUBLIC_ADDRESS"
-    funder = os.getenv("POLYMARKET_FUNDER", "").strip()
-    if funder:
-        return funder, "env:POLYMARKET_FUNDER"
-    derived = _derive_address_from_private_key()
-    if derived:
-        return derived, "derived_from_private_key"
-    return None, "missing"
 
 
 def _load_local_live_activity() -> Dict[str, pd.DataFrame]:
@@ -111,60 +100,61 @@ def _latest_tradability_snapshot(orders_df: pd.DataFrame) -> Dict[str, Any]:
     }
 
 
+# ── FIX 2: Rewritten to use cached client ──
 def _read_live_client_state(local_activity: Optional[Dict[str, pd.DataFrame]] = None) -> Dict[str, Any]:
     result: Dict[str, Any] = {
-        "live_mode": os.getenv("TRADING_MODE", "paper").strip().lower() == "live",
+        "live_mode": is_live_mode(),
         "client_ok": False,
         "exchange_ok": False,
         "client_error": None,
         "server_time": None,
-        "funder": os.getenv("POLYMARKET_FUNDER", "").strip() or None,
-        "address_source": "missing",
+        "funder": get_wallet_address() or None,
+        "address_source": "dashboard_auth",
         "balance_source": "none",
         "collateral_balance": None,
         "collateral_allowance": None,
         "onchain_wallet_balance": None,
         "balance_mismatch": False,
     }
-    fallback_address, fallback_source = _get_candidate_address_with_source()
-    result["address_source"] = fallback_source
+
     if local_activity is not None:
         result.update(_latest_tradability_snapshot(local_activity.get("orders", pd.DataFrame())))
-    if ExecutionClient is None or not result["live_mode"]:
-        result["funder"] = result["funder"] or fallback_address
+
+    if not result["live_mode"]:
         return result
+
+    # ── FIX: Use cached client ──
+    client = get_execution_client_cached()
+    if client is None:
+        result["client_error"] = "ExecutionClient not available"
+        return result
+
     try:
-        client = ExecutionClient()
+        result["funder"] = getattr(client, "funder", None) or result["funder"]
+        result["address_source"] = "client_funder" if getattr(client, "funder", None) else "env_fallback"
+
         raw_client = getattr(client, "client", None)
-        client_funder = getattr(client, "funder", None)
-        result["funder"] = client_funder or result["funder"] or fallback_address
-        result["address_source"] = "client_funder" if client_funder else fallback_source
-        try:
-            if hasattr(client, "update_balance_allowance"):
-                client.update_balance_allowance(asset_type="COLLATERAL")
-        except Exception:
-            pass
         if raw_client is not None and hasattr(raw_client, "get_ok"):
-            result["exchange_ok"] = bool(raw_client.get_ok())
+            try:
+                result["exchange_ok"] = bool(raw_client.get_ok())
+            except Exception:
+                pass
         if raw_client is not None and hasattr(raw_client, "get_server_time"):
-            result["server_time"] = raw_client.get_server_time()
-        collat = client.get_balance_allowance(asset_type="COLLATERAL")
-        result["client_ok"] = True
-        result["balance_source"] = "api:COLLATERAL + wallet:onchain"
-        if isinstance(collat, dict):
-            result["collateral_balance"] = _safe_float(collat.get("balance", collat.get("amount")))
-            result["collateral_allowance"] = _safe_float(collat.get("allowance"))
-        try:
-            onchain = client.get_onchain_collateral_balance(wallet_address=result["funder"])
-            if isinstance(onchain, dict):
-                result["onchain_wallet_balance"] = _safe_float(onchain.get("total"))
-        except Exception:
-            pass
-        collat_balance = result.get("collateral_balance") or 0.0
-        onchain_balance = result.get("onchain_wallet_balance") or 0.0
-        result["balance_mismatch"] = onchain_balance > 0 and collat_balance <= 0
+            try:
+                result["server_time"] = raw_client.get_server_time()
+            except Exception:
+                pass
+
+        balance_info = get_balance_info()
+        result["client_ok"] = balance_info.get("error") is None
+        result["collateral_balance"] = balance_info["clob_balance"]
+        result["onchain_wallet_balance"] = balance_info["onchain_balance"]
+        result["balance_source"] = f"api + onchain ({balance_info['source']})"
+        result["balance_mismatch"] = balance_info["onchain_balance"] > 0 and balance_info["clob_balance"] <= 0
+
     except Exception as exc:
         result["client_error"] = str(exc)
+
     return result
 
 
@@ -226,43 +216,30 @@ def _render_top_status(live_state: Dict[str, Any], address: Optional[str], bundl
     status_bits: List[str] = []
     if live_state.get("live_mode"):
         if live_state.get("client_ok"):
-            status_bits.append("✅ live client connected (real API balance call succeeded)")
+            status_bits.append("[OK] live client connected")
         elif live_state.get("client_error"):
-            status_bits.append("❌ live client failed")
+            status_bits.append("[FAIL] live client failed")
         else:
-            status_bits.append("⚪ live mode active")
+            status_bits.append("[--] live mode active")
     else:
-        status_bits.append("ℹ️ paper mode")
+        status_bits.append("[i] paper mode")
+
+    if is_interactive_mode():
+        status_bits.append("[i] interactive auth")
 
     if live_state.get("exchange_ok"):
-        status_bits.append("✅ exchange reachable")
-    elif live_state.get("client_ok"):
-        status_bits.append("⚠️ exchange check unavailable")
+        status_bits.append("[OK] exchange reachable")
 
-    address_source = live_state.get("address_source", "missing")
     if address:
-        if address_source == "client_funder":
-            status_bits.append("✅ wallet address from live client")
-        else:
-            status_bits.append(f"⚠️ wallet address fallback ({address_source})")
+        status_bits.append(f"[OK] wallet: {address[:10]}...")
     else:
-        status_bits.append("❌ wallet address missing")
-
-    tradable_status = live_state.get("tradable_status")
-    if tradable_status == "YES":
-        status_bits.append("✅ latest local tradability check passed")
-    elif tradable_status == "NO":
-        status_bits.append("⚠️ latest local tradability check failed")
+        status_bits.append("[FAIL] wallet address missing")
 
     if bundle is not None:
         if bundle.get("profile"):
-            status_bits.append("✅ public profile fetched")
-        else:
-            status_bits.append("⚠️ public profile not found")
+            status_bits.append("[OK] public profile fetched")
         if bundle.get("positions"):
-            status_bits.append("✅ positions fetched")
-        if bundle.get("activity"):
-            status_bits.append("✅ recent activity fetched")
+            status_bits.append(f"[OK] {len(bundle['positions'])} positions")
 
     if live_state.get("client_ok"):
         st.success(" | ".join(status_bits))
@@ -271,21 +248,22 @@ def _render_top_status(live_state: Dict[str, Any], address: Optional[str], bundl
 
 
 def main() -> None:
-    st.title("🪪 Polymarket Account Profile")
-    st.caption("Strict live truth view: real client connectivity, API-fetched collateral balance, address source, and latest local tradability signal.")
+    st.title("Polymarket Account Profile")
+    st.caption("Live truth view: real client connectivity, API-fetched collateral balance, address source, and latest local tradability signal.")
 
     local_activity = _load_local_live_activity()
     live_state = _read_live_client_state(local_activity=local_activity)
     default_address = live_state.get("funder") or ""
 
+    # ── FIX 8: Don't block paper mode entirely — show what we can ──
     if not live_state.get("live_mode"):
-        st.error("Live mode is not active. Set TRADING_MODE=live and restart the dashboard.")
-        return
+        st.warning("Live mode is not active. Some features require TRADING_MODE=live.")
+        st.caption("Showing available local data and public profile lookup.")
 
     address = st.text_input(
         "Wallet / profile address",
         value=default_address,
-        help="Strict mode: connection status is based on real live client calls. Address may still come from client/env/derived fallback and is labeled below.",
+        help="Enter your Polymarket wallet address to view public profile data.",
     ).strip()
 
     bundle = None
@@ -295,40 +273,36 @@ def main() -> None:
     _render_top_status(live_state, address, bundle)
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Trading mode", "live" if live_state.get("live_mode") else "paper")
+    c1.metric("Trading mode", get_trading_mode())
     c2.metric("Client connected", "YES" if live_state.get("client_ok") else "NO")
-    c3.metric("Exchange reachable", "YES" if live_state.get("exchange_ok") else "NO")
-    c4.metric("Balance source", "On-chain USDC + CLOB/API" if live_state.get("live_mode") else (live_state.get("balance_source") or "none"))
+    c3.metric("Exchange reachable", "YES" if live_state.get("exchange_ok") else "N/A")
+    c4.metric("Balance source", live_state.get("balance_source") or "none")
 
     c5, c6, c7, c8 = st.columns(4)
-    c5.metric("Wallet address", address if address else "missing")
+    c5.metric("Wallet address", address[:16] + "..." if len(address) > 16 else (address or "missing"))
     c6.metric("Address source", live_state.get("address_source") or "missing")
-    c7.metric("Available to Trade (CLOB/API)", f"${live_state['collateral_balance']:.2f}" if live_state.get("collateral_balance") is not None else "N/A")
+    c7.metric("CLOB/API Balance", f"${live_state['collateral_balance']:.2f}" if live_state.get("collateral_balance") is not None else "N/A")
     c8.metric("On-chain USDC", f"${live_state['onchain_wallet_balance']:.2f}" if live_state.get("onchain_wallet_balance") is not None else "N/A")
 
     lc1, lc2, lc3, lc4 = st.columns(4)
     lc1.metric("Local live orders", len(local_activity.get("orders", pd.DataFrame())))
     lc2.metric("Local live fills", len(local_activity.get("fills", pd.DataFrame())))
     lc3.metric("Latest tradability", live_state.get("tradable_status") or "N/A")
-    lc4.metric("Collateral allowance", f"{live_state['collateral_allowance']:.2f}" if live_state.get("collateral_allowance") is not None else "N/A")
+    lc4.metric("Auth mode", "interactive" if is_interactive_mode() else ".env file" if os.getenv("PRIVATE_KEY") else "none")
 
     if live_state.get("balance_mismatch"):
-        st.warning("On-chain USDC is present, but Available to Trade from the CLOB/API is still zero for this account context.")
+        st.warning("On-chain USDC is present, but Available to Trade from the CLOB/API is still zero.")
     if live_state.get("server_time") is not None:
         st.caption(f"Server time: {live_state['server_time']}")
-    if live_state.get("tradable_reason"):
-        st.caption(f"Latest tradability detail: {live_state['tradable_reason']}")
-    if live_state.get("quoted_price") is not None or live_state.get("quoted_spread") is not None:
-        st.caption(f"Latest quoted price/spread: {live_state.get('quoted_price', 'N/A')} / {live_state.get('quoted_spread', 'N/A')}")
     if live_state.get("client_error"):
         st.error(f"Live client error: {live_state['client_error']}")
 
     if not address:
-        st.warning("No address available yet. Set POLYMARKET_PUBLIC_ADDRESS or POLYMARKET_FUNDER, then refresh this page.")
+        st.info("No address available. Set POLYMARKET_PUBLIC_ADDRESS or POLYMARKET_FUNDER, then refresh.")
         return
 
     if bundle is None:
-        st.info("No profile request has been made yet.")
+        st.info("Enter an address and press Enter to fetch profile data.")
         return
 
     if bundle.get("error"):
@@ -343,44 +317,40 @@ def main() -> None:
     with left:
         st.subheader("Profile summary")
         name = _profile_name(profile)
-        verified = bool(profile.get("verifiedBadge"))
-        x_username = profile.get("xUsername")
-        bio = profile.get("bio")
-        proxy_wallet = profile.get("proxyWallet")
         profile_rows = [
             {"field": "Display name", "value": name},
-            {"field": "Verified", "value": "Yes" if verified else "No"},
-            {"field": "Proxy wallet", "value": proxy_wallet or "N/A"},
-            {"field": "X username", "value": x_username or "N/A"},
-            {"field": "Bio", "value": bio or "N/A"},
+            {"field": "Verified", "value": "Yes" if profile.get("verifiedBadge") else "No"},
+            {"field": "Proxy wallet", "value": profile.get("proxyWallet") or "N/A"},
+            {"field": "X username", "value": profile.get("xUsername") or "N/A"},
+            {"field": "Bio", "value": profile.get("bio") or "N/A"},
             {"field": "Total value", "value": bundle.get("value") if bundle.get("value") is not None else "N/A"},
             {"field": "Markets traded", "value": bundle.get("markets_traded") if bundle.get("markets_traded") is not None else "N/A"},
-            {"field": "Open positions count", "value": len(positions)},
-            {"field": "Recent activity count", "value": len(activity)},
+            {"field": "Open positions", "value": len(positions)},
+            {"field": "Recent activity", "value": len(activity)},
         ]
         st.dataframe(pd.DataFrame(profile_rows), use_container_width=True, hide_index=True)
 
     with right:
         st.subheader("Confirmation")
         if profile:
-            st.success("Public profile endpoint returned data for this address.")
+            st.success("Public profile endpoint returned data.")
         else:
-            st.warning("No public profile payload was returned for this address.")
+            st.warning("No public profile payload returned.")
         if positions:
-            st.success("Positions Data API endpoint returned data.")
+            st.success("Positions Data API returned data.")
         else:
-            st.info("No open positions found, or Data API /positions returned no rows.")
+            st.info("No open positions found.")
         if activity:
-            st.success("Activity endpoint returned recent rows.")
+            st.success("Activity endpoint returned rows.")
         else:
-            st.info("No recent activity rows returned.")
+            st.info("No recent activity rows.")
         if bundle.get("errors"):
             st.warning("Some endpoint calls failed:")
             for item in bundle["errors"]:
                 st.caption(item)
 
     if positions:
-        st.subheader("Open positions (Data API /positions)")
+        st.subheader("Open positions (Data API)")
         pos_df = pd.DataFrame(positions)
         keep_cols = [c for c in ["title", "outcome", "size", "avgPrice", "curPrice", "currentValue", "cashPnl", "percentPnl", "realizedPnl", "endDate"] if c in pos_df.columns]
         st.dataframe(pos_df[keep_cols] if keep_cols else pos_df, use_container_width=True, hide_index=True)

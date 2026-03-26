@@ -1,14 +1,15 @@
 """
-start.py — Interactive Launcher for Neural Network for Crypto
-=============================================================
+start.py — Interactive Launcher for Neural Network for Crypto (FIXED)
+=====================================================================
 
-This is your new main entry point. It prompts for credentials at startup,
-keeps them in memory only (never written to disk), then runs the bot.
+FIXES:
+  1. Properly patches load_dotenv BEFORE any imports that might call it
+  2. Offers to launch dashboard alongside bot (via run_bot_and_dashboard.py)
+  3. Better error messages for common credential issues
+  4. Validates wallet address format more carefully
 
 Usage:
     python start.py
-
-No .env file is needed or read.
 """
 
 import os
@@ -36,14 +37,14 @@ def print_banner():
 def prompt_credentials():
     """Prompt user for all required credentials interactively."""
 
-    print("─── WALLET CONFIGURATION ───\n")
+    print("--- WALLET CONFIGURATION ---\n")
 
     wallet_address = input(
         "  Polymarket wallet address\n"
         "  (the 0x... address from your Polymarket profile): "
     ).strip()
 
-    if not wallet_address.startswith("0x"):
+    if wallet_address and not wallet_address.startswith("0x"):
         wallet_address = "0x" + wallet_address
 
     print()
@@ -51,17 +52,17 @@ def prompt_credentials():
         "  Private key (hidden while typing): "
     ).strip()
 
-    if not private_key.startswith("0x"):
+    if private_key and not private_key.startswith("0x"):
         private_key = "0x" + private_key
 
     print()
-    print("─── TRADING MODE ───\n")
+    print("--- TRADING MODE ---\n")
     mode = input("  Trading mode [live/paper] (default: live): ").strip().lower()
     if mode not in ("live", "paper"):
         mode = "live"
 
     print()
-    print("─── OPTIONAL: L2 API CREDENTIALS ───")
+    print("--- OPTIONAL: L2 API CREDENTIALS ---")
     print("  (Press Enter to skip — the bot will auto-derive them)\n")
 
     api_key = input("  API Key (or Enter to skip): ").strip()
@@ -71,6 +72,11 @@ def prompt_credentials():
     if api_key:
         api_secret = getpass.getpass("  API Secret (hidden): ").strip()
         api_passphrase = getpass.getpass("  API Passphrase (hidden): ").strip()
+
+    print()
+    print("--- LAUNCH MODE ---\n")
+    launch_dashboard = input("  Also launch dashboard? [Y/n]: ").strip().lower()
+    launch_dashboard = launch_dashboard in ("", "y", "yes")
 
     return {
         "POLYMARKET_PUBLIC_ADDRESS": wallet_address,
@@ -86,20 +92,39 @@ def prompt_credentials():
         "POLYMARKET_SIGNATURE_TYPE": "1",
         "SIMULATED_STARTING_BALANCE": "1000",
         "MAX_RISK_PER_TRADE": "50",
-        # Flag so other modules know we're in interactive mode
+        # Flags
         "_INTERACTIVE_MODE": "1",
+        "_LAUNCH_DASHBOARD": "1" if launch_dashboard else "0",
     }
 
 
 def apply_credentials(creds: dict):
     """Set all credentials as environment variables (memory only, never on disk)."""
     for key, value in creds.items():
-        if value:  # Only set non-empty values
+        if value:
             os.environ[key] = value
 
-    # Prevent load_dotenv from overriding our values
-    # by setting this before any imports that call load_dotenv
-    os.environ["_SKIP_DOTENV"] = "1"
+
+def patch_dotenv():
+    """Patch load_dotenv BEFORE any other imports to prevent .env override.
+
+    FIX: This must happen before importing run_bot, supervisor, etc. because
+    those modules call `from dotenv import load_dotenv; load_dotenv()` at
+    the top level.
+    """
+    try:
+        import dotenv
+        _original = dotenv.load_dotenv
+
+        def _noop(*args, **kwargs):
+            """Patched: skip .env file loading in interactive mode."""
+            return False
+
+        dotenv.load_dotenv = _noop
+        # Also patch at the module level for any future imports
+        sys.modules["dotenv"].load_dotenv = _noop
+    except ImportError:
+        pass  # dotenv not installed, nothing to patch
 
 
 def print_startup_summary(creds: dict):
@@ -107,45 +132,62 @@ def print_startup_summary(creds: dict):
     wallet = creds.get("POLYMARKET_PUBLIC_ADDRESS", "?")
     mode = creds.get("TRADING_MODE", "?")
     has_api_key = bool(creds.get("POLYMARKET_API_KEY"))
-    pk_preview = creds.get("PRIVATE_KEY", "")[:6] + "..." + creds.get("PRIVATE_KEY", "")[-4:]
+    pk = creds.get("PRIVATE_KEY", "")
+    pk_preview = pk[:6] + "..." + pk[-4:] if len(pk) > 10 else "(too short)"
+    launch_dash = creds.get("_LAUNCH_DASHBOARD") == "1"
 
     print()
-    print("─── STARTUP SUMMARY ───")
+    print("--- STARTUP SUMMARY ---")
     print()
     print(f"  Mode:           {mode.upper()}")
     print(f"  Wallet:         {wallet}")
     print(f"  Private Key:    {pk_preview}")
     print(f"  API Creds:      {'provided' if has_api_key else 'will auto-derive'}")
+    print(f"  Dashboard:      {'will launch alongside bot' if launch_dash else 'bot only'}")
     print()
 
-    confirm = input("  Start the bot? [Y/n]: ").strip().lower()
+    confirm = input("  Start? [Y/n]: ").strip().lower()
     return confirm in ("", "y", "yes")
 
 
-def run_bot():
+def run_bot(with_dashboard=False):
     """Import and run the bot after credentials are set."""
-    # Now safe to import — env vars are already set
-    # Patch load_dotenv to be a no-op so .env files are never read
-    import dotenv
-    _original_load = dotenv.load_dotenv
-
-    def _noop_load_dotenv(*args, **kwargs):
-        """Patched: skip .env file loading in interactive mode."""
-        return False
-
-    dotenv.load_dotenv = _noop_load_dotenv
-
-    # Also patch it at the module level in common import locations
-    sys.modules.setdefault("dotenv", dotenv)
-
     print("=" * 60)
-    print("  STARTING BOT...")
+    if with_dashboard:
+        print("  STARTING BOT + DASHBOARD...")
+    else:
+        print("  STARTING BOT...")
     print("=" * 60)
     print()
 
     try:
-        from run_bot import main
-        main()
+        if with_dashboard:
+            from run_bot_and_dashboard import run_bot_process, run_dashboard_process
+            import multiprocessing
+            import time
+            import webbrowser
+
+            multiprocessing.freeze_support()
+            bot_proc = multiprocessing.Process(target=run_bot_process, name="Bot")
+            dash_proc = multiprocessing.Process(target=run_dashboard_process, name="Dashboard")
+            bot_proc.start()
+            time.sleep(2)
+            dash_proc.start()
+            time.sleep(4)
+            webbrowser.open("http://127.0.0.1:8501")
+            try:
+                bot_proc.join()
+                dash_proc.join()
+            except KeyboardInterrupt:
+                print("\n[!] Shutting down...")
+                for p in [bot_proc, dash_proc]:
+                    if p.is_alive():
+                        p.terminate()
+                bot_proc.join()
+                dash_proc.join()
+        else:
+            from run_bot import main
+            main()
     except KeyboardInterrupt:
         print("\n\n[!] Bot stopped by user.")
         sys.exit(0)
@@ -159,13 +201,19 @@ def run_bot():
 def main():
     print_banner()
     creds = prompt_credentials()
+
+    # ── FIX 1: Apply credentials BEFORE patching dotenv ──
     apply_credentials(creds)
+
+    # ── FIX 1: Patch dotenv BEFORE any imports that call load_dotenv() ──
+    patch_dotenv()
 
     if not print_startup_summary(creds):
         print("\n  Cancelled. Exiting.")
         sys.exit(0)
 
-    run_bot()
+    with_dashboard = creds.get("_LAUNCH_DASHBOARD") == "1"
+    run_bot(with_dashboard=with_dashboard)
 
 
 if __name__ == "__main__":

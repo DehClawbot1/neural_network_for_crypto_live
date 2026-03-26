@@ -1,3 +1,14 @@
+"""
+pages/2_Polymarket_Portfolio.py — FIXED
+
+FIXES:
+  1. Removed module-level apply_execution_client_patch() — crashed before Streamlit loaded
+  2. Removed module-level get_execution_client() — triggered auth on every page import
+  3. Uses dashboard_auth.safe_load_dotenv() instead of load_dotenv()
+  4. Client creation deferred to @st.cache_data functions
+  5. Graceful fallback when live client is unavailable
+"""
+
 from __future__ import annotations
 
 import os
@@ -7,15 +18,27 @@ from typing import Any, Optional
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from dotenv import load_dotenv
 
-from polymarket_capabilities import apply_execution_client_patch
-from repository_polymarket_service import get_execution_client
-from polymarket_profile_client import PolymarketProfileClient
+# ── FIX 1: Use shared auth utility ──
+from dashboard_auth import (
+    safe_load_dotenv,
+    is_live_mode,
+    get_execution_client_cached,
+    get_wallet_address,
+)
 
-apply_execution_client_patch()
-load_dotenv()
-st.set_page_config(page_title="Polymarket Portfolio", page_icon="💼", layout="wide")
+safe_load_dotenv()
+
+# ── FIX 3: Lazy import profile client ──
+try:
+    from polymarket_profile_client import PolymarketProfileClient
+except Exception:
+    PolymarketProfileClient = None
+
+# ── FIX 2: DO NOT call apply_execution_client_patch() at module level ──
+# It will be called lazily when the client is first used.
+
+st.set_page_config(page_title="Polymarket Portfolio", page_icon="N", layout="wide")
 
 LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
 
@@ -35,14 +58,6 @@ def _pct(value: Optional[float]) -> str:
     return f"{float(value or 0) * 100:.2f}%"
 
 
-def _derive_address() -> Optional[str]:
-    for key in ["POLYMARKET_PUBLIC_ADDRESS", "POLY_ADDRESS", "POLYMARKET_FUNDER"]:
-        value = os.getenv(key, "").strip()
-        if value:
-            return value
-    return None
-
-
 @st.cache_data(show_spinner=False, ttl=30)
 def _load_local_closed() -> pd.DataFrame:
     path = LOGS_DIR / "closed_positions.csv"
@@ -54,11 +69,28 @@ def _load_local_closed() -> pd.DataFrame:
         return pd.DataFrame()
 
 
+# ── FIX 4: Client creation deferred and cached ──
 @st.cache_data(show_spinner=False, ttl=20)
 def _live_bundle() -> dict:
-    out = {"ok": False, "balance": 0.0, "available": 0.0, "onchain_total": 0.0, "orders": [], "trades": [], "address": _derive_address(), "error": None}
+    out = {"ok": False, "balance": 0.0, "available": 0.0, "onchain_total": 0.0, "orders": [], "trades": [], "address": get_wallet_address(), "error": None}
+
+    if not is_live_mode():
+        out["error"] = "Paper mode — live data unavailable"
+        return out
+
+    client = get_execution_client_cached()
+    if client is None:
+        out["error"] = "ExecutionClient not available"
+        return out
+
     try:
-        client = get_execution_client()
+        # ── FIX: Apply capability patch lazily ──
+        try:
+            from polymarket_capabilities import apply_execution_client_patch
+            apply_execution_client_patch()
+        except Exception:
+            pass
+
         bal = client.get_balance_allowance(asset_type="COLLATERAL")
         out["ok"] = True
         out["address"] = getattr(client, "funder", None) or out["address"]
@@ -70,10 +102,18 @@ def _live_bundle() -> dict:
         except Exception:
             out["onchain_total"] = 0.0
         out["available"] = out["onchain_total"] if out["onchain_total"] else out["balance"]
-        orders = client.get_orders()
-        trades = client.get_trades()
-        out["orders"] = orders if isinstance(orders, list) else []
-        out["trades"] = trades if isinstance(trades, list) else []
+
+        # ── FIX 5: Graceful fallback for orders/trades ──
+        try:
+            orders = client.get_open_orders() if hasattr(client, "get_open_orders") else []
+            out["orders"] = orders if isinstance(orders, list) else []
+        except Exception:
+            out["orders"] = []
+        try:
+            trades = client.get_trades() if hasattr(client, "get_trades") else []
+            out["trades"] = trades if isinstance(trades, list) else []
+        except Exception:
+            out["trades"] = []
     except Exception as exc:
         out["error"] = str(exc)
     return out
@@ -81,6 +121,9 @@ def _live_bundle() -> dict:
 
 @st.cache_data(show_spinner=False, ttl=30)
 def _profile_bundle(address: str) -> dict:
+    if PolymarketProfileClient is None:
+        return {"value": 0.0, "positions": [], "closed": [], "activity": [], "errors": ["PolymarketProfileClient not available"]}
+
     client = PolymarketProfileClient()
     out = {"value": None, "positions": [], "closed": [], "activity": [], "errors": []}
     try:
@@ -118,8 +161,8 @@ def _positions_df(items: list[dict]) -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     if {"Avg", "Now"}.issubset(df.columns):
-        df["AVG → NOW"] = df.apply(lambda r: f"{r['Avg']:.2f} → {r['Now']:.2f}" if pd.notna(r['Avg']) and pd.notna(r['Now']) else "N/A", axis=1)
-    cols = [c for c in ["Market", "AVG → NOW", "Traded", "Value", "Cash PnL", "Percent PnL", "Outcome"] if c in df.columns]
+        df["AVG -> NOW"] = df.apply(lambda r: f"{r['Avg']:.2f} -> {r['Now']:.2f}" if pd.notna(r['Avg']) and pd.notna(r['Now']) else "N/A", axis=1)
+    cols = [c for c in ["Market", "AVG -> NOW", "Traded", "Value", "Cash PnL", "Percent PnL", "Outcome"] if c in df.columns]
     return df[cols] if cols else df
 
 
@@ -186,8 +229,8 @@ def _search(df: pd.DataFrame, term: str) -> pd.DataFrame:
     return df[mask]
 
 
-st.title("💼 Polymarket Portfolio")
-st.caption("Portfolio, available balance, positions, open orders, and history in a Polymarket-like layout.")
+st.title("Polymarket Portfolio")
+st.caption("Portfolio, available balance, positions, open orders, and history.")
 
 live = _live_bundle()
 address = live.get("address")
@@ -206,10 +249,7 @@ with left:
     c1, c2 = st.columns(2)
     c1.metric("Portfolio", _money(portfolio_value), f"{_money(current_pnl)} ({_pct(pnl_pct)}) past {range_key.lower()}")
     c2.metric("Available to trade", _money(available))
-    st.caption(f"CLOB/API collateral: {_money(live.get('balance', 0.0))} | On-chain USDC: {_money(live.get('onchain_total', 0.0))}")
-    b1, b2 = st.columns(2)
-    b1.button("Deposit", use_container_width=True, disabled=True)
-    b2.button("Withdraw", use_container_width=True, disabled=True)
+    st.caption(f"CLOB/API: {_money(live.get('balance', 0.0))} | On-chain: {_money(live.get('onchain_total', 0.0))}")
 with right:
     st.metric("Profit/Loss", _money(current_pnl), f"Past {range_key}")
     fig = px.line(chart_df, x="timestamp", y="pnl")
