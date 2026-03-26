@@ -9,7 +9,6 @@ class TradingConfig:
     PAPER_TRAILING_STOP = 0.08
 
     # ── FIX: Lowered from 0.85 to 0.55
-    #    0.85 was blocking every signal; new models need trades to learn from
     MIN_CONVICTION_FOR_READY = 0.55
 
     # Audit Probability Buckets for Calibration
@@ -21,3 +20,31 @@ class TradingConfig:
 
     # ── NEW: Retrain after this many closed trades
     RETRAIN_AFTER_TRADES = 5
+
+    # ── NEW: Money Management Config ──
+    # Maximum % of available balance to risk per single trade
+    MAX_RISK_PER_TRADE_PCT = 0.05  # 5% of balance per trade
+
+    # Minimum bet size in USDC (below this, skip the trade)
+    MIN_BET_USDC = 0.50  # $0.50 minimum
+
+    # Maximum bet size in USDC (cap regardless of balance)
+    MAX_BET_USDC = 20.0  # $20 max per trade
+
+    # Default bet for high confidence (>0.70) as % of balance
+    HIGH_CONFIDENCE_BET_PCT = 0.05  # 5%
+
+    # Default bet for medium confidence (0.50-0.70) as % of balance
+    MEDIUM_CONFIDENCE_BET_PCT = 0.02  # 2%
+
+    # Default bet for low confidence (<0.50) as % of balance
+    LOW_CONFIDENCE_BET_PCT = 0.01  # 1%
+
+    # Use market orders (FOK) instead of limit orders for live trading
+    USE_MARKET_ORDERS = True
+
+    # Maximum number of concurrent open positions
+    MAX_CONCURRENT_POSITIONS = 5
+
+    # Maximum total exposure as % of balance
+    MAX_TOTAL_EXPOSURE_PCT = 0.25  # 25% of balance across all positions

@@ -24,6 +24,11 @@ class OrderManager:
     """
     Live-test order manager.
     Tracks submitted orders and reconciles their local status over time.
+
+    FIXES APPLIED:
+      - Balance normalization: uses _normalize_usdc_balance() from execution_client
+      - Market order support: submit_market_entry() for FOK orders
+      - Better balance diagnostics logging
     """
 
     def __init__(self, logs_dir="logs"):
@@ -37,6 +42,63 @@ class OrderManager:
 
     def _append(self, path: Path, row: dict):
         pd.DataFrame([row]).to_csv(path, mode="a", header=not path.exists(), index=False)
+
+    def _normalize_balance(self, raw_balance):
+        """
+        FIX: Normalize USDC balance from API response.
+        The CLOB API returns balance in microdollars (1e6 = $1.00).
+        Example: balance='5000000' means $5.00
+
+        Uses the same logic as execution_client._normalize_usdc_balance()
+        """
+        if raw_balance is None:
+            return 0.0
+        try:
+            val = float(raw_balance)
+        except (TypeError, ValueError):
+            return 0.0
+        # If balance looks like raw microdollars (>= 1_000_000 and is integer-like),
+        # convert to dollars. Otherwise assume it's already in dollars.
+        if val >= 1_000_000 and val == int(val):
+            return val / 1e6
+        return val
+
+    def _get_available_balance(self, asset_type="COLLATERAL", token_id=None):
+        """
+        FIX: Get properly normalized balance with diagnostic logging.
+        Tries CLOB API first, then on-chain fallback.
+        """
+        # Get CLOB/API balance
+        readiness = self.check_readiness(asset_type=asset_type, token_id=token_id)
+        raw_balance = None
+        if isinstance(readiness, dict):
+            for key in ["balance", "available", "available_balance", "amount"]:
+                if readiness.get(key) is not None:
+                    raw_balance = readiness[key]
+                    break
+
+        normalized_balance = self._normalize_balance(raw_balance)
+
+        # Log the raw vs normalized for diagnostics
+        logging.info(
+            "Balance check: raw=%s normalized=$%.2f (asset_type=%s)",
+            raw_balance, normalized_balance, asset_type
+        )
+
+        # On-chain fallback for COLLATERAL
+        onchain_balance = 0.0
+        if str(asset_type).upper() == "COLLATERAL":
+            try:
+                onchain = self.client.get_onchain_collateral_balance()
+                onchain_balance = float((onchain or {}).get("total", 0.0) or 0.0)
+                logging.info("On-chain balance: $%.2f", onchain_balance)
+            except Exception as exc:
+                logging.warning("On-chain collateral lookup failed: %s", exc)
+
+        available = max(normalized_balance, onchain_balance)
+        logging.info("Available to trade: $%.2f (CLOB=$%.2f, onchain=$%.2f)",
+                      available, normalized_balance, onchain_balance)
+        return available, readiness
 
     def check_readiness(self, asset_type=None, token_id=None):
         try:
@@ -59,19 +121,13 @@ class OrderManager:
         return bids, asks
 
     def _get_market_context(self, token_id, side):
-        """Get orderbook / price / spread context for tradability check.
-
-        BUG FIX: Wrapped each call in a capability check so we don't crash
-        if the PolymarketCapabilityMixin wasn't applied.  Falls back to
-        marking as tradable when we can't verify (better than always rejecting).
-        """
+        """Get orderbook / price / spread context for tradability check."""
         context = {}
 
         try:
             if hasattr(self.client, "get_orderbook"):
                 orderbook = self.client.get_orderbook(token_id)
             else:
-                # Fall back to the raw client's get_order_book if available
                 raw_client = getattr(self.client, "client", None)
                 if raw_client and hasattr(raw_client, "get_order_book"):
                     orderbook = raw_client.get_order_book(token_id)
@@ -94,7 +150,6 @@ class OrderManager:
                 context["tradable"] = False
                 context["reason"] = "orderbook_not_found"
             else:
-                # Network/temporary error — don't block the trade
                 context["tradable"] = True
                 context["reason"] = "orderbook_check_failed_allowing"
             return context
@@ -112,6 +167,135 @@ class OrderManager:
             context["spread_error"] = str(exc)
 
         return context
+
+    def submit_market_entry(self, token_id, amount, side="BUY", condition_id=None, outcome_side=None, spread=None, open_orders=0, daily_pnl=0.0):
+        """
+        FIX: NEW METHOD - Submit a Fill-or-Kill market order.
+        This is the correct approach for fast-moving Bitcoin markets.
+
+        'amount' is the dollar amount to spend (e.g. 1.0 = $1.00)
+
+        Uses: MarketOrderArgs + OrderType.FOK (matching tutorial pattern)
+        """
+        normalized_side = str(side).upper()
+        try:
+            amount = float(amount)
+        except Exception:
+            amount = None
+
+        if amount is None or amount <= 0.0:
+            row = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "order_id": None,
+                "token_id": token_id,
+                "condition_id": condition_id,
+                "outcome_side": outcome_side,
+                "order_side": side,
+                "amount": amount,
+                "order_type": "FOK",
+                "execution_style": "market",
+                "status": "REJECTED",
+                "reason": "invalid_amount",
+            }
+            self._append(self.orders_file, row)
+            return row, None
+
+        # Risk check
+        decision = self.risk.pre_trade_check(
+            token_id=token_id, price=0.5, size=amount,
+            spread=spread, open_orders=open_orders, daily_pnl=daily_pnl
+        )
+        if not decision.allowed:
+            row = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "order_id": None,
+                "token_id": token_id,
+                "condition_id": condition_id,
+                "outcome_side": outcome_side,
+                "order_side": side,
+                "amount": amount,
+                "order_type": "FOK",
+                "execution_style": "market",
+                "status": "REJECTED",
+                "reason": decision.reason,
+            }
+            self._append(self.orders_file, row)
+            return row, None
+
+        # Balance check with proper normalization
+        available, readiness = self._get_available_balance(asset_type="COLLATERAL")
+
+        if available < amount:
+            row = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "order_id": None,
+                "token_id": token_id,
+                "condition_id": condition_id,
+                "outcome_side": outcome_side,
+                "order_side": side,
+                "amount": amount,
+                "order_type": "FOK",
+                "execution_style": "market",
+                "status": "REJECTED",
+                "reason": "insufficient_funds",
+                "available_balance": available,
+                "raw_readiness": str(readiness)[:200],
+            }
+            self._append(self.orders_file, row)
+            logging.warning(
+                "Market order rejected: insufficient_funds. "
+                "Want $%.2f but only $%.2f available. Raw API: %s",
+                amount, available, str(readiness)[:200]
+            )
+            return row, None
+
+        # Submit FOK market order
+        try:
+            response = self.client.create_and_post_market_order(
+                token_id=token_id,
+                amount=amount,
+                side=side,
+                order_type="FOK",
+            )
+        except Exception as exc:
+            self.risk.record_failed_order()
+            row = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "order_id": None,
+                "token_id": token_id,
+                "condition_id": condition_id,
+                "outcome_side": outcome_side,
+                "order_side": side,
+                "amount": amount,
+                "order_type": "FOK",
+                "execution_style": "market",
+                "status": "FAILED",
+                "reason": str(exc),
+            }
+            self._append(self.orders_file, row)
+            logging.error("Market order failed: %s", exc)
+            return row, None
+
+        order_id = response.get("orderID") or response.get("order_id") or response.get("id")
+        row = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "order_id": order_id,
+            "token_id": token_id,
+            "condition_id": condition_id,
+            "outcome_side": outcome_side,
+            "order_side": side,
+            "amount": amount,
+            "order_type": "FOK",
+            "execution_style": "market",
+            "status": response.get("status", "SUBMITTED"),
+        }
+        self._append(self.orders_file, row)
+        self.db.execute(
+            "INSERT OR REPLACE INTO orders (order_id, token_id, condition_id, outcome_side, order_side, price, size, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (order_id, token_id, condition_id, outcome_side, side, 0.0, amount, row["status"], row["timestamp"]),
+        )
+        logging.info("Market order submitted: token=%s amount=$%.2f order_id=%s", token_id, amount, order_id)
+        return row, response
 
     def submit_entry(self, token_id, price, size, side="BUY", condition_id=None, outcome_side=None, spread=None, open_orders=0, daily_pnl=0.0, order_type="GTC", post_only=False, execution_style="maker"):
         normalized_side = str(side).upper()
@@ -145,31 +329,37 @@ class OrderManager:
             self._append(self.orders_file, row)
             return row, None
 
-        readiness = self.check_readiness(asset_type="COLLATERAL") if normalized_side == "BUY" else self.check_readiness(asset_type="CONDITIONAL", token_id=token_id)
-        available_balance = float(readiness.get("balance", readiness.get("amount", 0.0))) if isinstance(readiness, dict) else None
+        # ── FIX: Use normalized balance check ──
         if normalized_side == "BUY":
-            fallback_detail = None
-            fallback_total = 0.0
-            try:
-                fallback_detail = self.client.get_onchain_collateral_balance()
-                fallback_total = float((fallback_detail or {}).get("total", 0.0) or 0.0)
-            except Exception as exc:
-                logging.warning("On-chain collateral lookup failed: %s", exc)
-            available_balance = max(float(available_balance or 0.0), fallback_total)
-            if not readiness:
+            available_balance, readiness = self._get_available_balance(asset_type="COLLATERAL")
+
+            if readiness is None and available_balance <= 0:
                 row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": "missing_readiness"}
                 self._append(self.orders_file, row)
                 return row, None
-            if (available_balance or 0.0) < float(notional_usdc):
-                row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "size_usdc": notional_usdc, "order_size_shares": order_size_shares, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": "insufficient_funds", "available_balance": available_balance, "onchain_fallback_total": fallback_total, "onchain_fallback_wallet": (fallback_detail or {}).get("wallet") if isinstance(fallback_detail, dict) else None}
+
+            if available_balance < float(notional_usdc):
+                row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "size_usdc": notional_usdc, "order_size_shares": order_size_shares, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": "insufficient_funds", "available_balance": available_balance}
                 self._append(self.orders_file, row)
+                logging.warning(
+                    "Limit order rejected: want $%.2f but only $%.2f available",
+                    notional_usdc, available_balance
+                )
                 return row, None
         else:
-            if not readiness:
+            readiness = self.check_readiness(asset_type="CONDITIONAL", token_id=token_id)
+            available_balance = 0.0
+            if isinstance(readiness, dict):
+                for key in ["balance", "available", "available_balance", "amount"]:
+                    if readiness.get(key) is not None:
+                        available_balance = self._normalize_balance(readiness[key])
+                        break
+
+            if readiness is None and available_balance <= 0:
                 row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "size_usdc": notional_usdc, "order_size_shares": order_size_shares, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": "missing_token_readiness"}
                 self._append(self.orders_file, row)
                 return row, None
-            if (available_balance or 0.0) < float(order_size_shares):
+            if available_balance < float(order_size_shares):
                 row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "size_usdc": notional_usdc, "order_size_shares": order_size_shares, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": "insufficient_token_inventory", "available_token_balance": available_balance}
                 self._append(self.orders_file, row)
                 return row, None
@@ -193,7 +383,6 @@ class OrderManager:
                 "execution_style": execution_style,
                 "status": "REJECTED",
                 "reason": market_context.get("reason", "non_tradable_orderbook"),
-                "readiness": readiness,
                 **market_context,
             }
             self._append(self.orders_file, row)
@@ -216,7 +405,7 @@ class OrderManager:
                 response = self.client.create_and_post_order(token_id=token_id, price=price, size=order_size_shares, side=side, order_type=order_type, options=None)
         except Exception as exc:
             self.risk.record_failed_order()
-            row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "size_usdc": notional_usdc, "order_size_shares": order_size_shares, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "FAILED", "reason": str(exc), "readiness": readiness, **market_context}
+            row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "size_usdc": notional_usdc, "order_size_shares": order_size_shares, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "FAILED", "reason": str(exc), **market_context}
             self._append(self.orders_file, row)
             return row, None
 
@@ -237,7 +426,6 @@ class OrderManager:
             "post_only": post_only,
             "execution_style": execution_style,
             "status": response.get("status", "SUBMITTED"),
-            "readiness": readiness,
             **market_context,
         }
         self._append(self.orders_file, row)
@@ -308,38 +496,22 @@ class OrderManager:
 
     def submit_quote_order(self, token_id, price, size, side="BUY", condition_id=None, outcome_side=None):
         return self.submit_entry(
-            token_id=token_id,
-            price=price,
-            size=size,
-            side=side,
-            condition_id=condition_id,
-            outcome_side=outcome_side,
-            order_type="GTC",
-            post_only=True,
-            execution_style="maker",
+            token_id=token_id, price=price, size=size, side=side,
+            condition_id=condition_id, outcome_side=outcome_side,
+            order_type="GTC", post_only=True, execution_style="maker",
         )
 
     def submit_taker_order(self, token_id, price, size, side="BUY", condition_id=None, outcome_side=None):
         return self.submit_entry(
-            token_id=token_id,
-            price=price,
-            size=size,
-            side=side,
-            condition_id=condition_id,
-            outcome_side=outcome_side,
-            order_type="GTC",
-            post_only=False,
-            execution_style="taker",
+            token_id=token_id, price=price, size=size, side=side,
+            condition_id=condition_id, outcome_side=outcome_side,
+            order_type="GTC", post_only=False, execution_style="taker",
         )
 
     def place_target_exit_order(self, token_id, target_price, size, condition_id=None, outcome_side=None):
         row, response = self.submit_entry(
-            token_id=token_id,
-            price=target_price,
-            size=size,
-            side="SELL",
-            condition_id=condition_id,
-            outcome_side=outcome_side,
+            token_id=token_id, price=target_price, size=size, side="SELL",
+            condition_id=condition_id, outcome_side=outcome_side,
         )
         return row, response
 
@@ -354,12 +526,8 @@ class OrderManager:
         executable_sell = (quote or {}).get("best_bid")
         if executable_sell is not None and float(executable_sell) >= float(target_price):
             return self.submit_entry(
-                token_id=token_id,
-                price=executable_sell,
-                size=size,
-                side="SELL",
-                condition_id=condition_id,
-                outcome_side=outcome_side,
+                token_id=token_id, price=executable_sell, size=size, side="SELL",
+                condition_id=condition_id, outcome_side=outcome_side,
             )
         return {"status": "WAITING", "reason": "target_not_hit", "best_bid": executable_sell}, None
 
