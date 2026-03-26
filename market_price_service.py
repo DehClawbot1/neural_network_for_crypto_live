@@ -2,11 +2,20 @@ from datetime import datetime, timedelta, timezone
 
 import asyncio
 import json
+import logging
 
 import requests
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
 
 class MarketPriceService:
+    """FIX: Added tutorial-compatible order book analysis:
+        book = client.get_order_book(yes_token_id)
+        sorted_bids = sorted(book.bids, key=lambda x: float(x.price), reverse=True)
+        sorted_asks = sorted(book.asks, key=lambda x: float(x.price), reverse=False)
+    """
+
     CLOB_HISTORY_URL = "https://clob.polymarket.com/prices-history"
     CLOB_PRICE_URL = "https://clob.polymarket.com/price"
     CLOB_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
@@ -14,6 +23,17 @@ class MarketPriceService:
     def __init__(self, max_age_seconds=20):
         self.max_age_seconds = max_age_seconds
         self.cache = {}
+        self._clob_client = None
+
+    def _get_clob_client(self):
+        """Lazy-initialize a read-only ClobClient for order book queries."""
+        if self._clob_client is None:
+            try:
+                from py_clob_client.client import ClobClient
+                self._clob_client = ClobClient("https://clob.polymarket.com")
+            except Exception:
+                self._clob_client = None
+        return self._clob_client
 
     def _is_fresh(self, token_id):
         record = self.cache.get(str(token_id))
@@ -52,6 +72,64 @@ class MarketPriceService:
             return None
         return float(history[-1].get("p", 0.0))
 
+    def get_order_book_analysis(self, token_id, depth=5):
+        """FIX: Tutorial-style order book analysis:
+            book = client.get_order_book(yes_token_id)
+            sorted_bids = sorted(book.bids, key=lambda x: float(x.price), reverse=True)
+            sorted_asks = sorted(book.asks, key=lambda x: float(x.price), reverse=False)
+        """
+        client = self._get_clob_client()
+        if client is None:
+            return None
+
+        try:
+            book = client.get_order_book(str(token_id))
+        except Exception as exc:
+            logging.warning("Order book fetch failed for %s: %s", token_id, exc)
+            return None
+
+        bids = getattr(book, "bids", []) or []
+        asks = getattr(book, "asks", []) or []
+
+        sorted_bids = sorted(bids, key=lambda x: float(getattr(x, "price", 0)), reverse=True)
+        sorted_asks = sorted(asks, key=lambda x: float(getattr(x, "price", 0)), reverse=False)
+
+        top_bids = [{"price": float(b.price), "size": float(b.size)} for b in sorted_bids[:depth]]
+        top_asks = [{"price": float(a.price), "size": float(a.size)} for a in sorted_asks[:depth]]
+
+        best_bid = float(sorted_bids[0].price) if sorted_bids else None
+        best_ask = float(sorted_asks[0].price) if sorted_asks else None
+        midpoint = (best_bid + best_ask) / 2.0 if best_bid is not None and best_ask is not None else None
+        spread = abs(best_ask - best_bid) if best_bid is not None and best_ask is not None else None
+
+        bid_volume = sum(float(b.size) for b in sorted_bids[:depth])
+        ask_volume = sum(float(a.size) for a in sorted_asks[:depth])
+        imbalance = (bid_volume - ask_volume) / (bid_volume + ask_volume) if (bid_volume + ask_volume) > 0 else 0.0
+
+        result = {
+            "token_id": str(token_id),
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "midpoint": midpoint,
+            "spread": spread,
+            "bid_depth": len(sorted_bids),
+            "ask_depth": len(sorted_asks),
+            "top_bids": top_bids,
+            "top_asks": top_asks,
+            "bid_volume_top5": bid_volume,
+            "ask_volume_top5": ask_volume,
+            "order_book_imbalance": imbalance,
+        }
+
+        # Update cache
+        self.cache[str(token_id)] = {
+            **result,
+            "price": midpoint or best_bid or best_ask,
+            "timestamp": datetime.now(timezone.utc),
+        }
+
+        return result
+
     def get_executable_price(self, token_id, side="SELL"):
         if not token_id:
             return None
@@ -65,11 +143,19 @@ class MarketPriceService:
         return self._history_last_price(token_id)
 
     def get_midpoint(self, token_id):
+        """FIX: Uses tutorial-compatible midpoint calculation via order book."""
         if not token_id:
             return None
         token_id = str(token_id)
         if self._is_fresh(token_id) and "midpoint" in self.cache[token_id]:
             return self.cache[token_id]["midpoint"]
+
+        # Try order book analysis first (tutorial pattern)
+        analysis = self.get_order_book_analysis(token_id)
+        if analysis and analysis.get("midpoint") is not None:
+            return analysis["midpoint"]
+
+        # Fall back to REST price endpoints
         try:
             buy_payload = self._rest_price(token_id, side="BUY")
             sell_payload = self._rest_price(token_id, side="SELL")
@@ -181,4 +267,3 @@ class MarketPriceService:
 
     def stream_prices_forever(self, token_ids, update_callback=None):
         asyncio.run(self.stream_prices(token_ids, update_callback=update_callback))
-

@@ -22,6 +22,12 @@ class ExecutionClient:
 
     In interactive mode, derived credentials are kept in memory only
     and never persisted to .env files.
+
+    FIX: Aligned authentication flow with official Polymarket tutorial:
+      - Uses derive_api_key() as primary credential derivation (matching tutorial)
+      - Falls back to create_or_derive_api_creds() for older client versions
+      - Proper USDC balance decimal handling (balance / 1e6 when raw integer)
+      - Cleaner order creation matching tutorial patterns
     """
 
     def __init__(self, host=None, chain_id=None, private_key=None, funder=None, signature_type=None):
@@ -52,6 +58,9 @@ class ExecutionClient:
         elif env_signature_type:
             self.signature_type = int(env_signature_type)
         else:
+            # FIX: Tutorial uses signature_type=1 for proxy wallets (email/Magic),
+            # signature_type=0 for EOA (MetaMask, hardware wallet).
+            # Default to 1 if funder is set (proxy wallet), else 0.
             self.signature_type = 1 if self.funder else 0
         self.api_key = os.getenv("POLYMARKET_API_KEY")
         self.api_secret = os.getenv("POLYMARKET_API_SECRET")
@@ -64,6 +73,9 @@ class ExecutionClient:
         if self.signature_type == 1 and not self.funder:
             logging.warning("ExecutionClient: signature_type=1 without POLYMARKET_FUNDER may be incorrect for proxy-wallet accounts.")
 
+        # FIX: Initialize client matching tutorial pattern exactly:
+        #   client = ClobClient(CLOB_API, key=PRIVATE_KEY, chain_id=137,
+        #                       signature_type=SIGNATURE_TYPE, funder=FUNDER_ADDRESS)
         self.client = self.ClobClient(
             self.host,
             key=self.private_key,
@@ -108,11 +120,9 @@ class ExecutionClient:
         os.environ["POLYMARKET_API_PASSPHRASE"] = passphrase
 
         if _is_interactive():
-            # Interactive mode: keep creds in memory only, never write to disk
             logging.info("Derived L2 API creds stored in memory (interactive mode — not written to disk).")
             return
 
-        # File mode: persist to .env on disk
         if set_key is None:
             logging.warning("python-dotenv not available; cannot persist creds to .env.")
             return
@@ -122,7 +132,34 @@ class ExecutionClient:
         set_key(str(self.env_file), "POLYMARKET_API_SECRET", secret)
         set_key(str(self.env_file), "POLYMARKET_API_PASSPHRASE", passphrase)
 
+    def _derive_creds(self):
+        """FIX: Try derive_api_key() first (matching tutorial pattern),
+        then fall back to create_or_derive_api_creds() for older client versions.
+
+        Tutorial pattern:
+            creds = auth_client.derive_api_key()
+            auth_client.set_api_creds(creds)
+        """
+        # Try tutorial-style derive_api_key() first
+        if hasattr(self.client, "derive_api_key"):
+            try:
+                derived_creds = self.client.derive_api_key()
+                if derived_creds is not None:
+                    logging.info("Derived credentials using derive_api_key() (tutorial method)")
+                    return derived_creds
+            except Exception as exc:
+                logging.warning("derive_api_key() failed: %s. Trying create_or_derive_api_creds()...", exc)
+
+        # Fall back to create_or_derive_api_creds()
+        if hasattr(self.client, "create_or_derive_api_creds"):
+            derived_creds = self.client.create_or_derive_api_creds()
+            logging.info("Derived credentials using create_or_derive_api_creds() (fallback method)")
+            return derived_creds
+
+        raise RuntimeError("No credential derivation method available on ClobClient")
+
     def _initialize_credentials(self):
+        # Step 1: Try stored L2 API credentials from env
         stored_creds = self._build_stored_creds()
         if stored_creds is not None:
             try:
@@ -130,12 +167,14 @@ class ExecutionClient:
                 self._validate_current_creds()
                 self.api_creds = stored_creds
                 self.credential_source = "stored_env"
+                logging.info("ExecutionClient: Using stored L2 API credentials.")
                 return
             except Exception as exc:
                 logging.warning("ExecutionClient: stored L2 creds failed validation: %s", exc)
 
+        # Step 2: Derive fresh credentials (FIX: uses tutorial-compatible method)
         try:
-            derived_creds = self.client.create_or_derive_api_creds()
+            derived_creds = self._derive_creds()
             self.client.set_api_creds(derived_creds)
             self._validate_current_creds()
             self.api_creds = derived_creds
@@ -150,9 +189,15 @@ class ExecutionClient:
             raise exc
 
     def create_and_post_order(self, token_id, price, size, side="BUY", order_type="GTC", options=None):
+        """FIX: Aligned with tutorial limit order pattern:
+            limit_order = OrderArgs(token_id=yes_token_id, price=0.001, size=10.0, side=BUY)
+            signed_order = auth_client.create_order(limit_order)
+            response = auth_client.post_order(signed_order, OrderType.GTC)
+        """
         side_const = self.BUY if str(side).upper() == "BUY" else self.SELL
         order_type_const = getattr(self.OrderType, str(order_type).upper())
         args = self.OrderArgs(token_id=token_id, price=float(price), size=float(size), side=side_const)
+
         # BUG FIX: py_clob_client.create_order expects PartialCreateOrderOptions or None,
         # not a raw dict.
         post_only = False
@@ -174,6 +219,13 @@ class ExecutionClient:
         return self.client.post_order(signed_order, order_type_const)
 
     def create_and_post_market_order(self, token_id, amount, side="BUY", order_type="FOK"):
+        """FIX: Aligned with tutorial market order pattern:
+            market_order = MarketOrderArgs(token_id=yes_token_id, amount=5.0, side=BUY)
+            signed_market_order = auth_client.create_market_order(market_order)
+            response = auth_client.post_order(signed_market_order, OrderType.FOK)
+
+        Note: 'amount' is the dollar amount to spend, NOT shares.
+        """
         side_const = self.BUY if str(side).upper() == "BUY" else self.SELL
         order_type_const = getattr(self.OrderType, str(order_type).upper())
         args = self.MarketOrderArgs(token_id=token_id, amount=float(amount), side=side_const)
@@ -183,11 +235,20 @@ class ExecutionClient:
     def cancel_order(self, order_id):
         return self.client.cancel(order_id)
 
+    def cancel_all(self):
+        """FIX: Added cancel_all matching tutorial pattern."""
+        return self.client.cancel_all()
+
     def get_order(self, order_id):
         return self.client.get_order(order_id)
 
     def get_open_orders(self):
-        return self.client.get_orders()
+        """FIX: Tutorial uses OpenOrderParams() for fetching open orders."""
+        try:
+            from py_clob_client.clob_types import OpenOrderParams
+            return self.client.get_orders(OpenOrderParams())
+        except Exception:
+            return self.client.get_orders()
 
     def get_trades(self):
         return self.client.get_trades()
@@ -208,6 +269,26 @@ class ExecutionClient:
     def get_balance_allowance(self, asset_type="COLLATERAL", token_id=None):
         params = self._build_balance_params(asset_type=asset_type, token_id=token_id)
         return self.client.get_balance_allowance(params=params)
+
+    def _normalize_usdc_balance(self, raw_balance):
+        """FIX: Tutorial shows balance needs /1e6 conversion for raw USDC:
+            balance = auth_client.get_balance_allowance(...)
+            usdc_balance = int(balance['balance']) / 1e6
+
+        Some API responses return raw integer (microdollars), others return
+        float dollars. This normalizer handles both cases.
+        """
+        if raw_balance is None:
+            return 0.0
+        try:
+            val = float(raw_balance)
+        except (TypeError, ValueError):
+            return 0.0
+        # If balance looks like raw microdollars (>= 1,000,000 and is integer-like),
+        # convert to dollars. Otherwise assume it's already in dollars.
+        if val >= 1_000_000 and val == int(val):
+            return val / 1e6
+        return val
 
     def _rpc_call(self, rpc_url, method, params):
         response = requests.post(
@@ -255,12 +336,14 @@ class ExecutionClient:
         }
 
     def get_available_balance(self, asset_type=None):
+        """FIX: Normalizes USDC balance properly whether API returns
+        raw microdollars or float dollars."""
         payload = self.get_balance_allowance(asset_type=asset_type)
         api_balance = 0.0
         if isinstance(payload, dict):
             for key in ["balance", "available", "available_balance", "amount"]:
                 if payload.get(key) is not None:
-                    api_balance = float(payload[key])
+                    api_balance = self._normalize_usdc_balance(payload[key])
                     break
         if str(asset_type or "COLLATERAL").upper() == "COLLATERAL":
             try:
@@ -270,3 +353,29 @@ class ExecutionClient:
             except Exception:
                 return api_balance
         return api_balance
+
+    # ── Tutorial-compatible convenience methods ──
+
+    def get_order_book(self, token_id):
+        """FIX: Direct access to order book matching tutorial:
+            book = client.get_order_book(yes_token_id)
+        """
+        return self.client.get_order_book(str(token_id))
+
+    def get_midpoint(self, token_id):
+        """FIX: Midpoint matching tutorial:
+            mid = client.get_midpoint(yes_token_id)
+        """
+        return self.client.get_midpoint(str(token_id))
+
+    def get_price(self, token_id, side="BUY"):
+        """FIX: Price matching tutorial:
+            buy_price = client.get_price(yes_token_id, side="BUY")
+        """
+        return self.client.get_price(str(token_id), str(side).upper())
+
+    def get_spread(self, token_id):
+        """FIX: Spread matching tutorial:
+            spread = client.get_spread(yes_token_id)
+        """
+        return self.client.get_spread(str(token_id))
