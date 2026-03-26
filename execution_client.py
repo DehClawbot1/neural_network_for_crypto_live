@@ -28,6 +28,12 @@ class ExecutionClient:
       - Falls back to create_or_derive_api_creds() for older client versions
       - Proper USDC balance decimal handling (balance / 1e6 when raw integer)
       - Cleaner order creation matching tutorial patterns
+
+    FIX: signature_type defaults:
+      - Email/Magic/Google login → signature_type=1 (proxy wallet)
+      - MetaMask/Rabby browser wallet → signature_type=2 (proxy wallet)
+      - Direct EOA (no Polymarket account) → signature_type=0
+      If you see $0.00 balance, the most common cause is wrong signature_type.
     """
 
     def __init__(self, host=None, chain_id=None, private_key=None, funder=None, signature_type=None):
@@ -53,25 +59,50 @@ class ExecutionClient:
         self.private_key = private_key or os.getenv("PRIVATE_KEY")
         self.funder = funder or os.getenv("POLYMARKET_FUNDER")
         env_signature_type = os.getenv("POLYMARKET_SIGNATURE_TYPE", "").strip()
+
+        # ── FIX: Signature type resolution with clear priority ──
+        # Priority: explicit arg > env var > smart default
         if signature_type is not None:
             self.signature_type = int(signature_type)
         elif env_signature_type:
             self.signature_type = int(env_signature_type)
         else:
-            # FIX: Tutorial uses signature_type=1 for proxy wallets (email/Magic),
-            # signature_type=0 for EOA (MetaMask, hardware wallet).
-            # Default to 1 if funder is set (proxy wallet), else 0.
+            # Smart default: if funder is set, you have a Polymarket proxy wallet.
+            # Email/Magic/Google → type 1 (most common for bot users)
+            # MetaMask/Rabby → type 2
+            # Default to 1 since email login is the most common bot setup.
             self.signature_type = 1 if self.funder else 0
+
         self.api_key = os.getenv("POLYMARKET_API_KEY")
         self.api_secret = os.getenv("POLYMARKET_API_SECRET")
         self.api_passphrase = os.getenv("POLYMARKET_API_PASSPHRASE")
 
         if not self.private_key:
             raise ValueError("PRIVATE_KEY is required for live-test execution client")
+
+        # ── FIX: Warn about common misconfigurations ──
         if self.funder and not str(self.funder).startswith("0x"):
             logging.warning("ExecutionClient: POLYMARKET_FUNDER does not look like a wallet address: %s", self.funder)
+
+        if self.signature_type == 0 and self.funder:
+            logging.warning(
+                "ExecutionClient: signature_type=0 (EOA) but POLYMARKET_FUNDER is set. "
+                "This usually means you should use signature_type=1 (email/Magic) or 2 (MetaMask/Rabby). "
+                "If your balance shows $0.00, change POLYMARKET_SIGNATURE_TYPE to 1 or 2."
+            )
+
         if self.signature_type == 1 and not self.funder:
-            logging.warning("ExecutionClient: signature_type=1 without POLYMARKET_FUNDER may be incorrect for proxy-wallet accounts.")
+            logging.warning(
+                "ExecutionClient: signature_type=1 (email/Magic proxy) but POLYMARKET_FUNDER is not set. "
+                "Set POLYMARKET_FUNDER to your Polymarket wallet address (shown in your Polymarket profile)."
+            )
+
+        logging.info(
+            "ExecutionClient: signature_type=%d (%s), funder=%s",
+            self.signature_type,
+            {0: "EOA", 1: "email/Magic proxy", 2: "MetaMask/Rabby proxy"}.get(self.signature_type, "unknown"),
+            self.funder[:16] + "..." if self.funder and len(self.funder) > 16 else self.funder,
+        )
 
         # FIX: Initialize client matching tutorial pattern exactly:
         #   client = ClobClient(CLOB_API, key=PRIVATE_KEY, chain_id=137,

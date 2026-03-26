@@ -7,6 +7,7 @@ FIXES:
   2. Offers to launch dashboard alongside bot (via run_bot_and_dashboard.py)
   3. Better error messages for common credential issues
   4. Validates wallet address format more carefully
+  5. FIX: Asks for signature_type interactively instead of hardcoding it
 
 Usage:
     python start.py
@@ -55,6 +56,23 @@ def prompt_credentials():
     if private_key and not private_key.startswith("0x"):
         private_key = "0x" + private_key
 
+    # ── FIX: Ask for signature type interactively ──
+    print()
+    print("--- SIGNATURE TYPE ---\n")
+    print("  How do you log into Polymarket?")
+    print("    1 = Email / Magic Link / Google login  (most common)")
+    print("    2 = MetaMask / Rabby / browser wallet")
+    print("    0 = Direct EOA (no Polymarket account, trading from own wallet)")
+    print()
+    sig_type_input = input("  Your login method [1/2/0] (default: 1): ").strip()
+    if sig_type_input in ("0", "1", "2"):
+        sig_type = sig_type_input
+    else:
+        sig_type = "1"  # Default to email/Magic since that's most common
+
+    sig_type_labels = {"0": "EOA (direct wallet)", "1": "Email/Magic/Google", "2": "MetaMask/Rabby"}
+    print(f"  → Using signature_type={sig_type} ({sig_type_labels.get(sig_type, 'unknown')})")
+
     print()
     print("--- TRADING MODE ---\n")
     mode = input("  Trading mode [live/paper] (default: live): ").strip().lower()
@@ -89,7 +107,8 @@ def prompt_credentials():
         # Defaults
         "POLYMARKET_HOST": "https://clob.polymarket.com",
         "POLYMARKET_CHAIN_ID": "137",
-        "POLYMARKET_SIGNATURE_TYPE": "1",
+        # FIX: Use the user's chosen signature type instead of hardcoding
+        "POLYMARKET_SIGNATURE_TYPE": sig_type,
         "SIMULATED_STARTING_BALANCE": "1000",
         "MAX_RISK_PER_TRADE": "50",
         # Flags
@@ -135,6 +154,8 @@ def print_startup_summary(creds: dict):
     pk = creds.get("PRIVATE_KEY", "")
     pk_preview = pk[:6] + "..." + pk[-4:] if len(pk) > 10 else "(too short)"
     launch_dash = creds.get("_LAUNCH_DASHBOARD") == "1"
+    sig_type = creds.get("POLYMARKET_SIGNATURE_TYPE", "?")
+    sig_type_labels = {"0": "EOA", "1": "Email/Magic/Google", "2": "MetaMask/Rabby"}
 
     print()
     print("--- STARTUP SUMMARY ---")
@@ -142,6 +163,7 @@ def print_startup_summary(creds: dict):
     print(f"  Mode:           {mode.upper()}")
     print(f"  Wallet:         {wallet}")
     print(f"  Private Key:    {pk_preview}")
+    print(f"  Signature Type: {sig_type} ({sig_type_labels.get(sig_type, 'unknown')})")
     print(f"  API Creds:      {'provided' if has_api_key else 'will auto-derive'}")
     print(f"  Dashboard:      {'will launch alongside bot' if launch_dash else 'bot only'}")
     print()
