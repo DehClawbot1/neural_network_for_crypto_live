@@ -44,6 +44,7 @@ from live_pnl import LivePnLCalculator
 from reconciliation_service import ReconciliationService
 from mismatch_detector import StateMismatchDetector
 from db import Database
+from orderbook_guard import OrderBookGuard
 
 # Configure logging for zero-intervention monitoring
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -358,6 +359,7 @@ def main_loop():
     reconciliation_service = ReconciliationService(execution_client) if trading_mode == "live" and execution_client is not None else None
     mismatch_detector = StateMismatchDetector() if trading_mode == "live" else None
     trade_manager = TradeManager(logs_dir="logs")
+    orderbook_guard = OrderBookGuard(max_spread=0.10, min_bid_depth=2, min_ask_depth=2)
     autonomous_monitor = AutonomousMonitor()
     retrainer = Retrainer()
     previous_markets_df = None
@@ -557,7 +559,20 @@ def main_loop():
                 if action_val != 0:
                     size_usdc = 10 if action_val == 1 else 50
                     confidence = float(signal_row.get("confidence", 0.0) or 0.0)
-                    fill_price = quote_entry_price(signal_row)
+                    # ── Order book guard: check spread/depth before entry ──
+                    try:
+                        ob_check = orderbook_guard.check_before_entry(
+                            token_id=token_id, side="BUY", intended_size_usdc=size_usdc,
+                        )
+                        if not ob_check["tradable"]:
+                            logging.info("OrderBookGuard BLOCKED %s: %s", token_id[:16], ob_check["reason"])
+                            continue
+                        fill_price = ob_check.get("recommended_entry_price") or quote_entry_price(signal_row)
+                        for _w in ob_check.get("warnings", []):
+                            logging.warning("OrderBookGuard %s: %s", token_id[:16], _w)
+                    except Exception as _ob_exc:
+                        logging.warning("OrderBookGuard failed for %s: %s (using fallback price)", token_id[:16], _ob_exc)
+                        fill_price = quote_entry_price(signal_row)
                     
                     if fill_price is None or pd.isna(fill_price):
                         logging.warning("Skipping signal with missing fill price for token_id=%s", token_id)
@@ -676,7 +691,14 @@ def main_loop():
                     if pos_action_val == 4: # REDUCE
                         logging.info("[%s] Reducing position for %s", trading_mode.upper(), token_id)
                         if trading_mode == "live" and order_manager is not None:
-                            exit_price = quote_exit_price(pos_dict)
+                            try:
+                                _ob_exit = orderbook_guard.analyze_book(token_id, depth=5)
+                                if _ob_exit.get("best_bid") is not None:
+                                    exit_price = _ob_exit["best_bid"]
+                                else:
+                                    exit_price = quote_exit_price(pos_dict)
+                            except Exception:
+                                exit_price = quote_exit_price(pos_dict)
                             exit_shares = trade.shares * 0.5
                             if exit_price is not None and exit_shares > 0:
                                 reduce_row, reduce_response = order_manager.submit_entry(
@@ -710,7 +732,14 @@ def main_loop():
                     elif pos_action_val == 5: # EXIT
                         logging.info("[%s] Exiting position for %s", trading_mode.upper(), token_id)
                         if trading_mode == "live" and order_manager is not None:
-                            exit_price = quote_exit_price(pos_dict)
+                            try:
+                                _ob_exit = orderbook_guard.analyze_book(token_id, depth=5)
+                                if _ob_exit.get("best_bid") is not None:
+                                    exit_price = _ob_exit["best_bid"]
+                                else:
+                                    exit_price = quote_exit_price(pos_dict)
+                            except Exception:
+                                exit_price = quote_exit_price(pos_dict)
                             exit_shares = trade.shares
                             if exit_price is not None and exit_shares > 0:
                                 exit_row, exit_response = order_manager.submit_entry(
