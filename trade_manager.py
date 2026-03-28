@@ -146,7 +146,51 @@ class TradeManager:
 
         return closed_trades
 
+    def _maybe_load_reconciled_positions(self):
+        """
+        Hydrate active_trades from the reconciled live position book before callers
+        inspect local open positions. This lets mismatch detection compare against
+        the latest reconciled state instead of a stale in-memory snapshot.
+        """
+        try:
+            from live_position_book import LivePositionBook
+        except Exception:
+            return
+
+        try:
+            live_book = LivePositionBook(logs_dir=str(self.logs_dir))
+            live_book.rebuild_from_db()
+            reconciled_positions_df = live_book.get_open_positions()
+        except Exception as exc:
+            logger.debug("Unable to load reconciled positions into TradeManager: %s", exc)
+            return
+
+        if reconciled_positions_df is None or reconciled_positions_df.empty:
+            return
+
+        reconciled_count = len(reconciled_positions_df.index)
+        current_open_count = sum(
+            1 for trade in self.active_trades.values()
+            if getattr(trade, "state", None) != TradeState.CLOSED
+        )
+
+        if current_open_count == reconciled_count and current_open_count > 0:
+            current_tokens = {
+                str(getattr(trade, "token_id", "") or "")
+                for trade in self.active_trades.values()
+                if getattr(trade, "state", None) != TradeState.CLOSED
+            }
+            reconciled_tokens = {
+                str(row.get("token_id", "") or "")
+                for _, row in reconciled_positions_df.iterrows()
+            }
+            if current_tokens == reconciled_tokens:
+                return
+
+        self.reconcile_live_positions(reconciled_positions_df=reconciled_positions_df)
+
     def get_open_positions(self) -> List[TradeLifecycle]:
+        self._maybe_load_reconciled_positions()
         return [t for t in self.active_trades.values() if t.state != TradeState.CLOSED]
 
     def get_metrics(self) -> Dict[str, any]:
