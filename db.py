@@ -17,6 +17,9 @@ class Database:
         self._ensure_column("model_decisions", "feature_snapshot", "TEXT")
         self._ensure_column("model_decisions", "model_artifact", "TEXT")
         self._ensure_column("model_decisions", "normalization_artifact", "TEXT")
+        self._ensure_column("fills", "condition_id", "TEXT")
+        self._ensure_column("fills", "outcome_side", "TEXT")
+        self._ensure_column("fills", "side", "TEXT")
 
     def _ensure_column(self, table_name, column_name, column_type):
         existing_columns = {
@@ -61,6 +64,9 @@ class Database:
                 fill_id TEXT PRIMARY KEY,
                 order_id TEXT,
                 token_id TEXT,
+                condition_id TEXT,
+                outcome_side TEXT,
+                side TEXT,
                 price REAL,
                 size REAL,
                 filled_at TEXT

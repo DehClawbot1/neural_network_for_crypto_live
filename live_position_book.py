@@ -24,9 +24,9 @@ class LivePositionBook:
                 f.price,
                 f.size,
                 f.filled_at,
-                o.condition_id,
-                o.outcome_side,
-                o.order_side
+                COALESCE(f.condition_id, o.condition_id) AS condition_id,
+                COALESCE(f.outcome_side, o.outcome_side) AS outcome_side,
+                COALESCE(f.side, o.order_side) AS order_side
             FROM fills f
             LEFT JOIN orders o ON o.order_id = f.order_id
             ORDER BY COALESCE(f.filled_at, ''), f.fill_id

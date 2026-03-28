@@ -59,10 +59,12 @@ class ReconciliationService:
             "fill_id": str(fill_id),
             "order_id": str(order_id) if order_id is not None else None,
             "token_id": str(token_id),
+            "condition_id": trade.get("condition_id") or trade.get("market") or trade.get("market_id"),
+            "outcome_side": trade.get("outcome_side") or trade.get("side_label") or trade.get("outcome"),
             "price": float(trade.get("price") or trade.get("rate") or 0.0),
             "size": float(trade.get("size") or trade.get("amount") or trade.get("matched_amount") or 0.0),
             "filled_at": trade.get("filled_at") or trade.get("created_at") or trade.get("timestamp") or datetime.now(timezone.utc).isoformat(),
-            "side": str(trade.get("side") or trade.get("taker_side") or "").upper() or None,
+            "side": str(trade.get("side") or trade.get("taker_side") or trade.get("trade_side") or "").upper() or None,
         }
 
     def _safe_read_csv(self, filename):
@@ -110,11 +112,14 @@ class ReconciliationService:
                 if trade is None:
                     continue
                 self.db.execute(
-                    "INSERT OR REPLACE INTO fills (fill_id, order_id, token_id, price, size, filled_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT OR REPLACE INTO fills (fill_id, order_id, token_id, condition_id, outcome_side, side, price, size, filled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         trade["fill_id"],
                         trade["order_id"],
                         trade["token_id"],
+                        trade.get("condition_id"),
+                        trade.get("outcome_side"),
+                        trade.get("side"),
                         trade["price"],
                         trade["size"],
                         trade["filled_at"],

@@ -3,6 +3,7 @@ import pytest
 from unittest.mock import MagicMock
 
 from reconciliation_service import ReconciliationService
+from live_position_book import LivePositionBook
 
 
 def test_reconcile_detects_missing_remote_open_order(tmp_path):
@@ -70,3 +71,47 @@ def test_reconcile_reports_status_and_size_mismatch_for_open_orders(tmp_path):
     assert mismatch["order_id"] == "open-1"
     assert str(mismatch["local_status"]) == "SUBMITTED"
     assert str(mismatch["remote_status"]) == "OPEN"
+
+
+def test_sync_and_rebuild_uses_trade_side_for_manual_exit_without_order_row(tmp_path):
+    client = MagicMock()
+    client.get_open_orders.return_value = []
+    client.get_trades.return_value = [
+        {
+            "id": "buy-1",
+            "order_id": "buy-order-1",
+            "token_id": "tok-1",
+            "condition_id": "cond-1",
+            "outcome_side": "Yes",
+            "side": "BUY",
+            "price": 0.4,
+            "size": 5,
+            "filled_at": "2026-03-28T20:00:00+00:00",
+        },
+        {
+            "id": "sell-1",
+            "order_id": "manual-sell-1",
+            "token_id": "tok-1",
+            "condition_id": "cond-1",
+            "outcome_side": "Yes",
+            "side": "SELL",
+            "price": 0.6,
+            "size": 5,
+            "filled_at": "2026-03-28T20:05:00+00:00",
+        },
+    ]
+
+    service = ReconciliationService(execution_client=client, logs_dir=tmp_path)
+    summary = service.sync_orders_and_fills()
+    assert summary["fills"] == 2
+
+    book = LivePositionBook(logs_dir=tmp_path)
+    rebuilt = book.rebuild_from_db()
+    open_df = book.get_open_positions()
+
+    assert not rebuilt.empty
+    assert open_df.empty
+    rows = book.db.query_all("SELECT token_id, condition_id, outcome_side, shares, status FROM live_positions WHERE token_id = ?", ("tok-1",))
+    assert rows
+    assert rows[0]["shares"] == 0.0
+    assert rows[0]["status"] == "CLOSED"

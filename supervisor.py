@@ -376,6 +376,8 @@ def main_loop():
     autonomous_monitor = AutonomousMonitor()
     retrainer = Retrainer()
     previous_markets_df = None
+    previous_entry_freeze_active = False
+    previous_entry_freeze_reason = None
     try:
         shadow_purgatory = ShadowPurgatory()
     except Exception as exc:
@@ -505,6 +507,8 @@ def main_loop():
             current_active_trades = trade_manager.get_open_positions()
             active_trade_keys = {_trade_key_from_signal({"market_title": trade.market, "outcome_side": trade.outcome_side}) for trade in current_active_trades if trade.market}
             live_entry_freeze = False
+            freeze_reason = None
+            freeze_detail = {}
             if trading_mode == "live" and live_position_book is not None:
                 live_position_book.rebuild_from_db()
                 reconciled_positions_df = live_position_book.get_enriched_open_positions(scored_df=scored_df)
@@ -512,9 +516,23 @@ def main_loop():
                     mismatch_summary = mismatch_detector.detect(current_active_trades, reconciled_positions_df)
                     if mismatch_summary.get("freeze_entries"):
                         live_entry_freeze = True
+                        freeze_reason = mismatch_summary.get("source") or "state_mismatch"
+                        freeze_detail = mismatch_summary.get("detail", {}) or {}
                         mismatch_detector.record(mismatch_summary)
-                        logging.error("Live entry freeze active due to state mismatch: %s", mismatch_summary.get("detail"))
-                        autonomous_monitor.write_heartbeat("reconciliation", status="error", message="entry_freeze_state_mismatch", extra=mismatch_summary.get("detail", {}))
+                        logging.error(
+                            "Live entry freeze active (reason=%s, local_count=%s, live_count=%s, local_only=%s, live_only=%s)",
+                            freeze_reason,
+                            freeze_detail.get("local_count"),
+                            freeze_detail.get("live_count"),
+                            freeze_detail.get("local_only"),
+                            freeze_detail.get("live_only"),
+                        )
+                        autonomous_monitor.write_heartbeat("reconciliation", status="error", message="entry_freeze_state_mismatch", extra=freeze_detail)
+                    elif previous_entry_freeze_active:
+                        logging.info("Entry freeze cleared (previous_reason=%s)", previous_entry_freeze_reason or "state_mismatch")
+
+            previous_entry_freeze_active = live_entry_freeze
+            previous_entry_freeze_reason = freeze_reason
 
             # FIX: Enforce MAX_CONCURRENT_POSITIONS limit
             _max_pos = getattr(TradingConfig, 'MAX_CONCURRENT_POSITIONS', 5)
@@ -551,7 +569,13 @@ def main_loop():
                 if market_key in active_trade_keys:
                     continue
                 if trading_mode == "live" and live_entry_freeze:
-                    logging.warning("Skipping new live entry for %s because entry freeze is active", token_id)
+                    logging.warning(
+                        "Skipping new live entry for %s because entry freeze is active (reason=%s, local_count=%s, live_count=%s)",
+                        token_id,
+                        freeze_reason or "state_mismatch",
+                        freeze_detail.get("local_count"),
+                        freeze_detail.get("live_count"),
+                    )
                     continue
 
                 action_val = choose_action(
@@ -583,7 +607,10 @@ def main_loop():
                     logging.warning("Model decision logging failed for %s: %s", token_id, exc)
 
                 if action_val != 0:
-                    # ── FIX: Use MoneyManager for balance-aware bet sizing ──
+                    # ── BUGFIX: Define confidence BEFORE using it ──
+                    confidence = float(signal_row.get("confidence", 0.0) or 0.0)
+
+                    # ── Get balance (with paper mode fallback) ──
                     _available_bal = 0.0
                     if order_manager is not None:
                         try:
@@ -595,6 +622,12 @@ def main_loop():
                             _available_bal = execution_client.get_available_balance(asset_type="COLLATERAL")
                         except Exception:
                             pass
+                    # ── BUGFIX: Paper mode needs simulated balance ──
+                    if _available_bal <= 0 and trading_mode == "paper":
+                        _sim_bal = float(os.getenv("SIMULATED_STARTING_BALANCE", "1000"))
+                        _open_cost = sum(float(getattr(t, 'size_usdc', 0) or 0) for t in trade_manager.get_open_positions())
+                        _available_bal = max(0.0, _sim_bal - _open_cost)
+
                     _current_exposure = sum(
                         float(getattr(t, 'size_usdc', 0) or 0)
                         for t in trade_manager.get_open_positions()
@@ -610,7 +643,6 @@ def main_loop():
                             _available_bal, confidence, _current_exposure,
                         )
                         continue
-                    confidence = float(signal_row.get("confidence", 0.0) or 0.0)
                     # ── Order book guard: check spread/depth before entry ──
                     try:
                         ob_check = orderbook_guard.check_before_entry(
@@ -854,6 +886,53 @@ def main_loop():
             if closed_trades:
                 logging.info("[%s] Processed %s closed trades.", trading_mode.upper(), len(closed_trades))
 
+                # C7: Submit SELL orders for rule-based exits in live mode
+                if trading_mode == "live" and order_manager is not None:
+                    for ct in closed_trades:
+                        if ct.shares <= 0:
+                            continue
+                        _ct_token = str(ct.token_id or "")
+                        if not _ct_token:
+                            continue
+                        try:
+                            _ob = orderbook_guard.analyze_book(_ct_token, depth=5)
+                            _exit_p = _ob.get("best_bid") or ct.current_price
+                        except Exception:
+                            _exit_p = ct.current_price
+                        if _exit_p and _exit_p > 0:
+                            logging.info("Submitting SELL for rule exit: token=%s shares=%.2f price=%.4f reason=%s",
+                                         _ct_token[:16], ct.shares, _exit_p, ct.close_reason)
+                            try:
+                                _exit_row, _exit_resp = order_manager.submit_entry(
+                                    token_id=_ct_token, price=_exit_p, size=ct.shares,
+                                    side="SELL", condition_id=ct.condition_id,
+                                    outcome_side=ct.outcome_side)
+                                _exit_oid = (_exit_row or {}).get("order_id")
+                                if _exit_oid:
+                                    _fill = order_manager.wait_for_fill(_exit_oid, timeout_seconds=15)
+                                    if _fill.get("filled"):
+                                        log_live_fill_event(
+                                            {"token_id": _ct_token, "market_title": ct.market,
+                                             "outcome_side": ct.outcome_side, "current_price": _exit_p},
+                                            _exit_p, ct.shares, action_type=f"LIVE_EXIT_{ct.close_reason}")
+                                    else:
+                                        try: order_manager.cancel_stale_order(_exit_oid)
+                                        except Exception: pass
+                            except Exception as _exc:
+                                logging.error("Failed SELL for %s: %s", _ct_token[:16], _exc)
+
+                # H5: Wire MoneyManager win/loss recording
+                try:
+                    from money_manager import MoneyManager as _MM
+                    _mm = _MM()
+                    for ct in closed_trades:
+                        if ct.realized_pnl >= 0:
+                            _mm.record_win(ct.realized_pnl)
+                        else:
+                            _mm.record_loss(ct.realized_pnl)
+                except Exception:
+                    pass
+
                 # FIX C2: Submit SELL orders for rule-based exits in live mode
                 if trading_mode == "live" and order_manager is not None:
                     for closed_trade in closed_trades:
@@ -903,18 +982,12 @@ def main_loop():
                             except Exception as _exit_exc:
                                 logging.error("Failed to submit rule-exit SELL for %s: %s", _exit_token[:16], _exit_exc)
 
-                # FIX H5: Record wins/losses in MoneyManager
-                try:
-                    from money_manager import MoneyManager as _MM
-                    if not hasattr(main_loop, '_money_mgr'):
-                        main_loop._money_mgr = _MM()
-                    for ct in closed_trades:
-                        if ct.realized_pnl >= 0:
-                            main_loop._money_mgr.record_win(ct.realized_pnl)
-                        else:
-                            main_loop._money_mgr.record_loss(ct.realized_pnl)
-                except ImportError:
-                    pass
+                # Record wins/losses in the shared _money_mgr instance
+                for ct in closed_trades:
+                    if ct.realized_pnl >= 0:
+                        _money_mgr.record_win(ct.realized_pnl)
+                    else:
+                        _money_mgr.record_loss(ct.realized_pnl)
 
                 # FIX C5/H5: Submit SELL orders for rule-based exits in live mode
                 if trading_mode == "live" and order_manager is not None:
