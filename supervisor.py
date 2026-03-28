@@ -34,6 +34,7 @@ from stage1_inference import Stage1Inference
 from stage2_temporal_inference import Stage2TemporalInference
 from ops_state_sync import sync_ops_state_to_db
 from stage3_hybrid import Stage3HybridScorer
+from config import TradingConfig
 from strategy_layers import EntryRuleLayer
 from rl_entry_inference import EntryRLInference
 from rl_position_inference import PositionRLInference
@@ -44,6 +45,7 @@ from live_pnl import LivePnLCalculator
 from reconciliation_service import ReconciliationService
 from mismatch_detector import StateMismatchDetector
 from db import Database
+from money_manager import MoneyManager
 from orderbook_guard import OrderBookGuard
 
 # Configure logging for zero-intervention monitoring
@@ -194,22 +196,31 @@ def log_ranked_signal(signal_row):
 
 
 def choose_action(signal_row, entry_rule: EntryRuleLayer, entry_brain=None, legacy_brain=None):
+    action_val = 0
     if entry_brain is not None:
         try:
-            action_val = entry_brain.predict(signal_row)
-            if action_val is not None:
-                return int(action_val)
+            _av = entry_brain.predict(signal_row)
+            if _av is not None:
+                action_val = int(_av)
         except Exception:
             pass
-    if legacy_brain is not None:
+    if action_val == 0 and legacy_brain is not None:
         try:
             obs = prepare_observation(signal_row)
             action, _ = legacy_brain.predict(obs, deterministic=True)
             action_val = int(action.item() if hasattr(action, "item") else action[0])
-            return action_val
         except Exception:
             pass
 
+    # FIX H7: Apply entry rule as VETO even when RL says enter
+    if action_val in (1, 2) and not entry_rule.should_enter(signal_row):
+        logging.info("Entry rule vetoed RL action=%d for %s", action_val,
+                     signal_row.get("market_title", signal_row.get("market", "unknown")))
+        return 0
+    if action_val != 0:
+        return action_val
+
+    # Fallback: rule-based decision
     if not entry_rule.should_enter(signal_row):
         return 0
     edge_score = float(signal_row.get("edge_score", 0.0) or 0.0)
@@ -230,13 +241,14 @@ def quote_exit_price(signal_row, slippage=0.01):
     return max(0.01, base_price - slippage)
 
 
-def execute_paper_trade(action, signal_row, fill_price=None):
+def execute_paper_trade(action, signal_row, fill_price=None, size_usdc=None):
     """Simulates a trade fill and logs the hypothetical position."""
     if action == 0:
         logging.info(f"Brain: IGNORE -> Skipping signal from {signal_row.get('trader_wallet', 'Unknown')[:8]}")
         return
 
-    size = 10 if action == 1 else 50
+    # FIX H1: Use MoneyManager size if provided, else fall back to fixed amounts
+    size = size_usdc if size_usdc and size_usdc > 0 else (10 if action == 1 else 50)
     outcome_side = str(signal_row.get("outcome_side", signal_row.get("side", "UNKNOWN"))).upper()
     signal_price = float(signal_row.get("current_price", signal_row.get("price", 0.5)))
     fill_price = quote_entry_price(signal_row) if fill_price is None else fill_price
@@ -359,7 +371,8 @@ def main_loop():
     reconciliation_service = ReconciliationService(execution_client) if trading_mode == "live" and execution_client is not None else None
     mismatch_detector = StateMismatchDetector() if trading_mode == "live" else None
     trade_manager = TradeManager(logs_dir="logs")
-    orderbook_guard = OrderBookGuard(max_spread=0.10, min_bid_depth=2, min_ask_depth=2)
+    orderbook_guard = OrderBookGuard(max_spread=0.20, min_bid_depth=1, min_ask_depth=1)
+    _money_mgr = MoneyManager()
     autonomous_monitor = AutonomousMonitor()
     retrainer = Retrainer()
     previous_markets_df = None
@@ -468,7 +481,8 @@ def main_loop():
 
             # Suppress duplicate entries / repeated token spam
             if "token_id" in scored_df.columns:
-                scored_df = scored_df.drop_duplicates(subset=["token_id"], keep="first")
+                # Keep top 3 per token (was top 1 — too aggressive)
+                scored_df = scored_df.groupby("token_id").head(3).reset_index(drop=True)
 
             # 3. Log top-ranked paper opportunities (research output, not betting advice)
             top_n = min(5, len(scored_df))
@@ -502,7 +516,13 @@ def main_loop():
                         logging.error("Live entry freeze active due to state mismatch: %s", mismatch_summary.get("detail"))
                         autonomous_monitor.write_heartbeat("reconciliation", status="error", message="entry_freeze_state_mismatch", extra=mismatch_summary.get("detail", {}))
 
+            # FIX: Enforce MAX_CONCURRENT_POSITIONS limit
+            _max_pos = getattr(TradingConfig, 'MAX_CONCURRENT_POSITIONS', 5)
             for _, row in scored_df.iterrows():
+                if len(trade_manager.active_trades) >= _max_pos:
+                    logging.info("Max concurrent positions reached (%d/%d). Skipping remaining entries.",
+                                 len(trade_manager.active_trades), _max_pos)
+                    break
                 signal_row = row.to_dict()
                 token_id = str(signal_row.get("token_id", "") or "")
                 entry_intent = str(signal_row.get("entry_intent", "OPEN_LONG") or "OPEN_LONG").upper()
@@ -513,6 +533,12 @@ def main_loop():
                 if not token_id:
                     logging.warning("Skipping signal with missing token_id: %s", signal_row.get("market_title", signal_row.get("market", "unknown_market")))
                     continue
+
+                # FIX C3: Enforce MAX_CONCURRENT_POSITIONS limit
+                if len(trade_manager.get_open_positions()) >= TradingConfig.MAX_CONCURRENT_POSITIONS:
+                    logging.info("Max positions reached (%d/%d). Skipping remaining signals.",
+                                 len(trade_manager.get_open_positions()), TradingConfig.MAX_CONCURRENT_POSITIONS)
+                    break
 
                 # Handle CLOSE_LONG intent for existing trades
                 if entry_intent == "CLOSE_LONG":
@@ -557,7 +583,33 @@ def main_loop():
                     logging.warning("Model decision logging failed for %s: %s", token_id, exc)
 
                 if action_val != 0:
-                    size_usdc = 10 if action_val == 1 else 50
+                    # ── FIX: Use MoneyManager for balance-aware bet sizing ──
+                    _available_bal = 0.0
+                    if order_manager is not None:
+                        try:
+                            _available_bal, _ = order_manager._get_available_balance(asset_type="COLLATERAL")
+                        except Exception:
+                            pass
+                    if _available_bal <= 0 and execution_client is not None:
+                        try:
+                            _available_bal = execution_client.get_available_balance(asset_type="COLLATERAL")
+                        except Exception:
+                            pass
+                    _current_exposure = sum(
+                        float(getattr(t, 'size_usdc', 0) or 0)
+                        for t in trade_manager.get_open_positions()
+                    )
+                    size_usdc = _money_mgr.calculate_bet_size(
+                        available_balance=_available_bal,
+                        confidence=confidence,
+                        current_exposure=_current_exposure,
+                    )
+                    if size_usdc <= 0:
+                        logging.info(
+                            "MoneyManager: skip trade (balance=$%.2f, conf=%.2f, exposure=$%.2f)",
+                            _available_bal, confidence, _current_exposure,
+                        )
+                        continue
                     confidence = float(signal_row.get("confidence", 0.0) or 0.0)
                     # ── Order book guard: check spread/depth before entry ──
                     try:
@@ -609,7 +661,7 @@ def main_loop():
                         
                         fill_payload = fill_result.get("response") or {}
                         actual_fill_price = float(fill_payload.get("price", fill_price) or fill_price)
-                        actual_fill_size = float(fill_payload.get("size", trade.shares) or trade.shares)
+                        actual_fill_size = float(fill_payload.get("size", _order_shares) or _order_shares)
                         
                         log_live_fill_event(signal_row, actual_fill_price, size_usdc, action_type="LIVE_TRADE")
                         # Register trade AFTER confirmed fill (not before)
@@ -624,19 +676,43 @@ def main_loop():
                         trade_manager.active_trades[market_key] = trade
                         logging.info("Live trade filled for %s at %s. Shares: %s", token_id, actual_fill_price, actual_fill_size)
                     else:
-                        # Paper trade: register in TradeManager and log
+                        # Paper trade: register in TradeManager (which logs to execution_log.csv)
+                        # FIX C7: Don't also call execute_paper_trade — it creates duplicate log entries
                         trade = trade_manager.handle_signal(signal_row=pd.Series(signal_row), confidence=confidence, size_usdc=size_usdc)
                         if trade is not None:
-                            execute_paper_trade(action_val, signal_row, fill_price=fill_price)
-                            logging.info("Paper trade initiated for %s with %s USDC at %s.", token_id, size_usdc, fill_price)
+                            logging.info(
+                                "Brain: FOLLOW -> Paper filled %s USDC on %s at $%.3f for '%s' | label=%s confidence=%.2f",
+                                size_usdc,
+                                signal_row.get("outcome_side", "?"),
+                                fill_price,
+                                signal_row.get("market_title", "Unknown"),
+                                signal_row.get("signal_label", "UNKNOWN"),
+                                confidence,
+                            )
 
             # 4B. Open-position management path for hold / reduce / exit
+            # FIX H3: Build price map by token_id for reliable matching
+            _token_price_map = {}
+            if not scored_df.empty and "token_id" in scored_df.columns:
+                for _, _pr in scored_df.iterrows():
+                    _tid = str(_pr.get("token_id", ""))
+                    _cp = _pr.get("current_price", _pr.get("market_last_trade_price"))
+                    if _tid and _cp is not None:
+                        try: _token_price_map[_tid] = float(_cp)
+                        except (TypeError, ValueError): pass
+            # Also build market-title map as fallback
             market_price_key = next((c for c in ["market_title", "market", "question"] if c in markets_df.columns), None)
             if market_price_key and "current_price" in markets_df.columns:
                 market_prices = markets_df.set_index(market_price_key)["current_price"].dropna().to_dict()
             else:
                 market_prices = {}
-            trade_manager.update_markets(market_prices)
+            # Update trades: try token_id first, then market title fallback
+            for _tk, _tr in list(trade_manager.active_trades.items()):
+                _tid = str(_tr.token_id or "")
+                if _tid in _token_price_map:
+                    _tr.update_market(_token_price_map[_tid])
+                elif _tr.market in market_prices:
+                    _tr.update_market(market_prices[_tr.market])
 
             # If in live mode, reconcile with exchange before making decisions
             if trading_mode == "live" and execution_client is not None:
@@ -728,7 +804,7 @@ def main_loop():
                                 logging.warning("Live REDUCE skipped for %s due to invalid exit price/size", token_id)
                         else:
                             trade.partial_exit(fraction=0.5, exit_price=trade.current_price) # Paper reduce
-                            logging.info("Paper REDUCE for %s. Current PnL: %.2f", token_id, trade.realized_pnl)
+                            logging.info("Paper REDUCE for %s. Current PnL: %.2f (reason=rl_reduce)", token_id, trade.realized_pnl)
                     elif pos_action_val == 5: # EXIT
                         logging.info("[%s] Exiting position for %s", trading_mode.upper(), token_id)
                         if trading_mode == "live" and order_manager is not None:
@@ -769,7 +845,7 @@ def main_loop():
                             else:
                                 logging.warning("Live EXIT skipped for %s due to invalid exit price/size", token_id)
                         else:
-                            trade.close(exit_price=trade.current_price) # Paper close
+                            trade.close(exit_price=trade.current_price, reason="rl_exit") # FIX M2: real reason
                             logging.info("Paper EXIT for %s. Realized PnL: %.2f", token_id, trade.realized_pnl)
                             trade_manager.active_trades.pop(f"{trade.market}-{trade.outcome_side}", None) # Remove from active trades
 
@@ -777,6 +853,104 @@ def main_loop():
             closed_trades = trade_manager.process_exits(datetime.now())
             if closed_trades:
                 logging.info("[%s] Processed %s closed trades.", trading_mode.upper(), len(closed_trades))
+
+                # FIX C2: Submit SELL orders for rule-based exits in live mode
+                if trading_mode == "live" and order_manager is not None:
+                    for closed_trade in closed_trades:
+                        if closed_trade.shares <= 0:
+                            continue
+                        _exit_token = str(closed_trade.token_id or "")
+                        if not _exit_token:
+                            continue
+                        try:
+                            _ob_exit = orderbook_guard.analyze_book(_exit_token, depth=5)
+                            _exit_price = _ob_exit.get("best_bid") or closed_trade.current_price
+                        except Exception:
+                            _exit_price = closed_trade.current_price
+                        if _exit_price and _exit_price > 0:
+                            logging.info(
+                                "Submitting SELL for rule-exit: token=%s shares=%.2f price=%.4f reason=%s",
+                                _exit_token[:16], closed_trade.shares, _exit_price,
+                                closed_trade.close_reason,
+                            )
+                            try:
+                                _exit_row, _exit_resp = order_manager.submit_entry(
+                                    token_id=_exit_token,
+                                    price=_exit_price,
+                                    size=closed_trade.shares,
+                                    side="SELL",
+                                    condition_id=closed_trade.condition_id,
+                                    outcome_side=closed_trade.outcome_side,
+                                )
+                                _exit_oid = (_exit_row or {}).get("order_id")
+                                if _exit_oid:
+                                    _fill = order_manager.wait_for_fill(_exit_oid, timeout_seconds=15)
+                                    if _fill.get("filled"):
+                                        _fp = (_fill.get("response") or {}).get("price", _exit_price)
+                                        log_live_fill_event(
+                                            {"token_id": _exit_token, "market_title": closed_trade.market,
+                                             "outcome_side": closed_trade.outcome_side,
+                                             "current_price": float(_fp or _exit_price)},
+                                            float(_fp or _exit_price), closed_trade.shares,
+                                            action_type=f"LIVE_EXIT_{closed_trade.close_reason}",
+                                        )
+                                    else:
+                                        logging.warning("Rule-exit SELL not filled for %s, cancelling", _exit_token[:16])
+                                        try:
+                                            order_manager.cancel_stale_order(_exit_oid)
+                                        except Exception:
+                                            pass
+                            except Exception as _exit_exc:
+                                logging.error("Failed to submit rule-exit SELL for %s: %s", _exit_token[:16], _exit_exc)
+
+                # FIX H5: Record wins/losses in MoneyManager
+                try:
+                    from money_manager import MoneyManager as _MM
+                    if not hasattr(main_loop, '_money_mgr'):
+                        main_loop._money_mgr = _MM()
+                    for ct in closed_trades:
+                        if ct.realized_pnl >= 0:
+                            main_loop._money_mgr.record_win(ct.realized_pnl)
+                        else:
+                            main_loop._money_mgr.record_loss(ct.realized_pnl)
+                except ImportError:
+                    pass
+
+                # FIX C5/H5: Submit SELL orders for rule-based exits in live mode
+                if trading_mode == "live" and order_manager is not None:
+                    for _closed_trade in closed_trades:
+                        _ct_token = str(_closed_trade.token_id or "")
+                        _ct_shares = float(getattr(_closed_trade, 'shares', 0) or 0)
+                        if not _ct_token or _ct_shares <= 0:
+                            continue
+                        try:
+                            _ob_exit = orderbook_guard.analyze_book(_ct_token, depth=5)
+                            _ct_exit_price = _ob_exit.get("best_bid") or _closed_trade.current_price
+                        except Exception:
+                            _ct_exit_price = _closed_trade.current_price
+                        if _ct_exit_price and float(_ct_exit_price) > 0:
+                            logging.info("Submitting SELL for rule-based exit: token=%s shares=%.2f price=%.4f reason=%s",
+                                         _ct_token[:16], _ct_shares, float(_ct_exit_price), _closed_trade.close_reason)
+                            try:
+                                _exit_row, _exit_resp = order_manager.submit_entry(
+                                    token_id=_ct_token, price=float(_ct_exit_price), size=_ct_shares, side="SELL",
+                                    condition_id=_closed_trade.condition_id, outcome_side=_closed_trade.outcome_side,
+                                )
+                                _exit_oid = (_exit_row or {}).get("order_id")
+                                if _exit_oid:
+                                    _fill_res = order_manager.wait_for_fill(_exit_oid, timeout_seconds=15)
+                                    if _fill_res.get("filled"):
+                                        _fp = (_fill_res.get("response") or {}).get("price", _ct_exit_price)
+                                        log_live_fill_event(
+                                            {"token_id": _ct_token, "market_title": _closed_trade.market,
+                                             "outcome_side": _closed_trade.outcome_side, "current_price": _fp},
+                                            float(_fp), _ct_shares, action_type=f"LIVE_EXIT_{_closed_trade.close_reason}",
+                                        )
+                                    else:
+                                        try: order_manager.cancel_stale_order(_exit_oid)
+                                        except Exception: pass
+                            except Exception as _exit_exc:
+                                logging.error("Rule-based SELL failed for %s: %s", _ct_token[:16], _exit_exc)
 
             # 5. Phase 2 analytics outputs
             trades_df = safe_read_csv(EXECUTION_FILE)

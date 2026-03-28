@@ -30,7 +30,7 @@ def main():
     # ── 1. Verify credentials exist ──
     pk = os.getenv("PRIVATE_KEY", "")
     funder = os.getenv("POLYMARKET_FUNDER", "")
-    sig_type = os.getenv("POLYMARKET_SIGNATURE_TYPE", "1")
+    sig_type = os.getenv("POLYMARKET_SIGNATURE_TYPE", "2")
 
     if not pk:
         print("\n[!] PRIVATE_KEY not set. Add it to .env or set it in environment.")

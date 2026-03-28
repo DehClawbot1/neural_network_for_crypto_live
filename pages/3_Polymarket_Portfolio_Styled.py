@@ -7,14 +7,17 @@ from typing import Any, Optional
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from dotenv import load_dotenv
+try:
+    from dashboard_auth import safe_load_dotenv
+except ImportError:
+    from dotenv import load_dotenv as safe_load_dotenv
 
 from polymarket_capabilities import apply_execution_client_patch
 from repository_polymarket_service import get_execution_client
 from polymarket_profile_client import PolymarketProfileClient
 
 apply_execution_client_patch()
-load_dotenv()
+safe_load_dotenv()
 st.set_page_config(page_title="Polymarket Portfolio Styled", page_icon="💼", layout="wide")
 
 LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"

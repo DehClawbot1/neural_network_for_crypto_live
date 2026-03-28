@@ -118,7 +118,7 @@ def inject_theme():
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner=False, ttl=15)
+@st.cache_data(show_spinner=False, ttl=30)
 def load(key):
     path = FILES.get(key)
     if path is None or not path.exists():

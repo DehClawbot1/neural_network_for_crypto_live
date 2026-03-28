@@ -124,7 +124,7 @@ class TradeManager:
                 close_reason = "take_profit_price_move"
             elif (entry_price - current_price) >= TradingConfig.SHADOW_SL_DELTA:
                 close_reason = "stop_loss"
-            elif minutes_open >= 180:
+            elif minutes_open >= getattr(TradingConfig, 'TIME_STOP_MINUTES', 120):
                 close_reason = "time_stop"
             elif roi < -TradingConfig.PAPER_TRAILING_STOP and minutes_open > 15:
                 close_reason = "trailing_stop"
@@ -210,9 +210,25 @@ class TradeManager:
         """
         BUG FIX D: Use actual close_reason from TradeLifecycle, not hardcoded.
         BUG FIX F: Write both realized_pnl AND net_realized_pnl.
+        FIX M7: Record wins/losses in MoneyManager for adaptive sizing.
         """
         if not closed_trades:
             return
+
+        # FIX M7: Update MoneyManager with trade outcomes
+        try:
+            from money_manager import MoneyManager
+            _mm = getattr(self, '_money_manager', None)
+            if _mm is None:
+                _mm = MoneyManager()
+                self._money_manager = _mm
+            for _ct in closed_trades:
+                if _ct.realized_pnl >= 0:
+                    _mm.record_win(_ct.realized_pnl)
+                else:
+                    _mm.record_loss(_ct.realized_pnl)
+        except ImportError:
+            pass
 
         rows = []
         for trade in closed_trades:

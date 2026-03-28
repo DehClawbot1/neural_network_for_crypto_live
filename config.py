@@ -5,7 +5,7 @@ class TradingConfig:
     SHADOW_WINDOW_MINUTES = 60
 
     # Paper Trading ROI Targets
-    PAPER_TP_ROI = 0.25
+    PAPER_TP_ROI = 0.08
     PAPER_TRAILING_STOP = 0.08
 
     # ── FIX: Lowered from 0.85 to 0.55
@@ -26,19 +26,19 @@ class TradingConfig:
     MAX_RISK_PER_TRADE_PCT = 0.05  # 5% of balance per trade
 
     # Minimum bet size in USDC (below this, skip the trade)
-    MIN_BET_USDC = 0.50  # $0.50 minimum
+    MIN_BET_USDC = 0.25  # $0.50 minimum
 
     # Maximum bet size in USDC (cap regardless of balance)
-    MAX_BET_USDC = 20.0  # $20 max per trade
+    MAX_BET_USDC = 5.0  # $20 max per trade
 
     # Default bet for high confidence (>0.70) as % of balance
-    HIGH_CONFIDENCE_BET_PCT = 0.05  # 5%
+    HIGH_CONFIDENCE_BET_PCT = 0.08  # 5%
 
     # Default bet for medium confidence (0.50-0.70) as % of balance
-    MEDIUM_CONFIDENCE_BET_PCT = 0.02  # 2%
+    MEDIUM_CONFIDENCE_BET_PCT = 0.04  # 2%
 
     # Default bet for low confidence (<0.50) as % of balance
-    LOW_CONFIDENCE_BET_PCT = 0.01  # 1%
+    LOW_CONFIDENCE_BET_PCT = 0.02  # 1%
 
     # Use market orders (FOK) instead of limit orders for live trading
     USE_MARKET_ORDERS = True
@@ -46,5 +46,12 @@ class TradingConfig:
     # Maximum number of concurrent open positions
     MAX_CONCURRENT_POSITIONS = 5
 
+    # Time stop: close positions after this many minutes
+    TIME_STOP_MINUTES = 120
+
     # Maximum total exposure as % of balance
     MAX_TOTAL_EXPOSURE_PCT = 0.25  # 25% of balance across all positions
+
+    # Whether the CLOB API returns balance in microdollars (raw integer / 1e6 = dollars)
+    # Set to False if your py-clob-client version already normalizes to dollars
+    BALANCE_IS_MICRODOLLARS = True

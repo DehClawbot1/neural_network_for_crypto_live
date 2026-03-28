@@ -59,7 +59,12 @@ class OrderManager:
             return 0.0
         # If balance looks like raw microdollars (>= 1_000_000 and is integer-like),
         # convert to dollars. Otherwise assume it's already in dollars.
-        if val >= 1_000_000 and val == int(val):
+        try:
+            from config import TradingConfig
+            is_micro = getattr(TradingConfig, 'BALANCE_IS_MICRODOLLARS', True)
+        except ImportError:
+            is_micro = True
+        if is_micro and val > 1000 and abs(val - round(val)) < 0.01:
             return val / 1e6
         return val
 
@@ -320,7 +325,7 @@ class OrderManager:
         notional_usdc = requested_size if normalized_side == "BUY" else requested_size * float(price)
         order_size_shares = requested_size / max(float(price), 1e-9) if normalized_side == "BUY" else requested_size
         decision = self.risk.pre_trade_check(token_id=token_id, price=price, size=notional_usdc, spread=spread, open_orders=open_orders, daily_pnl=daily_pnl)
-        idempotency_key = f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M')}|{token_id}|{condition_id}|{side}|{size}|{round(float(price), 4)}"
+        idempotency_key = f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')}|{token_id}|{condition_id}|{side}|{size}|{round(float(price), 4)}"
         existing = self.list_orders()
         if not existing.empty and "idempotency_key" in existing.columns and (existing["idempotency_key"].astype(str) == idempotency_key).any():
             return {"status": "REJECTED", "reason": "duplicate_idempotency_key", "idempotency_key": idempotency_key}, None

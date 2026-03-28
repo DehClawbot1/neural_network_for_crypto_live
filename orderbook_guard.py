@@ -51,9 +51,9 @@ class OrderBookGuard:
 
     def __init__(
         self,
-        max_spread=0.10,
-        min_bid_depth=2,
-        min_ask_depth=2,
+        max_spread=0.20,
+        min_bid_depth=1,
+        min_ask_depth=1,
         min_depth_usdc=50.0,
         max_imbalance=0.7,
         wide_spread_warn=0.06,
