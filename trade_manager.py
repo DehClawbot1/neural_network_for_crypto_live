@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from typing import Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -108,13 +108,20 @@ class TradeManager:
             except (ValueError, TypeError):
                 continue
 
+            if opened_dt.tzinfo is not None:
+                current_ts = current_timestamp if current_timestamp.tzinfo is not None else current_timestamp.replace(tzinfo=timezone.utc)
+                opened_dt = opened_dt.astimezone(timezone.utc)
+                current_ts = current_ts.astimezone(timezone.utc)
+            else:
+                current_ts = current_timestamp.replace(tzinfo=None) if current_timestamp.tzinfo is not None else current_timestamp
+
             entry_price = float(trade.entry_price or 0)
             current_price = float(trade.current_price or entry_price)
             if entry_price <= 0:
                 continue
 
             roi = (current_price - entry_price) / entry_price
-            minutes_open = (current_timestamp - opened_dt).total_seconds() / 60.0
+            minutes_open = (current_ts - opened_dt).total_seconds() / 60.0
 
             close_reason = None
 
