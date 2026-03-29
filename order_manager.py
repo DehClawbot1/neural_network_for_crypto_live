@@ -43,13 +43,10 @@ class OrderManager:
             val = float(raw_balance)
         except (TypeError, ValueError):
             return 0.0
-<<<<<<< HEAD
         # If balance looks like raw microdollars (>= 1_000_000 and is integer-like),
         # convert to dollars. Otherwise assume it's already in dollars.
         # Microdollar values are always >= 1,000,000 ($1 = 1M microdollars)
         # A value of 5000.0 is $5000 in real dollars, NOT $0.005 in microdollars
-=======
->>>>>>> d525b3abee41ed9164457f1fea845b586b6ae699
         try:
             from config import TradingConfig
             is_micro = getattr(TradingConfig, 'BALANCE_IS_MICRODOLLARS', True)
