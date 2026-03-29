@@ -30,8 +30,22 @@ class SignalEngine:
         volatility_risk = float(row.get("volatility_risk", 0.5))
         time_decay_score = float(row.get("time_decay_score", 0.5))
         p_tp = float(row.get("p_tp_before_sl", 0.0) or 0.0)
-        expected_return = float(row.get("expected_return", 0.0) or 0.0)
-        edge_score = float(row.get("edge_score", 0.0) or 0.0)
+        _raw_er = row.get("expected_return", 0.0)
+        expected_return = 0.0
+        try:
+            import math
+            _val_er = float(_raw_er or 0.0)
+            expected_return = _val_er if math.isfinite(_val_er) else 0.0
+        except (TypeError, ValueError):
+            expected_return = 0.0
+        _raw_edge = row.get("edge_score", 0.0)
+        edge_score = 0.0
+        try:
+            import math
+            _val = float(_raw_edge or 0.0)
+            edge_score = _val if math.isfinite(_val) else 0.0
+        except (TypeError, ValueError):
+            edge_score = 0.0
 
         heuristic_confidence = (
             whale_pressure * 0.40
@@ -43,11 +57,13 @@ class SignalEngine:
         confidence = float(np.clip(max(heuristic_confidence, model_confidence), 0.0, 1.0))
 
         # ── FIX: Lowered thresholds so trades actually happen
-        if confidence < 0.35:
+        # FIX: Lower thresholds for bootstrap phase — the bot needs trades
+        # to learn from. Once models improve, raise these back.
+        if confidence < 0.25:
             action_code = 0
-        elif confidence < 0.50:
+        elif confidence < 0.40:
             action_code = 1
-        elif confidence < 0.70:
+        elif confidence < 0.60:
             action_code = 2
         else:
             action_code = 3

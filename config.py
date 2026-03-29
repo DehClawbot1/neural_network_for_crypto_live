@@ -26,7 +26,7 @@ class TradingConfig:
     MAX_RISK_PER_TRADE_PCT = 0.05  # 5% of balance per trade
 
     # Minimum bet size in USDC (below this, skip the trade)
-    MIN_BET_USDC = 0.25  # $0.50 minimum
+    MIN_BET_USDC = 1.00  # Polymarket CLOB minimum order size is $1
 
     # Maximum bet size in USDC (cap regardless of balance)
     MAX_BET_USDC = 5.0  # $20 max per trade
@@ -35,16 +35,16 @@ class TradingConfig:
     HIGH_CONFIDENCE_BET_PCT = 0.08  # 5%
 
     # Default bet for medium confidence (0.50-0.70) as % of balance
-    MEDIUM_CONFIDENCE_BET_PCT = 0.04  # 2%
+    MEDIUM_CONFIDENCE_BET_PCT = 0.05  # 5% (was 2%, raised so bets reach $1 minimum)
 
     # Default bet for low confidence (<0.50) as % of balance
-    LOW_CONFIDENCE_BET_PCT = 0.02  # 1%
+    LOW_CONFIDENCE_BET_PCT = 0.04  # 4% (was 1%, raised so bets reach $1 minimum)
 
     # Use market orders (FOK) instead of limit orders for live trading
     USE_MARKET_ORDERS = True
 
     # Maximum number of concurrent open positions
-    MAX_CONCURRENT_POSITIONS = 5
+    MAX_CONCURRENT_POSITIONS = 4
 
     # Time stop: close positions after this many minutes
     TIME_STOP_MINUTES = 120
@@ -55,3 +55,6 @@ class TradingConfig:
     # Whether the CLOB API returns balance in microdollars (raw integer / 1e6 = dollars)
     # Set to False if your py-clob-client version already normalizes to dollars
     BALANCE_IS_MICRODOLLARS = True
+
+    # Paper trading simulated balance
+    SIMULATED_STARTING_BALANCE = 1000.0

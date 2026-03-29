@@ -14,7 +14,7 @@ class LiveRiskManager:
     Live-test pre-trade and operational risk controls with optional DB logging.
     """
 
-    def __init__(self, db=None, max_position_size=100.0, max_open_orders=10, max_daily_loss=200.0, max_spread=0.05, cooldown_after_loss_minutes=15, max_failed_orders=3):
+    def __init__(self, db=None, max_position_size=100.0, max_open_orders=10, max_daily_loss=200.0, max_spread=0.05, cooldown_after_loss_minutes=15, max_failed_orders=10):
         self.db = db
         self.max_position_size = max_position_size
         self.max_open_orders = max_open_orders

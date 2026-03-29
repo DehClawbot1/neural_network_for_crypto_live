@@ -105,7 +105,8 @@ def ensure_live_client_ready():
         clob_balance = 0.0
         for key in ["balance", "available", "available_balance", "amount"]:
             if collateral.get(key) is not None:
-                clob_balance = float(collateral[key])
+                # FIX C1: Normalize microdollars → dollars
+                clob_balance = client._normalize_usdc_balance(collateral[key])
                 break
 
         onchain_balance = 0.0

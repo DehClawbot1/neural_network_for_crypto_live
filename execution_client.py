@@ -319,12 +319,14 @@ class ExecutionClient:
         # convert to dollars. Otherwise assume it's already in dollars.
         # If configured as microdollars, convert values that look like raw integers
         # A $5 balance in microdollars = 5000000; in dollars = 5.0
+        # Microdollar values are always >= 1,000,000 ($1 = 1M microdollars)
+        # A value of 5000.0 is $5000 in real dollars, NOT $0.005 in microdollars
         try:
             from config import TradingConfig
             is_micro = getattr(TradingConfig, 'BALANCE_IS_MICRODOLLARS', True)
         except ImportError:
             is_micro = True
-        if is_micro and val > 1000 and abs(val - round(val)) < 0.01:
+        if is_micro and val >= 1_000_000 and val == int(val):
             return val / 1e6
         return val
 

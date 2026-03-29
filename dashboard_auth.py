@@ -148,7 +148,12 @@ def get_balance_info() -> dict:
         if isinstance(collateral, dict):
             for key in ["balance", "available", "available_balance", "amount"]:
                 if collateral.get(key) is not None:
-                    result["clob_balance"] = float(collateral[key])
+                    # H1: Normalize microdollars
+                    if hasattr(client, '_normalize_usdc_balance'):
+                        result["clob_balance"] = client._normalize_usdc_balance(collateral[key])
+                    else:
+                        raw = float(collateral[key])
+                        result["clob_balance"] = raw / 1e6 if raw >= 100 and raw == int(raw) else raw
                     break
 
         # Get on-chain balance

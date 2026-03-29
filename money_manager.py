@@ -103,13 +103,21 @@ class MoneyManager:
         adjusted_bet = min(adjusted_bet, TradingConfig.MAX_BET_USDC)
         adjusted_bet = min(adjusted_bet, remaining_capacity)
 
-        # Check minimum
+        # Check minimum — Polymarket CLOB requires at least $1 per order.
+        # If bet is between $0.80 and MIN_BET, round up to MIN_BET instead of skipping.
         if adjusted_bet < TradingConfig.MIN_BET_USDC:
-            logging.info(
-                "MoneyManager: Bet $%.2f below minimum $%.2f — skipping trade",
-                adjusted_bet, TradingConfig.MIN_BET_USDC
-            )
-            return 0.0
+            if adjusted_bet >= TradingConfig.MIN_BET_USDC * 0.8 and remaining_capacity >= TradingConfig.MIN_BET_USDC:
+                adjusted_bet = TradingConfig.MIN_BET_USDC
+                logging.info(
+                    "MoneyManager: Rounded up $%.2f → $%.2f (CLOB minimum)",
+                    adjusted_bet, TradingConfig.MIN_BET_USDC
+                )
+            else:
+                logging.info(
+                    "MoneyManager: Bet $%.2f below minimum $%.2f — skipping trade",
+                    adjusted_bet, TradingConfig.MIN_BET_USDC
+                )
+                return 0.0
 
         # Round to 2 decimal places
         adjusted_bet = round(adjusted_bet, 2)
