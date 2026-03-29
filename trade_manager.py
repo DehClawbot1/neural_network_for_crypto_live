@@ -75,7 +75,6 @@ class TradeManager:
                 outcome_side=outcome_side,
             )
             trade.on_signal(signal_row.to_dict() if hasattr(signal_row, 'to_dict') else dict(signal_row))
-            # ── BUG FIX C: Store confidence and label on the trade object ──
             trade.confidence_at_entry = float(confidence)
             trade.signal_label = str(signal_row.get("signal_label", "UNKNOWN") or "UNKNOWN")
             trade.enter(size_usdc=size_usdc, entry_price=entry_price)
@@ -92,7 +91,7 @@ class TradeManager:
 
     def process_exits(self, current_timestamp: datetime, alerts_df: pd.DataFrame = None):
         closed_trades: List[TradeLifecycle] = []
-        close_reasons: Dict[str, str] = {}  # ── BUG FIX D: track reasons ──
+        close_reasons: Dict[str, str] = {}
 
         for trade_key, trade in list(self.active_trades.items()):
             if trade.state == TradeState.CLOSED:
@@ -137,7 +136,6 @@ class TradeManager:
                 close_reason = "trailing_stop"
 
             if close_reason:
-                # ── BUG FIX E: pass reason to trade.close() ──
                 trade.close(current_price, reason=close_reason)
                 logger.info("[->] Closed trade for %s (%s). Reason: %s. PnL: %.4f",
                             trade.market, trade.outcome_side, close_reason, trade.realized_pnl)
@@ -154,11 +152,6 @@ class TradeManager:
         return closed_trades
 
     def _maybe_load_reconciled_positions(self):
-        """
-        Hydrate active_trades from the reconciled live position book before callers
-        inspect local open positions. This lets mismatch detection compare against
-        the latest reconciled state instead of a stale in-memory snapshot.
-        """
         try:
             from live_position_book import LivePositionBook
         except Exception:
@@ -173,6 +166,12 @@ class TradeManager:
             return
 
         if reconciled_positions_df is None or reconciled_positions_df.empty:
+            if self.active_trades:
+                logger.warning(
+                    "Clearing %s stale in-memory live trades because reconciled position book is empty.",
+                    len(self.active_trades),
+                )
+                self.active_trades = {}
             return
 
         reconciled_count = len(reconciled_positions_df.index)
@@ -210,11 +209,6 @@ class TradeManager:
         }
 
     def _trade_to_dict(self, trade: TradeLifecycle) -> dict:
-        """
-        Convert a TradeLifecycle to a dict matching the dashboard CSV schema.
-        BUG FIX C: includes confidence_at_entry and signal_label.
-        BUG FIX H: consistent ISO timestamps.
-        """
         return {
             "position_id": f"{trade.market}-{trade.outcome_side}",
             "market": trade.market,
@@ -230,12 +224,10 @@ class TradeManager:
             "market_value": trade.shares * trade.current_price if trade.current_price else 0.0,
             "unrealized_pnl": round(trade.unrealized_pnl, 4),
             "realized_pnl": round(trade.realized_pnl, 4),
-            # ── BUG FIX F: write both column names so dashboard finds it ──
             "net_realized_pnl": round(trade.realized_pnl, 4),
             "opened_at": trade.opened_at,
             "closed_at": trade.closed_at,
             "status": trade.state.value if hasattr(trade.state, 'value') else str(trade.state),
-            # ── BUG FIX C: persist confidence and signal label ──
             "confidence": trade.confidence_at_entry,
             "confidence_at_entry": trade.confidence_at_entry,
             "signal_label": trade.signal_label,
@@ -258,15 +250,9 @@ class TradeManager:
         pd.DataFrame(rows).to_csv(self.positions_file, index=False)
 
     def _append_closed_trades(self, closed_trades: List[TradeLifecycle]):
-        """
-        BUG FIX D: Use actual close_reason from TradeLifecycle, not hardcoded.
-        BUG FIX F: Write both realized_pnl AND net_realized_pnl.
-        FIX M7: Record wins/losses in MoneyManager for adaptive sizing.
-        """
         if not closed_trades:
             return
 
-        # FIX M7: Update MoneyManager with trade outcomes
         try:
             from money_manager import MoneyManager
             _mm = getattr(self, '_money_manager', None)
@@ -284,10 +270,8 @@ class TradeManager:
         rows = []
         for trade in closed_trades:
             row = self._trade_to_dict(trade)
-            # ── BUG FIX D: Use actual reason stored on the trade ──
             row["close_reason"] = trade.close_reason or "policy_exit"
             row["exit_price"] = trade.current_price
-            # ── BUG FIX F: Write both column names ──
             row["realized_pnl"] = round(trade.realized_pnl, 4)
             row["net_realized_pnl"] = round(trade.realized_pnl, 4)
             row["status"] = "CLOSED"
@@ -301,6 +285,7 @@ class TradeManager:
     def reconcile_live_positions(self, execution_client=None, reconciled_positions_df: pd.DataFrame | None = None):
         if reconciled_positions_df is None or reconciled_positions_df.empty:
             logger.info("[~] Reconciling live positions with exchange (no reconciled positions supplied).")
+            self.active_trades = {}
             return
 
         rebuilt_trades: Dict[str, TradeLifecycle] = {}

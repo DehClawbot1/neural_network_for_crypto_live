@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 
 from db import Database
+
+logger = logging.getLogger(__name__)
 
 
 class LivePositionBook:
@@ -75,10 +78,6 @@ class LivePositionBook:
                 if book["shares"] <= 0:
                     book["avg_entry_price"] = 0.0
 
-        # ── BUG FIX (BUG 4): Atomic rebuild using a transaction.
-        #    Previously did DELETE then INSERT in separate commits.
-        #    If the process crashed between DELETE and INSERT, all position
-        #    data was lost. Now both happen in a single transaction. ──
         now = datetime.now(timezone.utc).isoformat()
         cursor = self.db.conn.cursor()
         try:
@@ -113,15 +112,78 @@ class LivePositionBook:
 
         return pd.DataFrame(list(books.values()))
 
+    def _extract_available_balance(self, payload, execution_client):
+        if not isinstance(payload, dict):
+            return 0.0
+        for key in ["balance", "available", "available_balance", "amount"]:
+            if payload.get(key) is not None:
+                try:
+                    return float(execution_client._normalize_usdc_balance(payload[key]))
+                except Exception:
+                    try:
+                        return float(payload[key])
+                    except Exception:
+                        return 0.0
+        return 0.0
+
+    def _verify_open_positions_against_exchange(self, rows):
+        if not rows:
+            return rows
+
+        try:
+            from execution_client import ExecutionClient
+            execution_client = ExecutionClient()
+        except Exception as exc:
+            logger.debug("Live position verification unavailable: %s", exc)
+            return rows
+
+        verified_rows = []
+        now = datetime.now(timezone.utc).isoformat()
+        mutated = False
+        cursor = self.db.conn.cursor()
+
+        for row in rows:
+            token_id = str(row.get("token_id") or "")
+            if not token_id:
+                continue
+            try:
+                payload = execution_client.get_balance_allowance(asset_type="CONDITIONAL", token_id=token_id)
+                available_shares = self._extract_available_balance(payload, execution_client)
+            except Exception as exc:
+                logger.debug("Conditional balance verification failed for %s: %s", token_id[:16], exc)
+                verified_rows.append(row)
+                continue
+
+            if available_shares <= 1e-9:
+                mutated = True
+                logger.warning(
+                    "Closing stale local live position for %s because exchange conditional balance is zero.",
+                    token_id,
+                )
+                cursor.execute(
+                    "UPDATE live_positions SET shares = 0, status = 'CLOSED', updated_at = ? WHERE position_key = ?",
+                    (now, row.get("position_key")),
+                )
+                continue
+
+            local_shares = float(row.get("shares") or 0.0)
+            row["shares"] = min(local_shares, available_shares)
+            verified_rows.append(row)
+
+        if mutated:
+            self.db.conn.commit()
+        return verified_rows
+
     def get_open_positions(self):
         rows = self.db.query_all(
             """
-            SELECT token_id, condition_id, outcome_side, shares, avg_entry_price, realized_pnl, last_fill_at, source, status, updated_at
+            SELECT position_key, token_id, condition_id, outcome_side, shares, avg_entry_price, realized_pnl, last_fill_at, source, status, updated_at
             FROM live_positions
             WHERE status = 'OPEN' AND shares > 0
             ORDER BY COALESCE(last_fill_at, '') DESC
             """
         )
+        rows = self._verify_open_positions_against_exchange(rows)
         return pd.DataFrame(rows)
 
     def get_enriched_open_positions(self, scored_df=None, fallback_df=None):
