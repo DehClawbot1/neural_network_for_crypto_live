@@ -42,7 +42,7 @@ class AlertsEngine:
                 message = alert_type
         normalized = {
             "alert_id": record.get("alert_id", str(uuid.uuid4())),
-            "timestamp": record.get("timestamp", datetime.now(timezone.utc).isoformat() # BUG FIX 3: Prevent Tz-Naive crash),
+            "timestamp": record.get("timestamp", datetime.now(timezone.utc).isoformat()),
             "alert_type": alert_type,
             "severity": severity,
             "status": record.get("status", "open"),

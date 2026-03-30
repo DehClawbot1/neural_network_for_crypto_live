@@ -1,86 +1,43 @@
 import os
-import traceback
+import glob
+import shutil
 
-def get_leading_spaces(line):
-    """Counts the leading whitespace characters."""
-    return len(line) - len(line.lstrip(' \t'))
+def emergency_fixes():
+    # 1. Fix pnl_engine.py double return
+    if os.path.exists("pnl_engine.py"):
+        with open("pnl_engine.py", "r", encoding="utf-8", errors="ignore") as f:
+            c = f.read()
+        c = c.replace("return int((return float(", "return int((float(")
+        with open("pnl_engine.py", "w", encoding="utf-8") as f:
+            f.write(c)
+        print("[+] Fixed pnl_engine.py syntax")
 
-def heal_indentations(directory="."):
-    print("=== Commencing Automated Syntax & Indentation Hunt ===")
-    
-    py_files = []
-    for root, _, files in os.walk(directory):
-        for f in files:
-            if f.endswith('.py'):
-                py_files.append(os.path.join(root, f))
+    # 2. Fix alerts_engine.py commented bracket
+    if os.path.exists("alerts_engine.py"):
+        with open("alerts_engine.py", "r", encoding="utf-8", errors="ignore") as f:
+            c = f.read()
+        c = c.replace("isoformat() # BUG FIX 3: Prevent Tz-Naive crash", "isoformat()")
+        with open("alerts_engine.py", "w", encoding="utf-8") as f:
+            f.write(c)
+        print("[+] Fixed alerts_engine.py syntax")
 
-    fixed_count = 0
-    for file_path in py_files:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            source = f.read()
-
-        attempts = 0
-        while attempts < 10:
-            try:
-                # Try to compile the file into an AST. If it succeeds, no syntax/indent errors exist!
-                compile(source, file_path, 'exec')
-                break 
-            except (IndentationError, TabError) as e:
-                line_num = e.lineno
-                lines = source.split('\n')
-                
-                if line_num is None or line_num > len(lines):
-                    print(f"[-] Could not map error in {file_path}")
-                    break
-
-                offending_line = lines[line_num - 1]
-                
-                # Look backwards for the closest non-empty line to inherit its indentation
-                prev_line_num = line_num - 2
-                while prev_line_num >= 0 and not lines[prev_line_num].strip():
-                    prev_line_num -= 1
-                
-                if prev_line_num < 0:
-                    break 
-                    
-                prev_line = lines[prev_line_num]
-                target_indent = get_leading_spaces(prev_line)
-                
-                # If the previous line opened a block (e.g., if, try, for, def), indent +4 spaces
-                if prev_line.rstrip().endswith(':'):
-                    target_indent += 4
-                # If the previous line closed a block/returned, un-indent -4 spaces
-                elif any(prev_line.strip().startswith(kw) for kw in ['return', 'continue', 'break']):
-                    target_indent = max(0, target_indent - 4)
-                    
-                # Apply the dynamically calculated indentation to the broken line
-                lines[line_num - 1] = (' ' * target_indent) + offending_line.lstrip(' \t')
-                source = '\n'.join(lines)
-                attempts += 1
-                
-            except SyntaxError as e:
-                print(f"[!] Standard SyntaxError in {file_path} at line {e.lineno}: {e.msg}")
-                # Print the broken line so you can easily spot it
-                if e.lineno:
-                    lines = source.split('\n')
-                    print(f"    Code: {lines[e.lineno - 1].strip()}")
-                break
-            except Exception as e:
-                print(f"[!] Unknown compilation error in {file_path}: {e}")
-                break
+    # 3. Restore and cleanly patch rl_trainer.py
+    baks = sorted(glob.glob("rl_trainer.py.*.bak"))
+    if baks:
+        shutil.copy(baks[-1], "rl_trainer.py")
+        with open("rl_trainer.py", "r", encoding="utf-8", errors="ignore") as f:
+            c = f.read()
         
-        # If we had to make changes, save the healed file
-        if attempts > 0:
-            try:
-                compile(source, file_path, 'exec') # Final sanity check
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(source)
-                print(f"[+] Successfully healed IndentationError in {os.path.basename(file_path)} (took {attempts} iteration(s))")
-                fixed_count += 1
-            except Exception as e:
-                print(f"[-] Auto-heal failed for {os.path.basename(file_path)} after {attempts} attempts. Manual review required.")
-
-    print(f"\n=== Done! Healed {fixed_count} files across the repository. ===")
+        # Apply the fix safely without messing up indentation
+        c = c.replace(
+            "expected_dim = int(PolyTradeEnv().observation_space.shape[0])",
+            "expected_dim = int(LiveReplayDatasetEnv(df).observation_space.shape[0])"
+        )
+        with open("rl_trainer.py", "w", encoding="utf-8") as f:
+            f.write(c)
+        print("[+] Restored and safely patched rl_trainer.py")
+    else:
+        print("[-] Could not find rl_trainer.py backup to restore.")
 
 if __name__ == "__main__":
-    heal_indentations(".")
+    emergency_fixes()
