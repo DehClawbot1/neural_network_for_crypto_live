@@ -108,7 +108,7 @@ class TradeManager:
                 live_price = market_prices[trade.market]
                 trade.update_market(live_price)
 
-    def process_exits(self, current_timestamp: datetime, alerts_df: pd.DataFrame = None, execution_client=None, execution_client=None):
+    def process_exits(self, current_timestamp: datetime, alerts_df: pd.DataFrame = None, execution_client=None):
         closed_trades: List[TradeLifecycle] = []
         close_reasons: Dict[str, str] = {}
 

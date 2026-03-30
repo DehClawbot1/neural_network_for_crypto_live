@@ -348,7 +348,7 @@ def safe_run_scraper_cycle(*args, **kwargs):
         return pd.DataFrame()
     return _orig_run_scraper_cycle(*args, **kwargs)
 
-def safe_fetch_markets() # Patched to use available method:
+def safe_fetch_markets(): # Patched to use available method
     global _last_research_time, _cached_open_markets
     import time
     import pandas as pd
