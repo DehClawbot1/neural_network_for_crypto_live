@@ -29,7 +29,7 @@ class LiveRiskManager:
     def _evaluate(self, price, size, spread=None, open_orders=0, daily_pnl=0.0):
         if self.kill_switch:
             return RiskDecision(False, "kill_switch_enabled")
-        if float(size) > self.max_position_size:
+        if float(size or 0.0) > self.max_position_size: # BUG FIX 10
             return RiskDecision(False, "max_position_size_exceeded")
         if open_orders >= self.max_open_orders:
             return RiskDecision(False, "max_open_orders_exceeded")
@@ -52,12 +52,16 @@ class LiveRiskManager:
                     "INSERT INTO risk_events (token_id, event_type, detail) VALUES (?, ?, ?)",
                     (str(token_id) if token_id is not None else None, decision.reason, detail),
                 )
+                if hasattr(self.db, "commit"): self.db.commit() # BUG FIX 6: Ensure audit logs save
             except Exception as exc:
                 logging.error("Failed to log risk event to DB: %s", exc)
         return decision
 
     def record_failed_order(self):
         self.failed_orders += 1
+
+    def record_successful_order(self):
+        self.failed_orders = 0 # BUG FIX 7: Decay circuit breaker on success
 
     def record_loss(self):
         self.last_loss_time = datetime.now(timezone.utc)

@@ -71,7 +71,7 @@ class MoneyManager:
             return 0.0
 
         # Check total exposure limit (e.g. 85% of total capital)
-        max_total_exposure = available_balance * TradingConfig.MAX_TOTAL_EXPOSURE_PCT
+        max_total_exposure = (available_balance + current_exposure) * TradingConfig.MAX_TOTAL_EXPOSURE_PCT # BUG FIX 2: Compute against total portfolio
         remaining_capacity = max_total_exposure - current_exposure
         if remaining_capacity <= 0:
             logging.info(
@@ -103,23 +103,15 @@ class MoneyManager:
         adjusted_bet = min(adjusted_bet, remaining_capacity)
 
         # Enforce the dynamic minimum
+        if dynamic_max < absolute_floor:
+            logging.info("MoneyManager: dynamic_max ($%.2f) < absolute_floor ($%.2f). Rejecting trade.", dynamic_max, absolute_floor)
+            return 0.0
+            
         if adjusted_bet < dynamic_min:
             if remaining_capacity >= dynamic_min:
-                logging.info(
-                    "MoneyManager: Scaling bet up to dynamic minimum ($%.2f -> $%.2f)",
-                    adjusted_bet, dynamic_min
-                )
-                adjusted_bet = dynamic_min
+                adjusted_bet = min(dynamic_min, dynamic_max) # BUG FIX 3: Never break max risk for the sake of minimums
             else:
-                # If we don't have capacity for the dynamic min, but can meet the exchange floor, take what we can
-                if remaining_capacity >= absolute_floor and adjusted_bet >= absolute_floor:
-                    logging.info("MoneyManager: Near max exposure, squeezing in smaller position ($%.2f)", adjusted_bet)
-                else:
-                    logging.info(
-                        "MoneyManager: Insufficient capacity for floor bet ($%.2f remaining < $%.2f floor)",
-                        remaining_capacity, absolute_floor
-                    )
-                    return 0.0
+                return 0.0
 
         adjusted_bet = round(adjusted_bet, 2)
 

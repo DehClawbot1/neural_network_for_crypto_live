@@ -289,10 +289,10 @@ class LivePolyTradeEnv(gym.Env):
             return 0.0
         try:
             orderbook = self.execution_client.client.get_order_book(self.current_token_id)
-            bids = getattr(orderbook, "bids", [])[:5]
-            asks = getattr(orderbook, "asks", [])[:5]
-            bid_vol = sum(float(getattr(level, "size", 0.0) or 0.0) for level in bids)
-            ask_vol = sum(float(getattr(level, "size", 0.0) or 0.0) for level in asks)
+            bids = (orderbook.get("bids", []) if isinstance(orderbook, dict) else getattr(orderbook, "bids", []))[:5]
+            asks = (orderbook.get("asks", []) if isinstance(orderbook, dict) else getattr(orderbook, "asks", []))[:5] # BUG FIX 8
+            bid_vol = sum(float((level.get("size", 0) if isinstance(level, dict) else getattr(level, "size", 0)) or 0) for level in bids)
+            ask_vol = sum(float((level.get("size", 0) if isinstance(level, dict) else getattr(level, "size", 0)) or 0) for level in asks) # BUG FIX 9
             total = bid_vol + ask_vol
             if total <= 0:
                 return 0.0
@@ -312,14 +312,23 @@ class LivePolyTradeEnv(gym.Env):
         except Exception:
             return 0.0
 
+    
+    _cached_btc_price = 0.0
+    _cached_btc_time = 0.0
     def _safe_correlated_price(self):
+        import time
+        if time.time() - getattr(self, '_cached_btc_time', 0) < 10:
+            return getattr(self, '_cached_btc_price', 0.0)
         try:
             response = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": "BTCUSDT"}, timeout=5)
             if response.ok:
-                return float(response.json().get("price") or 0.0)
+                price = float(response.json().get("price") or 0.0)
+                self._cached_btc_price = price
+                self._cached_btc_time = time.time()
+                return price
         except Exception:
             pass
-        return 0.0
+        return getattr(self, '_cached_btc_price', 0.0) # BUG FIX 1: 10-second TTL cache to prevent IP bans
 
     def _build_state(self):
         quote = self._safe_quote()
@@ -383,7 +392,8 @@ class LivePolyTradeEnv(gym.Env):
                 row, _ = self.order_manager.submit_entry(token_id=self.current_token_id, price=best_ask, size=size, side="BUY", outcome_side=self.outcome_side)
                 return row
             if action_value < -0.05:
-                size = max(1.0, min(max(float(self.shares), 1.0), max(float(self.shares), 50.0) * abs(action_value)))
+                size = max(0.1, min(float(self.shares), float(self.shares) * abs(action_value))) if self.shares > 0 else 0.0
+                if size <= 0: return {"status": "NO_POSITION_TO_EXIT"} # BUG FIX 4: Prevent short-sell loops
                 row, _ = self.order_manager.submit_entry(token_id=self.current_token_id, price=best_bid, size=size, side="SELL", outcome_side=self.outcome_side)
                 return row
             return {"status": "HOLD", "action": action_value}
@@ -452,8 +462,8 @@ class LivePolyTradeEnv(gym.Env):
                 self.shares += filled_size or float(order_result.get("size", 0.0))
                 self.position_age = 0
             elif logged_action == 4 and self.position_open:
-                reduce_size = max(float(self.shares) * 0.5, 0.0)
-                self.shares = max(float(self.shares) - reduce_size, 0.0)
+                reduce_size = float(filled_size) if filled_size > 0 else max(float(self.shares) * 0.5, 0.0)
+                self.shares = max(float(self.shares) - reduce_size, 0.0) # BUG FIX 5: Use actual fill amount
                 if self.shares <= 0:
                     self.position_open = False
                     self.entry_price = 0.0
