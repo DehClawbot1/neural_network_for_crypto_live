@@ -106,6 +106,19 @@ class ReconciliationService:
                 synced_orders += 1
         except Exception:
             pass
+        
+        # BUG FIX 2: Canceled Order Sweep
+        try:
+            if orders_payload and isinstance(orders_payload, (dict, list)) and not ("error" in str(orders_payload).lower()):
+                remote_open_ids = [str(self._normalize_order(o)["order_id"]) for o in self._extract_items(orders_payload) if self._normalize_order(o)]
+                if remote_open_ids:
+                    placeholders = ",".join("?" for _ in remote_open_ids)
+                    self.db.execute(f"UPDATE orders SET status = 'CANCELED' WHERE status = 'OPEN' AND order_id NOT IN ({placeholders})", tuple(remote_open_ids))
+                else:
+                    self.db.execute("UPDATE orders SET status = 'CANCELED' WHERE status = 'OPEN'")
+                if hasattr(self.db.conn, "commit"): self.db.conn.commit()
+        except Exception:
+            pass
 
         try:
             trades_payload = self.execution_client.get_trades()
@@ -127,8 +140,7 @@ class ReconciliationService:
                         trade["filled_at"],
                     ),
                 )
-                if trade["order_id"]:
-                    self.db.execute("UPDATE orders SET status = ? WHERE order_id = ?", ("FILLED", trade["order_id"]))
+                # BUG FIX 3: Removed blind FILLED overwrite. Open order sweep will handle terminal status naturally.
                 synced_fills += 1
         except Exception:
             pass
@@ -143,8 +155,12 @@ class ReconciliationService:
 
         Returns (report_dict, remote_orders_df, remote_trades_df).
         """
-        local_orders = self._safe_read_csv("live_orders.csv")
-        local_fills = self._safe_read_csv("live_fills.csv")
+        try:
+            local_orders = pd.read_sql_query("SELECT * FROM orders", self.db.conn)
+            local_fills = pd.read_sql_query("SELECT * FROM fills", self.db.conn)
+        except Exception:
+            local_orders = pd.DataFrame()
+            local_fills = pd.DataFrame() # BUG FIX 4: Use DB instead of split-brain CSVs
 
         # Fetch remote state
         remote_orders_raw = []

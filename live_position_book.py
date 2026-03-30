@@ -37,7 +37,7 @@ class LivePositionBook:
         )
         books = {}
         for fill in fills:
-            token_id = str(fill.get("token_id") or "")
+            tid = fill.get("token_id"); token_id = "" if pd.isna(tid) else str(tid or "") # BUG FIX 10
             condition_id = fill.get("condition_id")
             outcome_side = fill.get("outcome_side")
             side = str(fill.get("order_side") or "").upper()
@@ -84,7 +84,7 @@ class LivePositionBook:
             cursor.execute("BEGIN IMMEDIATE")
             cursor.execute("DELETE FROM live_positions")
             for row in books.values():
-                row["status"] = "OPEN" if float(row["shares"]) > 0 else "CLOSED"
+                row["status"] = "OPEN" if float(row["shares"]) > 1e-5 else "CLOSED" # BUG FIX 6: Prevent dust re-opening
                 cursor.execute(
                     """
                     INSERT OR REPLACE INTO live_positions
@@ -189,7 +189,12 @@ class LivePositionBook:
                 continue
 
             local_shares = float(row.get("shares") or 0.0)
-            row["shares"] = min(local_shares, available_shares)
+            if available_shares < local_shares - 1e-5: # BUG FIX 5: Permanently save partial external sells to DB
+                row["shares"] = available_shares
+                cursor.execute("UPDATE live_positions SET shares = ?, updated_at = ? WHERE position_key = ?", (available_shares, now, row.get("position_key")))
+                mutated = True
+            else:
+                row["shares"] = local_shares
             verified_rows.append(row)
 
         if mutated:

@@ -4,11 +4,8 @@ import shutil
 from datetime import datetime
 
 FILES_TO_PATCH = [
-    "alerts_engine.py",
-    "backtester.py",
-    "wallet_alpha_builder.py",
-    "rl_trainer.py",
-    "dashboard.py"
+    "live_position_book.py",
+    "reconciliation_service.py"
 ]
 
 def backup_file(filepath):
@@ -33,107 +30,88 @@ def patch_file(filepath, patch_func):
         backup_file(filepath)
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(patched_content)
-        print(f"[+] Successfully fixed Phase 6 bugs in {filepath}")
+        print(f"[+] Successfully fixed Phase 7 DB/Sync bugs in {filepath}")
     else:
         print(f"[-] No changes needed for {filepath} (or patterns didn't match)")
 
 # --- Patching Functions ---
 
-def patch_alerts_engine(content):
-    # Fix import for timezone
-    if "from datetime import timezone" not in content and "timezone" not in content:
-        content = re.sub(r'from datetime import datetime', 'from datetime import datetime, timezone', content)
-    
-    # BUG 3: Tz-Naive Timestamp Subtraction Crash
+def patch_live_position_book(content):
+    # BUG 10: "nan" String Typecast Vulnerability
     content = re.sub(
-        r'datetime\.utcnow\(\)\.strftime\("%Y-%m-%d %H:%M:%S"\)',
-        r'datetime.now(timezone.utc).isoformat() # BUG FIX 3: Prevent Tz-Naive crash',
+        r'token_id = str\(fill\.get\("token_id"\) or ""\)',
+        r'tid = fill.get("token_id"); token_id = "" if pd.isna(tid) else str(tid or "") # BUG FIX 10',
         content
     )
 
-    # BUG 9: Missing Level Fallback
+    # BUG 6: Microscopic Dust Re-Opening
     content = re.sub(
-        r'severity = record\.get\("severity"\)',
-        r'severity = record.get("severity", record.get("level")) # BUG FIX 9: Support alternative severity keys',
+        r'row\["status"\] = "OPEN" if float\(row\["shares"\]\) > 0 else "CLOSED"',
+        r'row["status"] = "OPEN" if float(row["shares"]) > 1e-5 else "CLOSED" # BUG FIX 6: Prevent dust re-opening',
         content
     )
+
+    # BUG 1: Limit Order Erasure (Protect balances locked in limit orders)
+    target_1 = r'(if available_shares <= 1e-9:)'
+    fix_1 = r"""cursor.execute("SELECT COUNT(*) FROM orders WHERE token_id = ? AND status IN ('OPEN', 'PARTIAL_FILLED', 'PENDING')", (token_id,))
+            has_open_orders = cursor.fetchone()[0] > 0
+            if available_shares <= 1e-9 and not has_open_orders: # BUG FIX 1: Do not erase position if tokens are locked in a limit order"""
+    content = re.sub(target_1, fix_1, content)
+
+    # BUG 5 & 7: Stale DB Read on Partial Sells & Unhandled exceptions
+    target_5 = r'(local_shares = float\(row\.get\("shares"\) or 0\.0\)\n\s*row\["shares"\] = min\(local_shares, available_shares\)\n\s*verified_rows\.append\(row\))'
+    fix_5 = r"""local_shares = float(row.get("shares") or 0.0)
+            if available_shares < local_shares - 1e-5: # BUG FIX 5: Permanently save partial external sells to DB
+                row["shares"] = available_shares
+                cursor.execute("UPDATE live_positions SET shares = ?, updated_at = ? WHERE position_key = ?", (available_shares, now, row.get("position_key")))
+                mutated = True
+            else:
+                row["shares"] = local_shares
+            verified_rows.append(row)"""
+    content = re.sub(target_5, fix_5, content)
+
     return content
 
-def patch_backtester(content):
-    # BUG 5: String Coercion Crash
+def patch_reconciliation_service(content):
+    # BUG 4: Split-Brain Reconciliation
+    target_4 = r'local_orders = self\._safe_read_csv\("live_orders\.csv"\)\n\s*local_fills = self\._safe_read_csv\("live_fills\.csv"\)'
+    fix_4 = r"""try:
+            local_orders = pd.read_sql_query("SELECT * FROM orders", self.db.conn)
+            local_fills = pd.read_sql_query("SELECT * FROM fills", self.db.conn)
+        except Exception:
+            local_orders = pd.DataFrame()
+            local_fills = pd.DataFrame() # BUG FIX 4: Use DB instead of split-brain CSVs"""
+    content = re.sub(target_4, fix_4, content)
+
+    # BUG 3: Partial Fill Complete-Overwrite (Remove it completely)
     content = re.sub(
-        r'avg_hold = float\(df\[hold_col\]\.astype\(float\)\.mean\(\)\)',
-        r'avg_hold = float(pd.to_numeric(df[hold_col], errors="coerce").mean()) # BUG FIX 5: Protect against string annotations',
+        r'if trade\["order_id"\]:\n\s*self\.db\.execute\("UPDATE orders SET status = \? WHERE order_id = \?", \("FILLED", trade\["order_id"\]\)\)',
+        r'# BUG FIX 3: Removed blind FILLED overwrite. Open order sweep will handle terminal status naturally.',
         content
     )
 
-    # BUG 8: Zero-Loss Infinity Masking
-    content = re.sub(
-        r'profit_factor = float\(gross_profit / gross_loss\) if gross_loss > 0 else np\.nan',
-        r'profit_factor = float(gross_profit / gross_loss) if gross_loss > 0 else (float("inf") if gross_profit > 0 else 0.0) # BUG FIX 8',
-        content
-    )
-    return content
-
-def patch_wallet_alpha_builder(content):
-    # BUG 6: Non-Numeric Hit Rate Erasure
-    content = re.sub(
-        r'df\[hit_col\] = pd\.to_numeric\(df\[hit_col\], errors="coerce"\)',
-        r'df[hit_col] = pd.to_numeric(df[hit_col].replace({"True": 1, "False": 0, "true": 1, "false": 0}), errors="coerce") # BUG FIX 6: Prevent erasure of boolean strings',
-        content
-    )
-
-    # BUG 7: Expanding Mean NaN Bleed
-    content = re.sub(
-        r'(yes_returns = group\[return_col\]\.where\(yes_mask\)\.expanding\(min_periods=1\)\.mean\(\)\.shift\(1\))',
-        r'\1.fillna(0.0) # BUG FIX 7',
-        content
-    )
-    content = re.sub(
-        r'(no_returns = group\[return_col\]\.where\(no_mask\)\.expanding\(min_periods=1\)\.mean\(\)\.shift\(1\))',
-        r'\1.fillna(0.0) # BUG FIX 7',
-        content
-    )
-    return content
-
-def patch_rl_trainer(content):
-    # BUG 2: Blind API Instantiation Crash
-    content = re.sub(
-        r'expected_dim = int\(PolyTradeEnv\(\)\.observation_space\.shape\[0\]\)',
-        r'expected_dim = int(LiveReplayDatasetEnv(df).observation_space.shape[0]) # BUG FIX 2: Use dummy offline env to prevent API crash',
-        content
-    )
-
-    # BUG 1: RL Thread ZipFile Fatality (Race condition)
-    bad_loop = r'(model = PPO\.load\(model_path, env=env\)\n\s*print\(f"\[\+\] Fine-tuning.*?\n\s*model\.learn\(.*?\)\n\s*model\.save\(.*?\)\n\s*print\(.*?\))'
-    safe_loop = r"""try:
-            \1
-        except Exception as e:
-            print(f"[!] Fine-tuning interrupted (possible file lock race condition): {e}") # BUG FIX 1"""
-    
-    content = re.sub(bad_loop, safe_loop, content, flags=re.DOTALL)
-    return content
-
-def patch_dashboard(content):
-    # BUG 4: The Paper Book Erasure Bug
-    content = re.sub(
-        r'(else:\n\s*)pdf = live_pdf',
-        r'\1pdf = pd.concat([live_pdf, pdf], ignore_index=True) # BUG FIX 4: Append instead of wiping paper book',
-        content
-    )
-
-    # BUG 10: Float Format NaN Exception
-    content = re.sub(r'c5\.metric\("Avg Slippage \(bps\)", f"\{asl:\.1f\}"\)', r'c5.metric("Avg Slippage (bps)", f"{0.0 if pd.isna(asl) else asl:.1f}") # BUG FIX 10', content)
-    content = re.sub(r'c6\.metric\("Avg EV_adj", f"\{aev:\+\.2\%\}"\)', r'c6.metric("Avg EV_adj", f"{0.0 if pd.isna(aev) else aev:+.2%}")', content)
-    content = re.sub(r'c7\.metric\("Avg Meta Prob", f"\{amp:\.2\%\}"\)', r'c7.metric("Avg Meta Prob", f"{0.0 if pd.isna(amp) else amp:.2%}")', content)
+    # BUG 2: Canceled Order Blindness (Sweep local open orders against remote open orders)
+    target_2 = r'(synced_orders \+= 1\n\s*except Exception:.*?pass)'
+    fix_2 = r"""\1
+        
+        # BUG FIX 2: Canceled Order Sweep
+        try:
+            if orders_payload and isinstance(orders_payload, (dict, list)) and not ("error" in str(orders_payload).lower()):
+                remote_open_ids = [str(self._normalize_order(o)["order_id"]) for o in self._extract_items(orders_payload) if self._normalize_order(o)]
+                if remote_open_ids:
+                    placeholders = ",".join("?" for _ in remote_open_ids)
+                    self.db.execute(f"UPDATE orders SET status = 'CANCELED' WHERE status = 'OPEN' AND order_id NOT IN ({placeholders})", tuple(remote_open_ids))
+                else:
+                    self.db.execute("UPDATE orders SET status = 'CANCELED' WHERE status = 'OPEN'")
+                if hasattr(self.db.conn, "commit"): self.db.conn.commit()
+        except Exception:
+            pass"""
+    content = re.sub(target_2, fix_2, content, flags=re.DOTALL)
 
     return content
 
 if __name__ == "__main__":
-    print("=== Commencing Phase 6 Deep Hunt Bug Fixes ===")
-    patch_file("alerts_engine.py", patch_alerts_engine)
-    patch_file("backtester.py", patch_backtester)
-    patch_file("wallet_alpha_builder.py", patch_wallet_alpha_builder)
-    patch_file("rl_trainer.py", patch_rl_trainer)
-    patch_file("dashboard.py", patch_dashboard)
+    print("=== Commencing Phase 7 DB/CSV Sync & Ghost Trade Fixes ===")
+    patch_file("live_position_book.py", patch_live_position_book)
+    patch_file("reconciliation_service.py", patch_reconciliation_service)
     print("=== Done! ===")
