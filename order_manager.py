@@ -55,7 +55,7 @@ class OrderManager:
         # Failing to do this causes fractional balances (e.g. 500,000) to evaluate 
         # as 500,000 full shares instead of 0.5 shares.
         if is_micro:
-            return val / 1e6
+            return (val / 1e6) if val > 100 else val # BUG 5 FIX: Protect conditional token sizes
             
         return val
 
@@ -266,7 +266,7 @@ class OrderManager:
             logging.error("Market order failed: %s", exc)
             return row, None
 
-        order_id = response.get("orderID") or response.get("order_id") or response.get("id")
+        order_id = (response or {}).get("orderID") # BUG 10 FIX or response.get("order_id") or response.get("id")
         row = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "order_id": order_id,
@@ -309,14 +309,7 @@ class OrderManager:
             
         # FIX V5: Enforce Polymarket CLOB $1.00 minimum order size
         notional_val = requested_size if str(side).upper() == "BUY" else (requested_size * float(price))
-        if notional_val < 0.99:
-            row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": f"below_clob_minimum_1usd (val={notional_val})"}
-            self._append(self.orders_file, row)
-            return row, None
-            
-        # FIX V5: Enforce Polymarket CLOB $1.00 minimum order size
-        notional_val = requested_size if normalized_side == "BUY" else (requested_size * float(price))
-        if notional_val < 0.99:
+        if notional_val < 0.99 and normalized_side == "BUY": # BUG 3 FIX: Allow liquidating depreciated bags
             row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": f"below_clob_minimum_1usd (val={notional_val})"}
             self._append(self.orders_file, row)
             return row, None
@@ -329,7 +322,7 @@ class OrderManager:
             notional_usdc = order_size_shares * float(price)
 
         decision = self.risk.pre_trade_check(token_id=token_id, price=price, size=notional_usdc, spread=spread, open_orders=open_orders, daily_pnl=daily_pnl)
-        idempotency_key = f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')}|{token_id}|{condition_id}|{side}|{size}|{round(float(price), 4)}"
+        idempotency_key = f"{token_id}|{condition_id}|{side}|{size}|{round(float(price), 4)}"
         existing = self.list_orders()
         if not existing.empty and "idempotency_key" in existing.columns and (existing["idempotency_key"].astype(str) == idempotency_key).any():
             return {"status": "REJECTED", "reason": "duplicate_idempotency_key", "idempotency_key": idempotency_key}, None
@@ -367,7 +360,7 @@ class OrderManager:
 
             available_shares = self._round_down_shares(available_balance)
             requested_sell_shares = self._round_down_shares(order_size_shares)
-            max_sell_shares = self._round_down_shares(max(0.0, available_shares * 0.999))
+            max_sell_shares = self._round_down_shares(max(0.0, available_shares)) # BUG 4 FIX: Clear entire bag, no dust
 
             if requested_sell_shares > max_sell_shares > 0:
                 logging.warning(
@@ -475,7 +468,7 @@ class OrderManager:
             self._append(self.orders_file, row)
             return row, None
 
-        order_id = response.get("orderID") or response.get("order_id") or response.get("id")
+        order_id = (response or {}).get("orderID") # BUG 10 FIX or response.get("order_id") or response.get("id")
         row = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "order_id": order_id,

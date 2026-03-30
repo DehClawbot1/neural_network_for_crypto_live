@@ -348,15 +348,18 @@ def safe_run_scraper_cycle(*args, **kwargs):
         return pd.DataFrame()
     return _orig_run_scraper_cycle(*args, **kwargs)
 
-def safe_fetch_markets(): # Patched to use available method
+def safe_fetch_btc_markets(limit=1000, closed=False, max_offset=0):
     global _last_research_time, _cached_open_markets
     import time
     import pandas as pd
-    if not closed and time.time() - _last_research_time < 55:
-        return _cached_open_markets
     
-    res = _orig_fetch_markets() # Patched to use available method
-    if not closed:
+    # Only use cache if asking for open markets and within 55s
+    if not closed and time.time() - _last_research_time < 55:
+        if not _cached_open_markets.empty:
+            return _cached_open_markets
+            
+    res = _orig_fetch_btc_markets(limit=limit, closed=closed, max_offset=max_offset)
+    if not closed and not res.empty:
         _cached_open_markets = res
         _last_research_time = time.time()
     return res
@@ -410,11 +413,6 @@ def main_loop():
     reconciliation_service = ReconciliationService(execution_client)
     mismatch_detector = StateMismatchDetector()
     trade_manager = TradeManager(logs_dir="logs")
-    trade_manager.execution_client = execution_client
-    trade_manager.exec_client = execution_client
-    trade_manager.execution_client = execution_client
-    trade_manager.exec_client = execution_client
-    trade_manager.execution_client = execution_client
     trade_manager.exec_client = execution_client
     orderbook_guard = OrderBookGuard(max_spread=0.20, min_bid_depth=1, min_ask_depth=1)
     _money_mgr = MoneyManager()
@@ -460,14 +458,15 @@ def main_loop():
             if trading_mode == "live" and reconciliation_service is not None:
                 try:
                     sync_summary = reconciliation_service.sync_orders_and_fills()
+                    if not sync_summary: sync_summary = {} # BUG 9 FIX
                     logging.info("Exchange reconciliation synced orders=%s fills=%s", sync_summary.get("orders", 0), sync_summary.get("fills", 0))
                 except Exception as exc:
                     logging.warning("Exchange reconciliation failed: %s", exc)
             logging.info("--- Starting Research + Paper-Trading Evaluation Cycle ---")
 
             # 1. Gather public market context + public wallet activity
-            open_markets = fetch_markets() # Patched to use available method
-            closed_markets = fetch_markets() # Patched to use available method
+            open_markets = fetch_btc_markets(closed=False)
+            closed_markets = fetch_btc_markets(closed=True)
             if not open_markets.empty and not closed_markets.empty:
                 markets_df = pd.concat([open_markets, closed_markets], ignore_index=True).drop_duplicates(subset=["market_id"])
             else:
@@ -484,7 +483,7 @@ def main_loop():
                 missing_slugs = scraped_slugs - known_slugs
                 if missing_slugs:
                     logging.info("Universe Gap: %s slugs missing. Synchronizing...", len(missing_slugs))
-                    missing_df = fetch_markets() # Patched to use available method)
+                    missing_df = fetch_btc_markets(closed=False)
                     if missing_df is not None and not missing_df.empty:
                         markets_df = pd.concat([markets_df, missing_df], ignore_index=True).drop_duplicates(subset=["slug"])
                         save_market_snapshot(markets_df)
@@ -773,7 +772,8 @@ def main_loop():
                         
                         fill_payload = fill_result.get("response") or {}
                         actual_fill_price = float(fill_payload.get("price", fill_price) or fill_price)
-                        actual_fill_size = float(fill_payload.get("size", _order_shares) or _order_shares)
+                        sz = fill_payload.get("size", _order_shares)
+                                        actual_fill_size = float(sz) if (sz is not None and str(sz).strip() and float(sz) > 0) else _order_shares # BUG 8 FIX
                         
                         log_live_fill_event(signal_row, actual_fill_price, size_usdc, action_type="LIVE_TRADE")
                         # Register trade AFTER confirmed fill (not before)
@@ -783,6 +783,8 @@ def main_loop():
                             condition_id=signal_row.get("condition_id"),
                             outcome_side=signal_row.get("outcome_side", signal_row.get("side", "YES")),
                         )
+                        trade.confidence_at_entry = confidence # BUG 6 FIX
+                        trade.signal_label = signal_row.get("signal_label", "UNKNOWN")
                         trade.enter(size_usdc=size_usdc, entry_price=actual_fill_price)
                         trade.shares = actual_fill_size
                         trade_manager.active_trades[market_key] = trade
@@ -901,7 +903,7 @@ def main_loop():
                         if trading_mode == "live" and order_manager is not None:
                             try:
                                 _ob_exit = orderbook_guard.analyze_book(token_id, depth=5)
-                                if _ob_exit.get("best_bid") is not None:
+                                if _ob_exit.get("best_bid") is not None and float(_ob_exit.get("best_bid")) > 0: # BUG 7 FIX: Prevent $0 limit sells
                                     exit_price = _ob_exit["best_bid"]
                                 else:
                                     exit_price = quote_exit_price(pos_dict)
@@ -923,7 +925,8 @@ def main_loop():
                                     if fill_result.get("filled"):
                                         fill_payload = fill_result.get("response") or {}
                                         actual_fill_price = float(fill_payload.get("price", exit_price) or exit_price)
-                                        actual_fill_size = float(fill_payload.get("size", exit_shares) or exit_shares)
+                                        sz = fill_payload.get("size", exit_shares)
+                                        actual_fill_size = float(sz) if (sz is not None and str(sz).strip() and float(sz) > 0) else exit_shares # BUG 8 FIX
                                         log_live_fill_event(pos_dict, actual_fill_price, actual_fill_size, action_type="LIVE_REDUCE")
                                         trade.partial_exit(fraction=actual_fill_size / trade.shares, exit_price=actual_fill_price) # Update TradeLifecycle
                                     else:
@@ -942,7 +945,7 @@ def main_loop():
                         if trading_mode == "live" and order_manager is not None:
                             try:
                                 _ob_exit = orderbook_guard.analyze_book(token_id, depth=5)
-                                if _ob_exit.get("best_bid") is not None:
+                                if _ob_exit.get("best_bid") is not None and float(_ob_exit.get("best_bid")) > 0: # BUG 7 FIX: Prevent $0 limit sells
                                     exit_price = _ob_exit["best_bid"]
                                 else:
                                     exit_price = quote_exit_price(pos_dict)
@@ -964,7 +967,8 @@ def main_loop():
                                     if fill_result.get("filled"):
                                         fill_payload = fill_result.get("response") or {}
                                         actual_fill_price = float(fill_payload.get("price", exit_price) or exit_price)
-                                        actual_fill_size = float(fill_payload.get("size", exit_shares) or exit_shares)
+                                        sz = fill_payload.get("size", exit_shares)
+                                        actual_fill_size = float(sz) if (sz is not None and str(sz).strip() and float(sz) > 0) else exit_shares # BUG 8 FIX
                                         log_live_fill_event(pos_dict, actual_fill_price, actual_fill_size, action_type="LIVE_EXIT")
                                         trade.close(exit_price=actual_fill_price) # Update TradeLifecycle
                                         trade_manager.active_trades.pop(_make_position_key(token_id=trade.token_id, condition_id=trade.condition_id, outcome_side=trade.outcome_side, market=trade.market), None) # Remove from active trades

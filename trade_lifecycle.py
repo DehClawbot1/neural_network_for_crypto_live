@@ -125,8 +125,8 @@ class TradeLifecycle:
         self.current_price = float(exit_price)
         self.unrealized_pnl = 0.0
         self.closed_at = datetime.now(timezone.utc).isoformat()
-        self.shares = 0.0
-        self.size_usdc = 0.0
+        # self.shares = 0.0 # BUG 1 FIX: Keep shares intact so supervisor knows how much to sell
+        # self.size_usdc = 0.0
         self.state = TradeState.CLOSED
         self.close_reason = reason
         self.ledger.append({

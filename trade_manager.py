@@ -367,5 +367,20 @@ class TradeManager:
             trade.state = TradeState.OPEN
             rebuilt_trades[trade_key] = trade
 
-        self.active_trades = rebuilt_trades
+        # BUG 2 FIX: Merge to avoid erasing newly opened un-indexed trades
+        cutoff = datetime.now(timezone.utc).timestamp() - 60
+        for key, rebuilt_trade in rebuilt_trades.items():
+            if key in self.active_trades:
+                self.active_trades[key].current_price = rebuilt_trade.current_price
+                self.active_trades[key].unrealized_pnl = rebuilt_trade.unrealized_pnl
+            else:
+                self.active_trades[key] = rebuilt_trade
+        for key in list(self.active_trades.keys()):
+            if key not in rebuilt_trades:
+                try:
+                    open_ts = datetime.fromisoformat(self.active_trades[key].opened_at).timestamp()
+                    if open_ts < cutoff:
+                        self.active_trades.pop(key)
+                except Exception:
+                    pass
         logger.info("[~] Reconciled %s live positions into TradeManager.", len(self.active_trades))
