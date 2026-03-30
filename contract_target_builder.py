@@ -37,7 +37,7 @@ class ContractTargetBuilder:
     def _path_stats(self, entry_price, path_prices, tp_move, sl_move):
         if path_prices.empty:
             return None, None, None, None
-        moves = [float(price) - float(entry_price) for price in path_prices]
+        moves = [(float(price) - float(entry_price)) / float(entry_price) for price in path_prices] # BUG FIX 5: Normalize to ROI
         mfe = max(moves) if moves else None
         mae = min(moves) if moves else None
         tp_hit_idx = next((i for i, move in enumerate(moves) if move >= tp_move), None)
@@ -68,6 +68,7 @@ class ContractTargetBuilder:
         market_lookup = markets_latest.set_index(market_lookup_col).to_dict("index")
 
         rows = []
+        history_groups = dict(tuple(history_df.groupby("token_id"))) # BUG FIX 1: O(1) lookups
         for _, signal_row in signals_df.iterrows():
             signal_ts = signal_row.get("timestamp")
             if pd.isna(signal_ts):
@@ -80,7 +81,7 @@ class ContractTargetBuilder:
             if not token_id:
                 continue
 
-            token_history = history_df[history_df["token_id"].astype(str) == str(token_id)].copy()
+            token_history = history_groups.get(str(token_id), pd.DataFrame()).copy() # BUG FIX 1: Prevent pipeline freeze
             if token_history.empty:
                 continue
 
@@ -108,7 +109,7 @@ class ContractTargetBuilder:
             forward_return = (float(forward_window["price"].iloc[-1]) - entry_price) / entry_price
             # tp_before_sl/mfe/mae must be computed against the full max-hold path
             path_moves = full_future_window["price"].astype(float)
-            moves = [float(price) - entry_price for price in path_moves]
+            moves = [(float(price) - entry_price) / entry_price for price in path_moves] # BUG FIX 5: Normalize to ROI
             mfe = max(moves) if moves else None
             mae = min(moves) if moves else None
             tp_hit_idx = next((i for i, move in enumerate(moves) if move >= tp_move), None)

@@ -4,9 +4,10 @@ import shutil
 from datetime import datetime
 
 FILES_TO_PATCH = [
-    "money_manager.py",
-    "polytrade_env.py",
-    "live_risk_manager.py"
+    "run_live_test.py",
+    "market_monitor.py",
+    "contract_target_builder.py",
+    "model_inference.py"
 ]
 
 def backup_file(filepath):
@@ -31,121 +32,106 @@ def patch_file(filepath, patch_func):
         backup_file(filepath)
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(patched_content)
-        print(f"[+] Successfully fixed Phase 3 bugs in {filepath}")
+        print(f"[+] Successfully fixed Phase 4 bugs in {filepath}")
     else:
         print(f"[-] No changes needed for {filepath} (or patterns didn't match)")
 
 # --- Patching Functions ---
 
-def patch_money_manager(content):
-    # BUG 2: Fix Total Exposure math to use full capital stack
+def patch_run_live_test(content):
+    # BUG 3: Environment Variable Race Condition
+    new_content = """import os
+
+if __name__ == "__main__":
+    os.environ["TRADING_MODE"] = os.getenv("TRADING_MODE", "live")
+    from run_bot import main as run_main # BUG FIX 3: Import AFTER env var is set
+    run_main()
+"""
+    return new_content
+
+def patch_market_monitor(content):
+    # BUG 4: Pagination Early Exit
     content = re.sub(
-        r'(max_total_exposure\s*=\s*)available_balance(\s*\*\s*TradingConfig\.MAX_TOTAL_EXPOSURE_PCT)',
-        r'\1(available_balance + current_exposure)\2 # BUG FIX 2: Compute against total portfolio',
+        r'if len\(markets\) < int\(limit\):\n\s*break',
+        r'if not markets: break # BUG FIX 4: Prevent arbitrary page-size limits from halting fetch',
         content
     )
 
-    # BUG 3: Prevent Dynamic Min overriding Max Risk
-    fix_2_pattern = r'(if adjusted_bet < dynamic_min:.*?)(adjusted_bet = round\(adjusted_bet, 2\))'
-    fix_2_replacement = r"""if dynamic_max < absolute_floor:
-            logging.info("MoneyManager: dynamic_max ($%.2f) < absolute_floor ($%.2f). Rejecting trade.", dynamic_max, absolute_floor)
-            return 0.0
-            
-        if adjusted_bet < dynamic_min:
-            if remaining_capacity >= dynamic_min:
-                adjusted_bet = min(dynamic_min, dynamic_max) # BUG FIX 3: Never break max risk for the sake of minimums
-            else:
-                return 0.0
+    # BUG 2: Infinite Snapshot Bloat
+    content = re.sub(
+        r'dedupe_cols = \[c for c in \["market_id", "condition_id", "slug", "timestamp"\] if c in merged\.columns\]',
+        r'dedupe_cols = [c for c in ["market_id", "condition_id", "slug"] if c in merged.columns] # BUG FIX 2: Stop deduplicating on timestamp',
+        content
+    )
 
-        \2"""
-    content = re.sub(fix_2_pattern, fix_2_replacement, content, flags=re.DOTALL)
-    
+    # BUG 9: Safe-Float Fails on Empty Strings
+    content = re.sub(
+        r'midpoint = \(float\(best_bid\) \+ float\(best_ask\)\) / 2\.0\n\s*spread = abs\(float\(best_ask\) - float\(best_bid\)\)',
+        r'midpoint = (_safe_float(best_bid, 0.0) + _safe_float(best_ask, 0.0)) / 2.0\n            spread = abs(_safe_float(best_ask, 0.0) - _safe_float(best_bid, 0.0)) # BUG FIX 9: Handle empty strings gracefully',
+        content
+    )
+
+    # BUG 10: Falsy Zero Overrides
+    content = re.sub(
+        r'best_bid = market\.get\("bestBid"\) or market\.get\("best_bid"\) or market\.get\("bid"\)\n\s*best_ask = market\.get\("bestAsk"\) or market\.get\("best_ask"\) or market\.get\("ask"\)',
+        r'best_bid = market.get("bestBid") if market.get("bestBid") is not None else market.get("best_bid", market.get("bid"))\n    best_ask = market.get("bestAsk") if market.get("bestAsk") is not None else market.get("best_ask", market.get("ask")) # BUG FIX 10: Do not drop explicit 0.0s',
+        content
+    )
     return content
 
-def patch_polytrade_env(content):
-    # BUG 4: Stop Phantom Short Selling spam on 0 inventory
+def patch_contract_target_builder(content):
+    # BUG 1: O(N*M) Pipeline Freeze
     content = re.sub(
-        r'size = max\(1\.0, min\(max\(float\(self\.shares\), 1\.0\), max\(float\(self\.shares\), 50\.0\) \* abs\(action_value\)\)\)',
-        r'size = max(0.1, min(float(self.shares), float(self.shares) * abs(action_value))) if self.shares > 0 else 0.0\n                if size <= 0: return {"status": "NO_POSITION_TO_EXIT"} # BUG FIX 4: Prevent short-sell loops',
+        r'(rows = \[\]\n\s*for _, signal_row in signals_df\.iterrows\(\):)',
+        r'rows = []\n        history_groups = dict(tuple(history_df.groupby("token_id"))) # BUG FIX 1: O(1) lookups\n        for _, signal_row in signals_df.iterrows():',
+        content
+    )
+    content = re.sub(
+        r'token_history = history_df\[history_df\["token_id"\]\.astype\(str\) == str\(token_id\)\]\.copy\(\)',
+        r'token_history = history_groups.get(str(token_id), pd.DataFrame()).copy() # BUG FIX 1: Prevent pipeline freeze',
         content
     )
 
-    # BUG 5: Stop Blind Partial Fill Erasure
+    # BUG 5: Inconsistent Move Normalization (Applies to both _path_stats and build)
     content = re.sub(
-        r'reduce_size = max\(float\(self\.shares\) \* 0\.5, 0\.0\)\n(\s*)self\.shares = max\(float\(self\.shares\) - reduce_size, 0\.0\)',
-        r'reduce_size = float(filled_size) if filled_size > 0 else max(float(self.shares) * 0.5, 0.0)\n\1self.shares = max(float(self.shares) - reduce_size, 0.0) # BUG FIX 5: Use actual fill amount',
+        r'moves = \[float\(price\) - float\(entry_price\) for price in path_prices\]',
+        r'moves = [(float(price) - float(entry_price)) / float(entry_price) for price in path_prices] # BUG FIX 5: Normalize to ROI',
         content
     )
-
-    # BUG 8: Support both Dictionary and Object orderbook responses
     content = re.sub(
-        r'bids = getattr\(orderbook, "bids", \[\]\)\[:5\]\n\s*asks = getattr\(orderbook, "asks", \[\]\)\[:5\]',
-        r'bids = (orderbook.get("bids", []) if isinstance(orderbook, dict) else getattr(orderbook, "bids", []))[:5]\n            asks = (orderbook.get("asks", []) if isinstance(orderbook, dict) else getattr(orderbook, "asks", []))[:5] # BUG FIX 8',
+        r'moves = \[float\(price\) - entry_price for price in path_moves\]',
+        r'moves = [(float(price) - entry_price) / entry_price for price in path_moves] # BUG FIX 5: Normalize to ROI',
         content
     )
-
-    # BUG 9: Support Dictionary Level volume sums
-    content = re.sub(
-        r'bid_vol = sum\(float\(getattr\(level, "size", 0\.0\) or 0\.0\) for level in bids\)\n\s*ask_vol = sum\(float\(getattr\(level, "size", 0\.0\) or 0\.0\) for level in asks\)',
-        r'bid_vol = sum(float((level.get("size", 0) if isinstance(level, dict) else getattr(level, "size", 0)) or 0) for level in bids)\n            ask_vol = sum(float((level.get("size", 0) if isinstance(level, dict) else getattr(level, "size", 0)) or 0) for level in asks) # BUG FIX 9',
-        content
-    )
-
-    # BUG 1: Add a 10-second cache to the Binance Ticker to prevent Rate Limit bans
-    cache_block = """
-    _cached_btc_price = 0.0
-    _cached_btc_time = 0.0
-    def _safe_correlated_price(self):
-        import time
-        if time.time() - getattr(self, '_cached_btc_time', 0) < 10:
-            return getattr(self, '_cached_btc_price', 0.0)
-        try:
-            response = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": "BTCUSDT"}, timeout=5)
-            if response.ok:
-                price = float(response.json().get("price") or 0.0)
-                self._cached_btc_price = price
-                self._cached_btc_time = time.time()
-                return price
-        except Exception:
-            pass
-        return getattr(self, '_cached_btc_price', 0.0) # BUG FIX 1: 10-second TTL cache to prevent IP bans"""
-    
-    content = re.sub(
-        r'def _safe_correlated_price\(self\):.*?return 0\.0',
-        cache_block,
-        content,
-        flags=re.DOTALL
-    )
-
     return content
 
-def patch_live_risk_manager(content):
-    # BUG 10: Unsafe NoneType size casts
+def patch_model_inference(content):
+    # BUG 6: Sigmoid Overflow Poisoning
     content = re.sub(
-        r'if float\(size\) > self\.max_position_size:',
-        r'if float(size or 0.0) > self.max_position_size: # BUG FIX 10',
+        r'probs = 1\.0 / \(1\.0 \+ np\.exp\(-raw\)\)',
+        r'probs = 1.0 / (1.0 + np.exp(-np.clip(raw, -500, 500))) # BUG FIX 6: Prevent NaN poisoning',
         content
     )
 
-    # BUG 6: Missing DB Commits
+    # BUG 7: 2D Array Flattening
     content = re.sub(
-        r'(self\.db\.execute\([\s\S]*?\)\s*\n)',
-        r'\1                if hasattr(self.db, "commit"): self.db.commit() # BUG FIX 6: Ensure audit logs save\n',
+        r'pd\.Series\(preds, index=out\.index\)',
+        r'pd.Series(np.array(preds).ravel(), index=out.index) # BUG FIX 7: Support 2D (N,1) regressor arrays',
         content
     )
 
-    # BUG 7: Add auto-reset for Circuit Breakers
+    # BUG 8: DataFrame Fragmentation Warnings
     content = re.sub(
-        r'def record_failed_order\(self\):\n\s*self\.failed_orders \+= 1',
-        r'def record_failed_order(self):\n        self.failed_orders += 1\n\n    def record_successful_order(self):\n        self.failed_orders = 0 # BUG FIX 7: Decay circuit breaker on success',
+        r'for col in feature_names:\n\s*if col not in work\.columns:\n\s*work\[col\] = 0\.0',
+        r'missing = {col: 0.0 for col in feature_names if col not in work.columns}\n        if missing: work = work.assign(**missing) # BUG FIX 8: Prevent DF Fragmentation',
         content
     )
-
     return content
 
 if __name__ == "__main__":
-    print("=== Commencing Phase 3 Deep Hunt Bug Fixes ===")
-    patch_file("money_manager.py", patch_money_manager)
-    patch_file("polytrade_env.py", patch_polytrade_env)
-    patch_file("live_risk_manager.py", patch_live_risk_manager)
+    print("=== Commencing Phase 4 Deep Hunt Bug Fixes ===")
+    patch_file("run_live_test.py", patch_run_live_test)
+    patch_file("market_monitor.py", patch_market_monitor)
+    patch_file("contract_target_builder.py", patch_contract_target_builder)
+    patch_file("model_inference.py", patch_model_inference)
     print("=== Done! ===")

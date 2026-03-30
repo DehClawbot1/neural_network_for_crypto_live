@@ -35,9 +35,8 @@ class ModelInference:
             return None
 
         work = frame.copy()
-        for col in feature_names:
-            if col not in work.columns:
-                work[col] = 0.0
+        missing = {col: 0.0 for col in feature_names if col not in work.columns}
+        if missing: work = work.assign(**missing) # BUG FIX 8: Prevent DF Fragmentation
 
         x = work[feature_names].copy()
         for col in x.columns:
@@ -69,7 +68,7 @@ class ModelInference:
                         probs = clf.predict_proba(x_clf)[:, 1]
                     else:
                         raw = clf.decision_function(x_clf)
-                        probs = 1.0 / (1.0 + np.exp(-raw))
+                        probs = 1.0 / (1.0 + np.exp(-np.clip(raw, -500, 500))) # BUG FIX 6: Prevent NaN poisoning
                     out["p_tp_before_sl"] = np.clip(pd.Series(probs, index=out.index).astype(float), 0.0, 1.0)
             except Exception:
                 out["p_tp_before_sl"] = 0.0
@@ -80,7 +79,7 @@ class ModelInference:
                 x_reg = self._prepare_matrix(reg_saved if isinstance(reg_saved, dict) else {"features": getattr(reg, "feature_names_in_", [])}, out)
                 if x_reg is not None:
                     preds = reg.predict(x_reg)
-                    out["expected_return"] = pd.Series(preds, index=out.index).astype(float).replace([np.inf, -np.inf], 0.0).fillna(0.0)
+                    out["expected_return"] = pd.Series(np.array(preds).ravel(), index=out.index) # BUG FIX 7: Support 2D (N,1) regressor arrays.astype(float).replace([np.inf, -np.inf], 0.0).fillna(0.0)
             except Exception:
                 out["expected_return"] = 0.0
 

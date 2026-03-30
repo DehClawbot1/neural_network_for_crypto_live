@@ -40,14 +40,14 @@ def _market_to_row(market: dict) -> dict:
     clob_token_ids = market.get("clobTokenIds") or market.get("clob_token_ids") or []
     yes_token_id = clob_token_ids[0] if len(clob_token_ids) > 0 else None
     no_token_id = clob_token_ids[1] if len(clob_token_ids) > 1 else None
-    best_bid = market.get("bestBid") or market.get("best_bid") or market.get("bid")
-    best_ask = market.get("bestAsk") or market.get("best_ask") or market.get("ask")
+    best_bid = market.get("bestBid") if market.get("bestBid") is not None else market.get("best_bid", market.get("bid"))
+    best_ask = market.get("bestAsk") if market.get("bestAsk") is not None else market.get("best_ask", market.get("ask")) # BUG FIX 10: Do not drop explicit 0.0s
     midpoint = None
     spread = None
     if best_bid is not None and best_ask is not None:
         try:
-            midpoint = (float(best_bid) + float(best_ask)) / 2.0
-            spread = abs(float(best_ask) - float(best_bid))
+            midpoint = (_safe_float(best_bid, 0.0) + _safe_float(best_ask, 0.0)) / 2.0
+            spread = abs(_safe_float(best_ask, 0.0) - _safe_float(best_bid, 0.0)) # BUG FIX 9: Handle empty strings gracefully
         except Exception:
             midpoint = None
             spread = None
@@ -117,8 +117,7 @@ def fetch_btc_markets(limit=1000, closed=False, max_offset=0):
             if market_id:
                 seen_market_ids.add(market_id)
             rows.append(row)
-        if len(markets) < int(limit):
-            break
+        if not markets: break # BUG FIX 4: Prevent arbitrary page-size limits from halting fetch
 
     df = pd.DataFrame(rows)
     if not df.empty and "market_id" in df.columns:
@@ -161,7 +160,7 @@ def save_market_snapshot(markets_df, logs_dir="logs"):
     merged = pd.concat([existing, markets_df], ignore_index=True)
     if "timestamp" in merged.columns:
         merged["timestamp"] = pd.to_datetime(merged["timestamp"], utc=True, errors="coerce")
-    dedupe_cols = [c for c in ["market_id", "condition_id", "slug", "timestamp"] if c in merged.columns]
+    dedupe_cols = [c for c in ["market_id", "condition_id", "slug"] if c in merged.columns] # BUG FIX 2: Stop deduplicating on timestamp
     if dedupe_cols:
         merged = merged.drop_duplicates(subset=dedupe_cols, keep="last")
     merged.to_csv(output_file, index=False)
