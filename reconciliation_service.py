@@ -18,6 +18,8 @@ class ReconciliationService:
     def _extract_items(self, payload):
         if payload is None:
             return []
+        if isinstance(payload, str): return [] # BUG FIX 9
+        if isinstance(payload, str): return [] # BUG FIX 9
         if isinstance(payload, list):
             return payload
         if isinstance(payload, dict):
@@ -72,7 +74,7 @@ class ReconciliationService:
         if not path.exists():
             return pd.DataFrame()
         try:
-            return pd.read_csv(path, engine="python", on_bad_lines="skip")
+            return pd.read_csv(path, engine="python", on_bad_lines="skip", dtype=str) # BUG FIX 8
         except Exception:
             return pd.DataFrame()
 

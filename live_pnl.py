@@ -5,7 +5,7 @@ import pandas as pd
 
 class LivePnLCalculator:
     def enrich_positions(self, positions_df: pd.DataFrame | None):
-        if positions_df is None or positions_df.empty:
+        if not isinstance(positions_df, pd.DataFrame) or positions_df.empty: # BUG FIX 5
             return pd.DataFrame() if positions_df is None else positions_df
 
         df = positions_df.copy()

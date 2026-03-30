@@ -110,11 +110,11 @@ class LivePositionBook:
             self.db.conn.rollback()
             raise
 
-        return pd.DataFrame(list(books.values()))
+        return pd.DataFrame(list(books.values())) if books else pd.DataFrame(columns=["position_key", "token_id", "condition_id", "outcome_side", "shares", "avg_entry_price", "realized_pnl", "last_fill_at", "source", "status"]) # BUG FIX 4 if books else pd.DataFrame(columns=["position_key", "token_id", "condition_id", "outcome_side", "shares", "avg_entry_price", "realized_pnl", "last_fill_at", "source", "status"]) # BUG FIX 4
 
     def _extract_available_balance(self, payload, execution_client):
-        if not isinstance(payload, dict):
-            return 0.0
+        if not isinstance(payload, dict): return None
+        if "error" in payload or "message" in payload: return None # BUG FIX 1: Prevent API errors from wiping DB
         for key in ["balance", "available", "available_balance", "amount"]:
             if payload.get(key) is not None:
                 try:
@@ -154,7 +154,7 @@ class LivePositionBook:
                 verified_rows.append(row)
                 continue
 
-            if available_shares <= 1e-9:
+            if available_shares is not None and available_shares <= 1e-9: # BUG FIX 1
                 mutated = True
                 logger.warning(
                     "Closing stale local live position for %s because exchange conditional balance is zero.",

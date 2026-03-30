@@ -4,10 +4,10 @@ import shutil
 from datetime import datetime
 
 FILES_TO_PATCH = [
-    "run_live_test.py",
-    "market_monitor.py",
-    "contract_target_builder.py",
-    "model_inference.py"
+    "live_position_book.py",
+    "position_manager.py",
+    "live_pnl.py",
+    "reconciliation_service.py"
 ]
 
 def backup_file(filepath):
@@ -32,106 +32,92 @@ def patch_file(filepath, patch_func):
         backup_file(filepath)
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(patched_content)
-        print(f"[+] Successfully fixed Phase 4 bugs in {filepath}")
+        print(f"[+] Successfully fixed Phase 5 bugs in {filepath}")
     else:
         print(f"[-] No changes needed for {filepath} (or patterns didn't match)")
 
 # --- Patching Functions ---
 
-def patch_run_live_test(content):
-    # BUG 3: Environment Variable Race Condition
-    new_content = """import os
-
-if __name__ == "__main__":
-    os.environ["TRADING_MODE"] = os.getenv("TRADING_MODE", "live")
-    from run_bot import main as run_main # BUG FIX 3: Import AFTER env var is set
-    run_main()
-"""
-    return new_content
-
-def patch_market_monitor(content):
-    # BUG 4: Pagination Early Exit
+def patch_live_position_book(content):
+    # BUG 4: The NaN DataFrame Empty Columns Crash
     content = re.sub(
-        r'if len\(markets\) < int\(limit\):\n\s*break',
-        r'if not markets: break # BUG FIX 4: Prevent arbitrary page-size limits from halting fetch',
+        r'return pd\.DataFrame\(list\(books\.values\(\)\)\)',
+        r'return pd.DataFrame(list(books.values())) if books else pd.DataFrame(columns=["position_key", "token_id", "condition_id", "outcome_side", "shares", "avg_entry_price", "realized_pnl", "last_fill_at", "source", "status"]) # BUG FIX 4',
         content
     )
 
-    # BUG 2: Infinite Snapshot Bloat
+    # BUG 1: API Rate Limit Database Wipe
     content = re.sub(
-        r'dedupe_cols = \[c for c in \["market_id", "condition_id", "slug", "timestamp"\] if c in merged\.columns\]',
-        r'dedupe_cols = [c for c in ["market_id", "condition_id", "slug"] if c in merged.columns] # BUG FIX 2: Stop deduplicating on timestamp',
+        r'if not isinstance\(payload, dict\):\n\s*return 0\.0',
+        r'if not isinstance(payload, dict): return None\n        if "error" in payload or "message" in payload: return None # BUG FIX 1: Prevent API errors from wiping DB',
         content
     )
-
-    # BUG 9: Safe-Float Fails on Empty Strings
     content = re.sub(
-        r'midpoint = \(float\(best_bid\) \+ float\(best_ask\)\) / 2\.0\n\s*spread = abs\(float\(best_ask\) - float\(best_bid\)\)',
-        r'midpoint = (_safe_float(best_bid, 0.0) + _safe_float(best_ask, 0.0)) / 2.0\n            spread = abs(_safe_float(best_ask, 0.0) - _safe_float(best_bid, 0.0)) # BUG FIX 9: Handle empty strings gracefully',
-        content
-    )
-
-    # BUG 10: Falsy Zero Overrides
-    content = re.sub(
-        r'best_bid = market\.get\("bestBid"\) or market\.get\("best_bid"\) or market\.get\("bid"\)\n\s*best_ask = market\.get\("bestAsk"\) or market\.get\("best_ask"\) or market\.get\("ask"\)',
-        r'best_bid = market.get("bestBid") if market.get("bestBid") is not None else market.get("best_bid", market.get("bid"))\n    best_ask = market.get("bestAsk") if market.get("bestAsk") is not None else market.get("best_ask", market.get("ask")) # BUG FIX 10: Do not drop explicit 0.0s',
+        r'if available_shares <= 1e-9:',
+        r'if available_shares is not None and available_shares <= 1e-9: # BUG FIX 1',
         content
     )
     return content
 
-def patch_contract_target_builder(content):
-    # BUG 1: O(N*M) Pipeline Freeze
+def patch_position_manager(content):
+    # BUG 6: Falsy $0.00 Midpoint Poisoning
     content = re.sub(
-        r'(rows = \[\]\n\s*for _, signal_row in signals_df\.iterrows\(\):)',
-        r'rows = []\n        history_groups = dict(tuple(history_df.groupby("token_id"))) # BUG FIX 1: O(1) lookups\n        for _, signal_row in signals_df.iterrows():',
-        content
-    )
-    content = re.sub(
-        r'token_history = history_df\[history_df\["token_id"\]\.astype\(str\) == str\(token_id\)\]\.copy\(\)',
-        r'token_history = history_groups.get(str(token_id), pd.DataFrame()).copy() # BUG FIX 1: Prevent pipeline freeze',
+        r'current_price = quote\.get\("midpoint"\) or quote\.get\("last_trade_price"\) or quote\.get\("price"\)',
+        r'current_price = quote.get("midpoint") if quote.get("midpoint") is not None else quote.get("last_trade_price", quote.get("price")) # BUG FIX 6',
         content
     )
 
-    # BUG 5: Inconsistent Move Normalization (Applies to both _path_stats and build)
+    # BUG 3: Zero Liquidity Trap Bypass
     content = re.sub(
-        r'moves = \[float\(price\) - float\(entry_price\) for price in path_prices\]',
-        r'moves = [(float(price) - float(entry_price)) / float(entry_price) for price in path_prices] # BUG FIX 5: Normalize to ROI',
+        r'bid_size = float\(row\.get\("bid_size", self\.min_bid_size_to_exit\) or self\.min_bid_size_to_exit\)',
+        r'bs = row.get("bid_size"); bid_size = float(bs) if bs is not None else self.min_bid_size_to_exit # BUG FIX 3',
         content
     )
+
+    # BUG 2: Timestamp Timezone Subtraction Crash
     content = re.sub(
-        r'moves = \[float\(price\) - entry_price for price in path_moves\]',
-        r'moves = [(float(price) - entry_price) / entry_price for price in path_moves] # BUG FIX 5: Normalize to ROI',
+        r'minutes_open = \(pd\.Timestamp\.now\(\) - opened_at\)\.total_seconds\(\) / 60\.0 if pd\.notna\(opened_at\) else 0\.0',
+        r'minutes_open = (pd.Timestamp.now(tz=opened_at.tz) - opened_at).total_seconds() / 60.0 if pd.notna(opened_at) else 0.0 # BUG FIX 2',
+        content
+    )
+
+    # BUG 7 & 10: Incomplete Reduce Closures & Dust
+    content = re.sub(
+        r'positions\.at\[idx, "shares"\] = shares_remaining',
+        r'positions.at[idx, "shares"] = round(shares_remaining, 6)\n        if round(shares_remaining, 6) <= 0: positions.at[idx, "status"] = "CLOSED" # BUG FIX 7 & 10',
         content
     )
     return content
 
-def patch_model_inference(content):
-    # BUG 6: Sigmoid Overflow Poisoning
+def patch_live_pnl(content):
+    # BUG 5: Non-DataFrame Crashes
     content = re.sub(
-        r'probs = 1\.0 / \(1\.0 \+ np\.exp\(-raw\)\)',
-        r'probs = 1.0 / (1.0 + np.exp(-np.clip(raw, -500, 500))) # BUG FIX 6: Prevent NaN poisoning',
+        r'if positions_df is None or positions_df\.empty:',
+        r'if not isinstance(positions_df, pd.DataFrame) or positions_df.empty: # BUG FIX 5',
+        content
+    )
+    return content
+
+def patch_reconciliation_service(content):
+    # BUG 8: CSV String ID Coercion Corruption
+    content = re.sub(
+        r'try:\n\s*return pd\.read_csv\(path, engine="python", on_bad_lines="skip"\)',
+        r'try:\n            return pd.read_csv(path, engine="python", on_bad_lines="skip", dtype=str) # BUG FIX 8',
         content
     )
 
-    # BUG 7: 2D Array Flattening
+    # BUG 9: API String Iteration Crash
     content = re.sub(
-        r'pd\.Series\(preds, index=out\.index\)',
-        r'pd.Series(np.array(preds).ravel(), index=out.index) # BUG FIX 7: Support 2D (N,1) regressor arrays',
-        content
-    )
-
-    # BUG 8: DataFrame Fragmentation Warnings
-    content = re.sub(
-        r'for col in feature_names:\n\s*if col not in work\.columns:\n\s*work\[col\] = 0\.0',
-        r'missing = {col: 0.0 for col in feature_names if col not in work.columns}\n        if missing: work = work.assign(**missing) # BUG FIX 8: Prevent DF Fragmentation',
+        r'if isinstance\(payload, list\):\n\s*return payload',
+        r'if isinstance(payload, str): return [] # BUG FIX 9\n        if isinstance(payload, list):\n            return payload',
         content
     )
     return content
 
 if __name__ == "__main__":
-    print("=== Commencing Phase 4 Deep Hunt Bug Fixes ===")
-    patch_file("run_live_test.py", patch_run_live_test)
-    patch_file("market_monitor.py", patch_market_monitor)
-    patch_file("contract_target_builder.py", patch_contract_target_builder)
-    patch_file("model_inference.py", patch_model_inference)
+    print("=== Commencing Phase 5 Deep Hunt Bug Fixes ===")
+    patch_file("live_position_book.py", patch_live_position_book)
+    patch_file("position_manager.py", patch_position_manager)
+    patch_file("live_pnl.py", patch_live_pnl)
+    patch_file("reconciliation_service.py", patch_reconciliation_service)
     print("=== Done! ===")

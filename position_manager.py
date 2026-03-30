@@ -142,7 +142,7 @@ class PositionManager:
         for idx, row in positions.iterrows():
             token_id = str(row.get("token_id", ""))
             quote = latest_quotes.get(token_id) or {}
-            current_price = quote.get("midpoint") or quote.get("last_trade_price") or quote.get("price")
+            current_price = quote.get("midpoint") if quote.get("midpoint") is not None else quote.get("last_trade_price", quote.get("price")) # BUG FIX 6
             if current_price is None:
                 current_price = float(row.get("current_price", row.get("entry_price", 0.5)))
             entry_price = float(row.get("entry_price", current_price))
@@ -193,7 +193,8 @@ class PositionManager:
         fees_paid_exit = shares_closed * effective_exit_price * self.fee_rate
         net_realized_pnl = gross_realized_pnl - fees_paid_exit
 
-        positions.at[idx, "shares"] = shares_remaining
+        positions.at[idx, "shares"] = round(shares_remaining, 6)
+        if round(shares_remaining, 6) <= 0: positions.at[idx, "status"] = "CLOSED" # BUG FIX 7 & 10
         positions.at[idx, "size_usdc"] = size_usdc * (1.0 - fraction)
         positions.at[idx, "current_price"] = exit_price
         positions.at[idx, "realized_pnl"] = float(positions.at[idx, "realized_pnl"] or 0.0) + net_realized_pnl
@@ -267,9 +268,9 @@ class PositionManager:
         roi_pct = ((current_price - entry_price) / entry_price) if entry_price else 0.0
         trailing_floor = peak_price * (1.0 - self.trailing_stop_pct)
         opened_at = pd.to_datetime(row.get("opened_at"), errors="coerce")
-        minutes_open = (pd.Timestamp.now() - opened_at).total_seconds() / 60.0 if pd.notna(opened_at) else 0.0
+        minutes_open = (pd.Timestamp.now(tz=opened_at.tz) - opened_at).total_seconds() / 60.0 if pd.notna(opened_at) else 0.0 # BUG FIX 2
         spread = float(row.get("spread", 0.0) or 0.0)
-        bid_size = float(row.get("bid_size", self.min_bid_size_to_exit) or self.min_bid_size_to_exit)
+        bs = row.get("bid_size"); bid_size = float(bs) if bs is not None else self.min_bid_size_to_exit # BUG FIX 3
 
         alert_markets = set()
         if alerts_df is not None and not alerts_df.empty and "market" in alerts_df.columns:
