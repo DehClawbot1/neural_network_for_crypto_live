@@ -45,6 +45,9 @@ class TradeManager:
             return f"{market}|{outcome_side}"
         return None
     def _get_trade_key(self, signal_row: pd.Series) -> Optional[str]:
+        if str(signal_row.get("action", "BUY")).upper() != "BUY":
+            return None # BUG FIX 3: Prevent opening new trades on EXIT signals
+
         market = signal_row.get("market_title") or signal_row.get("market")
         outcome_side = signal_row.get("outcome_side") or signal_row.get("side")
         token_id = signal_row.get("token_id")
@@ -65,6 +68,9 @@ class TradeManager:
         trade_key = self._get_trade_key(signal_row)
         if trade_key is None:
             return None
+
+        if str(signal_row.get("action", "BUY")).upper() != "BUY":
+            return None # BUG FIX 3: Prevent opening new trades on EXIT signals
 
         market = signal_row.get("market_title") or signal_row.get("market")
         outcome_side = signal_row.get("outcome_side") or signal_row.get("side")
@@ -131,7 +137,8 @@ class TradeManager:
                 opened_dt = opened_dt.astimezone(timezone.utc)
                 current_ts = current_ts.astimezone(timezone.utc)
             else:
-                current_ts = current_timestamp.replace(tzinfo=None) if current_timestamp.tzinfo is not None else current_timestamp
+                current_ts = current_timestamp.replace(tzinfo=timezone.utc) if current_timestamp.tzinfo is None else current_timestamp # BUG FIX 8: Enforce UTC safely
+            if opened_dt.tzinfo is None: opened_dt = opened_dt.replace(tzinfo=timezone.utc)
 
             entry_price = float(trade.entry_price or 0)
             current_price = float(trade.current_price or entry_price)
@@ -144,7 +151,8 @@ class TradeManager:
             # PATCHED: Calculate true trailing stop using peak price
             if not hasattr(trade, 'peak_price'):
                 trade.peak_price = entry_price
-            trade.peak_price = max(trade.peak_price, current_price)
+            if current_price > trade.entry_price: # BUG FIX 9: Only raise peak on real profit, ignoring wide spreads at entry
+                trade.peak_price = max(trade.peak_price, current_price)
             trailing_drop = (trade.peak_price - current_price) / trade.peak_price if trade.peak_price > 0 else 0
 
             close_reason = None
@@ -165,7 +173,7 @@ class TradeManager:
                         bal_val = float(raw_bal)
                     
                     # Polymarket returns microdollars. < 10000 = less than 0.01 shares (dust)
-                    if bal_val < 10000:
+                    if raw_bal is not None and bal_val < 10000: # BUG FIX 2: Protect against NoneType API drops
                         close_reason = "external_manual_close"
                         # Zero out unrealized PnL so the dashboard doesn't skew
                         if hasattr(trade, 'unrealized_pnl'): trade.unrealized_pnl = 0.0 

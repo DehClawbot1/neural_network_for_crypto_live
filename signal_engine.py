@@ -47,6 +47,7 @@ class SignalEngine:
         )
 
         confidence = float(np.clip((heuristic_confidence * 0.45) + (model_confidence * 0.55), 0.0, 1.0))
+        if expected_return == 0.0 and p_tp == 0.0: confidence = heuristic_confidence # BUG FIX 4: Restore 100% heuristic weight if AI is offline
 
         # If the model says the trade is weak, do not let the heuristic alone escalate it.
         if expected_return <= 0 or edge_score <= 0 or p_tp < 0.52:

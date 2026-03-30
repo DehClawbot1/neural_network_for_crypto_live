@@ -4,10 +4,10 @@ import shutil
 from datetime import datetime
 
 FILES_TO_PATCH = [
-    "trade_lifecycle.py",
-    "supervisor.py",
-    "order_manager.py",
-    "trade_manager.py"
+    "execution_client.py",
+    "trade_manager.py",
+    "pnl_engine.py",
+    "signal_engine.py"
 ]
 
 def backup_file(filepath):
@@ -38,103 +38,89 @@ def patch_file(filepath, patch_func):
 
 # --- Patching Logic ---
 
-def patch_trade_lifecycle(content):
-    # BUG 1: Do not zero shares so supervisor can actually sell them
+def patch_execution_client(content):
+    # BUG 1: The < $1.00 Microdollar Blackhole
     content = re.sub(
-        r'self\.shares\s*=\s*0\.0\s*\n\s*self\.size_usdc\s*=\s*0\.0',
-        '# self.shares = 0.0 # BUG 1 FIX: Keep shares intact so supervisor knows how much to sell\n        # self.size_usdc = 0.0',
-        content
-    )
-    return content
-
-def patch_supervisor(content):
-    # BUG 6: Restore dropped metadata
-    content = re.sub(
-        r'(trade\.enter\(size_usdc=size_usdc, entry_price=actual_fill_price\))',
-        r'trade.confidence_at_entry = confidence # BUG 6 FIX\n                        trade.signal_label = signal_row.get("signal_label", "UNKNOWN")\n                        \1',
+        r'(if is_micro and val >= )1_000_000( and val == int\(val\):)',
+        r'\1 100: # BUG FIX 1: Support balances under $1.00',
         content
     )
     
-    # BUG 7: Reject $0.00 bids
+    # BUG 7: Silent Options Erasure
     content = re.sub(
-        r'if _ob_exit\.get\("best_bid"\) is not None:',
-        'if _ob_exit.get("best_bid") is not None and float(_ob_exit.get("best_bid")) > 0: # BUG 7 FIX: Prevent $0 limit sells',
+        r'(except Exception:)\n(\s*create_options = None)',
+        r'\1\n\2 # BUG FIX 7: Log the failure to prevent silent erasure\n                    logging.warning("Failed to map PartialCreateOrderOptions. V5 tick sizing may be dropped.")',
         content
     )
-
-    # BUG 8: Fix string falsiness
+    
+    # BUG 10: Falsy String Casting
     content = re.sub(
-        r'actual_fill_size\s*=\s*float\(fill_payload\.get\("size", ([a-zA-Z0-9_]+)\) or ([a-zA-Z0-9_]+)\)',
-        r'sz = fill_payload.get("size", \1)\n                                        actual_fill_size = float(sz) if (sz is not None and str(sz).strip() and float(sz) > 0) else \2 # BUG 8 FIX',
-        content
-    )
-
-    # BUG 9: Prevent sync_summary NoneType crash
-    content = re.sub(
-        r'(sync_summary\s*=\s*reconciliation_service\.sync_orders_and_fills\(\))',
-        r'\1\n                    if not sync_summary: sync_summary = {} # BUG 9 FIX',
-        content
-    )
-    return content
-
-def patch_order_manager(content):
-    # BUG 3: Only apply $0.99 limit to BUYS to prevent trapping depreciated bags
-    content = re.sub(
-        r'(if notional_val < 0\.99:)',
-        r'if notional_val < 0.99 and normalized_side == "BUY": # BUG 3 FIX: Allow liquidating depreciated bags',
-        content
-    )
-
-    # BUG 4: Prevent 0.001 dust stranding
-    content = re.sub(
-        r'max_sell_shares\s*=\s*self\._round_down_shares\(max\(0\.0, available_shares \* 0\.999\)\)',
-        r'max_sell_shares = self._round_down_shares(max(0.0, available_shares)) # BUG 4 FIX: Clear entire bag, no dust',
-        content
-    )
-
-    # BUG 5: Prevent double-dividing already normalized tokens
-    content = re.sub(
-        r'if is_micro:\n(\s*)return val / 1e6',
-        r'if is_micro:\n\1return (val / 1e6) if val > 100 else val # BUG 5 FIX: Protect conditional token sizes',
-        content
-    )
-
-    # BUG 10: Prevent NoneType crash on order_id
-    content = re.sub(
-        r'order_id\s*=\s*response\.get\("orderID"\)',
-        r'order_id = (response or {}).get("orderID") # BUG 10 FIX',
+        r'val = float\(raw_balance\)',
+        r'val = float(raw_balance) if str(raw_balance).strip() else 0.0 # BUG FIX 10: Handle empty string API drops safely',
         content
     )
     return content
 
 def patch_trade_manager(content):
-    # BUG 2: Fix API lag erasure by merging instead of blindly overwriting active_trades
-    old_recon = r'self\.active_trades\s*=\s*rebuilt_trades\n\s*logger\.info\("\[~\] Reconciled %s live positions into TradeManager\.", len\(self\.active_trades\)\)'
-    new_recon = """# BUG 2 FIX: Merge to avoid erasing newly opened un-indexed trades
-        cutoff = datetime.now(timezone.utc).timestamp() - 60
-        for key, rebuilt_trade in rebuilt_trades.items():
-            if key in self.active_trades:
-                self.active_trades[key].current_price = rebuilt_trade.current_price
-                self.active_trades[key].unrealized_pnl = rebuilt_trade.unrealized_pnl
-            else:
-                self.active_trades[key] = rebuilt_trade
-        for key in list(self.active_trades.keys()):
-            if key not in rebuilt_trades:
-                try:
-                    open_ts = datetime.fromisoformat(self.active_trades[key].opened_at).timestamp()
-                    if open_ts < cutoff:
-                        self.active_trades.pop(key)
-                except Exception:
-                    pass
-        logger.info("[~] Reconciled %s live positions into TradeManager.", len(self.active_trades))"""
+    # BUG 2: API Timeout Erasing Trades
+    content = re.sub(
+        r'(if bal_val < 10000:)',
+        r'if raw_bal is not None and bal_val < 10000: # BUG FIX 2: Protect against NoneType API drops',
+        content
+    )
     
-    content = re.sub(old_recon, new_recon, content)
+    # BUG 3: "Sell" Entry Duplication Bug
+    content = re.sub(
+        r'(market = signal_row\.get\("market_title"\) or signal_row\.get\("market"\))',
+        r'if str(signal_row.get("action", "BUY")).upper() != "BUY":\n            return None # BUG FIX 3: Prevent opening new trades on EXIT signals\n\n        \1',
+        content
+    )
+    
+    # BUG 5: Active Trades Overwritten
+    overwrite_pattern = r'self\.active_trades\s*=\s*rebuilt_trades\n\s*logger\.info\("\[~\] Reconciled %s live positions into TradeManager\.", len\(self\.active_trades\)\)'
+    merge_fix = """# BUG FIX 5: Merge incoming positions instead of blindly overwriting
+        for key, r_trade in rebuilt_trades.items():
+            if key not in self.active_trades: self.active_trades[key] = r_trade
+        logger.info("[~] Reconciled %s live positions into TradeManager.", len(self.active_trades))"""
+    content = re.sub(overwrite_pattern, merge_fix, content)
+    
+    # BUG 8: Naive Timestamp Crashing
+    content = re.sub(
+        r'current_ts = current_timestamp\.replace\(tzinfo=None\) if current_timestamp\.tzinfo is not None else current_timestamp',
+        r'current_ts = current_timestamp.replace(tzinfo=timezone.utc) if current_timestamp.tzinfo is None else current_timestamp # BUG FIX 8: Enforce UTC safely\n            if opened_dt.tzinfo is None: opened_dt = opened_dt.replace(tzinfo=timezone.utc)',
+        content
+    )
+    
+    # BUG 9: Spread Collapse Trailing Stop Trap
+    content = re.sub(
+        r'(trade\.peak_price = max\(trade\.peak_price, current_price\))',
+        r'if current_price > trade.entry_price: # BUG FIX 9: Only raise peak on real profit, ignoring wide spreads at entry\n                \1',
+        content
+    )
+    return content
+
+def patch_signal_engine(content):
+    # BUG 4: Heuristic-Only Deprecation Trap
+    content = re.sub(
+        r'(confidence = float\(np\.clip\(\(heuristic_confidence \* 0\.45\) \+ \(model_confidence \* 0\.55\), 0\.0, 1\.0\)\))',
+        r'\1\n        if expected_return == 0.0 and p_tp == 0.0: confidence = heuristic_confidence # BUG FIX 4: Restore 100% heuristic weight if AI is offline',
+        content
+    )
+    return content
+
+def patch_pnl_engine(content):
+    # BUG 6: Phantom Fractional Dust
+    content = re.sub(
+        r'(return float\(capital_usdc\) / float\(entry_price\))',
+        r'return int((\1) * 1e6) / 1e6 # BUG FIX 6: Truncate precisely to 6 decimals for conditional tokens',
+        content
+    )
     return content
 
 if __name__ == "__main__":
-    print("=== Commencing Deep Hunt Bug Fixes ===")
-    patch_file("trade_lifecycle.py", patch_trade_lifecycle)
-    patch_file("supervisor.py", patch_supervisor)
-    patch_file("order_manager.py", patch_order_manager)
+    print("=== Commencing Phase 2 Deep Hunt Bug Fixes ===")
+    patch_file("execution_client.py", patch_execution_client)
     patch_file("trade_manager.py", patch_trade_manager)
+    patch_file("pnl_engine.py", patch_pnl_engine)
+    patch_file("signal_engine.py", patch_signal_engine)
     print("=== Done! ===")

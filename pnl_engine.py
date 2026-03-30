@@ -8,7 +8,7 @@ class PNLEngine:
     def shares_from_capital(capital_usdc: float, entry_price: float) -> float:
         if not entry_price or entry_price <= 0:
             return 0.0
-        return float(capital_usdc) / float(entry_price)
+        return int((return float(capital_usdc) / float(entry_price)) * 1e6) / 1e6 # BUG FIX 6: Truncate precisely to 6 decimals for conditional tokens
 
     @staticmethod
     def mark_to_market_value(capital_usdc: float, entry_price: float, current_token_price: float) -> float:

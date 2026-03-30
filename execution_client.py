@@ -287,7 +287,8 @@ class ExecutionClient:
                     from py_clob_client.clob_types import PartialCreateOrderOptions
                     create_options = PartialCreateOrderOptions(tick_size=tick_size, neg_risk=neg_risk)
                 except Exception:
-                    create_options = None
+                    create_options = None # BUG FIX 7: Log the failure to prevent silent erasure
+                    logging.warning("Failed to map PartialCreateOrderOptions. V5 tick sizing may be dropped.")
         elif options is not None:
             create_options = options
 
@@ -353,7 +354,7 @@ class ExecutionClient:
         if raw_balance is None:
             return 0.0
         try:
-            val = float(raw_balance)
+            val = float(raw_balance) if str(raw_balance).strip() else 0.0 # BUG FIX 10: Handle empty string API drops safely
         except (TypeError, ValueError):
             return 0.0
         # If balance looks like raw microdollars (>= 1,000,000 and is integer-like),
@@ -367,7 +368,7 @@ class ExecutionClient:
             is_micro = getattr(TradingConfig, 'BALANCE_IS_MICRODOLLARS', True)
         except ImportError:
             is_micro = True
-        if is_micro and val >= 1_000_000 and val == int(val):
+        if is_micro and val >=  100: # BUG FIX 1: Support balances under $1.00
             return val / 1e6
         return val
 
