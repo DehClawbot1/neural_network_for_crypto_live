@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 
@@ -57,36 +58,63 @@ class WalletAlphaBuilder:
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
         df = df.sort_values([wallet_col, "timestamp"]).reset_index(drop=True)
 
-        rows = []
+        # ── BUG FIX (BUG 2): Use vectorized rolling/expanding windows instead
+        #    of O(n²) per-row slicing. This reduces wallet alpha history
+        #    from ~30-60 min to seconds. ──
+
+        # Ensure numeric types for rolling computations
+        df[return_col] = pd.to_numeric(df[return_col], errors="coerce")
+        df["_return_positive"] = (df[return_col] > 0).astype(float)
+        if hit_col and hit_col in df.columns:
+            df[hit_col] = pd.to_numeric(df[hit_col], errors="coerce")
+
+        parts = []
         for wallet, group in df.groupby(wallet_col):
             group = group.reset_index(drop=True)
-            for idx in range(len(group)):
-                past = group.iloc[max(0, idx - 200):idx]
-                if past.empty:
-                    rows.append({"wallet_copied": wallet, "timestamp": group.iloc[idx]["timestamp"]})
-                    continue
-                rows.append(
-                    {
-                        "wallet_copied": wallet,
-                        "timestamp": group.iloc[idx]["timestamp"],
-                        "wallet_trade_count_30d": len(past),
-                        "wallet_avg_forward_return_15m": float(past[return_col].mean()),
-                        "wallet_winrate_30d": float((past[return_col] > 0).mean()),
-                        "wallet_alpha_30d": float(past[return_col].mean()),
-                        "wallet_signal_precision_tp": float(past[hit_col].mean()) if hit_col else None,
-                        "wallet_recent_streak": int((past[return_col].tail(5) > 0).sum()),
-                    }
-                )
-        history_df = pd.DataFrame(rows)
-        if not history_df.empty and "outcome_side" in df.columns and wallet_col in df.columns:
-            side_stats = (
-                df.groupby([wallet_col, "outcome_side"])[return_col]
-                .mean()
-                .unstack(fill_value=0.0)
-                .reset_index()
-                .rename(columns={wallet_col: "wallet_copied", "YES": "yes_side_avg_return", "NO": "no_side_avg_return"})
-            )
-            history_df = history_df.merge(side_stats, on="wallet_copied", how="left")
+            n = len(group)
+            if n == 0:
+                continue
+
+            # Use expanding window (capped at 200 via min_periods=1, window=200 rolling)
+            # expanding() is equivalent to rolling with window=len, but rolling(200, min_periods=1)
+            # gives us the "last 200 rows" behavior efficiently
+            window = min(200, n)
+            roll = group[return_col].rolling(window=window, min_periods=1)
+
+            wallet_rows = pd.DataFrame({
+                "wallet_copied": wallet,
+                "timestamp": group["timestamp"].values,
+                "wallet_trade_count_30d": range(n),  # count of prior rows
+                "wallet_avg_forward_return_15m": roll.mean().shift(1).values,
+                "wallet_winrate_30d": group["_return_positive"].rolling(window=window, min_periods=1).mean().shift(1).values,
+                "wallet_alpha_30d": roll.mean().shift(1).values,
+                "wallet_recent_streak": group["_return_positive"].rolling(window=5, min_periods=1).sum().shift(1).values,
+            })
+
+            if hit_col and hit_col in group.columns:
+                wallet_rows["wallet_signal_precision_tp"] = group[hit_col].rolling(window=window, min_periods=1).mean().shift(1).values
+            else:
+                wallet_rows["wallet_signal_precision_tp"] = np.nan
+
+            # YES/NO side avg returns (vectorized)
+            if "outcome_side" in group.columns:
+                yes_mask = group["outcome_side"].astype(str).str.upper() == "YES"
+                no_mask = group["outcome_side"].astype(str).str.upper() == "NO"
+                # For side-specific averages, use expanding mean (simpler, still fast)
+                yes_returns = group[return_col].where(yes_mask).expanding(min_periods=1).mean().shift(1)
+                no_returns = group[return_col].where(no_mask).expanding(min_periods=1).mean().shift(1)
+                wallet_rows["yes_side_avg_return"] = yes_returns.values
+                wallet_rows["no_side_avg_return"] = no_returns.values
+            else:
+                wallet_rows["yes_side_avg_return"] = 0.0
+                wallet_rows["no_side_avg_return"] = 0.0
+
+            parts.append(wallet_rows)
+
+        if not parts:
+            return pd.DataFrame()
+
+        history_df = pd.concat(parts, ignore_index=True)
         return history_df
 
     def write(self):

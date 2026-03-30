@@ -14,9 +14,12 @@ class Retrainer:
     """
     Outcome-driven retraining trigger for paper/research mode.
     Prefers closed trades and replay episodes over raw dataset size.
+
+    FIX: Thresholds lowered from 100/200 to 5/10 so the model
+    actually retrains from early trade outcomes instead of waiting forever.
     """
 
-    def __init__(self, logs_dir="logs", closed_trade_threshold=100, replay_threshold=200, weights_dir="weights"):
+    def __init__(self, logs_dir="logs", closed_trade_threshold=5, replay_threshold=10, weights_dir="weights"):
         self.logs_dir = Path(logs_dir)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.weights_dir = Path(weights_dir)
@@ -30,6 +33,8 @@ class Retrainer:
         self.registry_file = self.weights_dir / "model_registry.csv"
         self.closed_trade_threshold = closed_trade_threshold
         self.replay_threshold = replay_threshold
+        # ── FIX: Track last retrained count to only retrain on NEW trades
+        self._last_retrained_closed_count = 0
 
     def _safe_read(self, path):
         if not path.exists():
@@ -38,6 +43,15 @@ class Retrainer:
             return pd.read_csv(path, engine="python", on_bad_lines="skip")
         except Exception:
             return pd.DataFrame()
+
+    def _safe_float(self, value, default=0.0):
+        try:
+            coerced = pd.to_numeric(value, errors="coerce")
+            if pd.isna(coerced):
+                return float(default)
+            return float(coerced)
+        except Exception:
+            return float(default)
 
     def _write_status(self, closed_rows: int, replay_rows: int, action: str):
         self.status_file.write_text(action + "\n", encoding="utf-8")
@@ -76,10 +90,16 @@ class Retrainer:
         if champion is None:
             promoted = True
         else:
+            candidate_avg_pnl = self._safe_float(candidate.get("average_pnl"), 0.0)
+            candidate_profit_factor = self._safe_float(candidate.get("profit_factor"), 0.0)
+            candidate_max_drawdown = self._safe_float(candidate.get("max_drawdown"), -999.0)
+            champion_avg_pnl = self._safe_float(champion.get("average_pnl"), -999.0)
+            champion_profit_factor = self._safe_float(champion.get("profit_factor"), 0.0)
+            champion_max_drawdown = self._safe_float(champion.get("max_drawdown"), -999.0)
             promoted = (
-                float(candidate.get("average_pnl", 0.0) or 0.0) >= float(champion.get("average_pnl", -999.0) or -999.0)
-                and float(candidate.get("profit_factor", 0.0) or 0.0) >= float(champion.get("profit_factor", 0.0) or 0.0)
-                and float(candidate.get("max_drawdown", 0.0) or 0.0) >= float(champion.get("max_drawdown", -999.0) or -999.0)
+                candidate_avg_pnl >= champion_avg_pnl
+                and candidate_profit_factor >= champion_profit_factor
+                and candidate_max_drawdown >= champion_max_drawdown
             )
 
         if not promoted:
@@ -90,10 +110,10 @@ class Retrainer:
             "training_data_window": "rolling_outcome_based",
             "replay_rows_used": replay_rows,
             "closed_trades_used": closed_rows,
-            "average_pnl": candidate.get("average_pnl"),
-            "profit_factor": candidate.get("profit_factor"),
-            "max_drawdown": candidate.get("max_drawdown"),
-            "test_accuracy": candidate.get("test_accuracy"),
+            "average_pnl": self._safe_float(candidate.get("average_pnl"), 0.0),
+            "profit_factor": self._safe_float(candidate.get("profit_factor"), 0.0),
+            "max_drawdown": self._safe_float(candidate.get("max_drawdown"), 0.0),
+            "test_accuracy": self._safe_float(candidate.get("test_accuracy"), 0.0),
             "promoted_at": pd.Timestamp.utcnow().isoformat(),
         }
         pd.DataFrame([row]).to_csv(self.registry_file, mode="a", header=not self.registry_file.exists(), index=False)
@@ -106,12 +126,15 @@ class Retrainer:
 
         closed_rows = len(closed_df)
         replay_rows = len(replay_df)
+
+        # ── FIX: Only retrain when we have NEW closed trades since last retrain
+        new_closed = closed_rows - self._last_retrained_closed_count
         pnl_degraded = False
         if not backtest_df.empty and "average_pnl" in backtest_df.columns:
-            pnl_degraded = float(backtest_df.iloc[-1].get("average_pnl", 0.0) or 0.0) < 0
+            pnl_degraded = self._safe_float(backtest_df.iloc[-1].get("average_pnl"), 0.0) < 0
 
         should_retrain = (
-            closed_rows >= self.closed_trade_threshold
+            new_closed >= self.closed_trade_threshold
             or replay_rows >= self.replay_threshold
             or pnl_degraded
         )
@@ -120,14 +143,24 @@ class Retrainer:
             self._write_status(
                 closed_rows,
                 replay_rows,
-                f"Not enough real outcomes for retraining yet: closed={closed_rows}/{self.closed_trade_threshold}, replay={replay_rows}/{self.replay_threshold}",
+                f"Waiting for {self.closed_trade_threshold} new closed trades to retrain: "
+                f"new_closed={new_closed}/{self.closed_trade_threshold}, "
+                f"total_closed={closed_rows}, replay={replay_rows}/{self.replay_threshold}",
             )
             return False
 
-        logging.info("Outcome-based retraining triggered. Refreshing supervised models and replay-aware RL model...")
+        logging.info(
+            "Retraining triggered: %d new closed trades (threshold=%d). Refreshing models...",
+            new_closed, self.closed_trade_threshold,
+        )
         Stage1Models(logs_dir=self.logs_dir).train()
         Stage2TemporalModels(logs_dir=self.logs_dir).train()
         train_model(timesteps=5000)
         promoted, message = self._promote_if_better(closed_rows, replay_rows)
+
+        # ── FIX: Update the last-retrained count so we don't retrain again
+        #    until the NEXT batch of 5 trades closes
+        self._last_retrained_closed_count = closed_rows
+
         self._write_status(closed_rows, replay_rows, message)
         return promoted

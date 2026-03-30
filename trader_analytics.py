@@ -21,6 +21,10 @@ class TraderAnalytics:
         if signals_df is None or signals_df.empty:
             return pd.DataFrame()
 
+        signals_df = signals_df.copy()
+        if "confidence" in signals_df.columns:
+            signals_df["confidence"] = pd.to_numeric(signals_df["confidence"], errors="coerce")
+
         base = (
             signals_df.groupby("wallet_copied")
             .agg(
@@ -34,6 +38,9 @@ class TraderAnalytics:
         )
 
         if trades_df is not None and not trades_df.empty and "wallet_copied" in trades_df.columns:
+            trades_df = trades_df.copy()
+            if "fill_price" in trades_df.columns:
+                trades_df["fill_price"] = pd.to_numeric(trades_df["fill_price"], errors="coerce")
             trade_counts = (
                 trades_df.groupby("wallet_copied")
                 .agg(paper_trades=("wallet_copied", "size"), avg_fill_price=("fill_price", "mean"))
@@ -55,3 +62,4 @@ class TraderAnalytics:
         analytics_df.to_csv(self.output_file, index=False)
         logging.info("Saved trader analytics to %s", self.output_file)
         return analytics_df
+

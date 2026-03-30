@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pandas as pd
+from schema import ALIASES
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import accuracy_score, mean_squared_error
@@ -81,17 +82,19 @@ class TimeSplitTrainer:
             "test_rows": len(test_df),
         }
 
-        if "future_return" in df.columns:
+        target_return_col = next((c for c in ALIASES["forward_return_15m"] if c in df.columns), None)
+        if target_return_col is not None:
             reg = Pipeline([
                 ("imputer", SimpleImputer(strategy="median")),
                 ("model", RandomForestRegressor(n_estimators=200, random_state=42)),
             ])
-            reg.fit(train_df[usable], train_df["future_return"])
+            reg.fit(train_df[usable], train_df[target_return_col])
             val_reg = reg.predict(val_df[usable])
             test_reg = reg.predict(test_df[usable])
-            result["val_return_rmse"] = mean_squared_error(val_df["future_return"], val_reg) ** 0.5
-            result["test_return_rmse"] = mean_squared_error(test_df["future_return"], test_reg) ** 0.5
+            result["val_return_rmse"] = mean_squared_error(val_df[target_return_col], val_reg) ** 0.5
+            result["test_return_rmse"] = mean_squared_error(test_df[target_return_col], test_reg) ** 0.5
 
         output = pd.DataFrame([result])
         output.to_csv(self.output_file, index=False)
         return output
+

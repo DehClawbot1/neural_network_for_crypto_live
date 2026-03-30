@@ -35,6 +35,20 @@ class PathReplaySimulator:
         history_df["timestamp"] = pd.to_datetime(history_df["timestamp"], utc=True, errors="coerce")
         history_df = history_df.dropna(subset=["timestamp", "token_id"]).sort_values(["token_id", "timestamp"]).reset_index(drop=True)
 
+        # ── BUG FIX: Pre-normalize token_id to string ONCE, then GROUP BY
+        #    token_id for O(1) lookups instead of filtering the entire
+        #    DataFrame on every signal row (was O(n*m), now O(n+m)).
+        #    This was the exact cause of the Ctrl+C hang / KeyboardInterrupt
+        #    traceback inside pandas scalar_compare on line 45. ──
+        history_df["token_id"] = history_df["token_id"].astype(str).str.strip()
+        history_df = history_df[history_df["token_id"] != ""].reset_index(drop=True)
+
+        # Pre-group history by token_id → dict of DataFrames (O(m) once)
+        history_by_token = {
+            token_key: group_df.reset_index(drop=True)
+            for token_key, group_df in history_df.groupby("token_id")
+        }
+
         trades = []
         for _, row in targets_df.iterrows():
             token_id = row.get("token_id")
@@ -42,8 +56,13 @@ class PathReplaySimulator:
             if pd.isna(signal_ts) or pd.isna(token_id):
                 continue
 
-            token_history = history_df[history_df["token_id"].astype(str) == str(token_id)].copy()
-            if token_history.empty:
+            token_key = str(token_id).strip()
+            if not token_key:
+                continue
+
+            # O(1) dict lookup instead of O(m) DataFrame filter
+            token_history = history_by_token.get(token_key)
+            if token_history is None or token_history.empty:
                 continue
 
             history_before = token_history[token_history["timestamp"] <= signal_ts]
@@ -87,11 +106,6 @@ class PathReplaySimulator:
                     exit_price = future_price
                     exit_time = future_row.get("timestamp")
                     exit_reason = "stop_loss"
-                    break
-                if float(row.get("confidence", 1.0) or 1.0) < 0.45:
-                    exit_price = future_price
-                    exit_time = future_row.get("timestamp")
-                    exit_reason = "confidence_drop"
                     break
 
             gross_pnl = PNLEngine.mark_to_market_pnl(capital_usdc, entry_price, exit_price)

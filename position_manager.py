@@ -4,6 +4,7 @@ from datetime import datetime
 
 import pandas as pd
 
+from config import TradingConfig
 from pnl_engine import PNLEngine
 from market_price_service import MarketPriceService
 
@@ -16,7 +17,7 @@ class PositionManager:
     Research/paper-trading only.
     """
 
-    def __init__(self, logs_dir="logs", max_open_positions=10, max_positions_per_token=1, max_positions_per_condition=2, max_positions_per_wallet=2, cooldown_minutes=30, take_profit_price_move=0.25, take_profit_roi_pct=0.25, trailing_stop_pct=0.08, time_stop_minutes=180, max_spread_to_exit=0.05, min_bid_size_to_exit=0):
+    def __init__(self, logs_dir="logs", max_open_positions=10, max_positions_per_token=1, max_positions_per_condition=2, max_positions_per_wallet=2, cooldown_minutes=30, take_profit_price_move=0.25, take_profit_roi_pct=TradingConfig.PAPER_TP_ROI, trailing_stop_pct=TradingConfig.PAPER_TRAILING_STOP, time_stop_minutes=180, max_spread_to_exit=0.05, min_bid_size_to_exit=0, fee_rate=0.0, slippage_rate=0.005):
         self.logs_dir = Path(logs_dir)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.positions_file = self.logs_dir / "positions.csv"
@@ -34,6 +35,8 @@ class PositionManager:
         self.time_stop_minutes = time_stop_minutes
         self.max_spread_to_exit = max_spread_to_exit
         self.min_bid_size_to_exit = min_bid_size_to_exit
+        self.fee_rate = fee_rate
+        self.slippage_rate = slippage_rate
 
     def _read_positions(self):
         if not self.positions_file.exists():
@@ -103,6 +106,7 @@ class PositionManager:
             "position_action": "ENTER",
             "signal_label": signal_row.get("signal_label", "UNKNOWN"),
             "confidence": signal_row.get("confidence", 0.0),
+            "confidence_at_entry": signal_row.get("confidence", 0.0),
             "size_usdc": size_usdc,
             "shares": shares,
             "entry_price": fill_price,
@@ -133,11 +137,12 @@ class PositionManager:
                     latest_conf[str(token_id)] = float(row.get("confidence", 0.0))
 
         token_ids = [str(x) for x in positions.get("token_id", pd.Series(dtype=str)).dropna().tolist()]
-        latest_prices = self.price_service.get_latest_prices(token_ids) if token_ids else {}
+        latest_quotes = self.price_service.get_batch_prices(token_ids) if token_ids else {}
 
         for idx, row in positions.iterrows():
             token_id = str(row.get("token_id", ""))
-            current_price = latest_prices.get(token_id)
+            quote = latest_quotes.get(token_id) or {}
+            current_price = quote.get("midpoint") or quote.get("last_trade_price") or quote.get("price")
             if current_price is None:
                 current_price = float(row.get("current_price", row.get("entry_price", 0.5)))
             entry_price = float(row.get("entry_price", current_price))
@@ -147,6 +152,8 @@ class PositionManager:
             unrealized_pnl = PNLEngine.mark_to_market_pnl(float(row.get("size_usdc", 0.0)), entry_price, current_price, fees=fees_paid)
 
             positions.at[idx, "current_price"] = current_price
+            positions.at[idx, "spread"] = float(quote.get("spread", 0.0) or 0.0)
+            positions.at[idx, "bid_size"] = float(quote.get("best_bid_size", 0.0) or 0.0)
             positions.at[idx, "market_value"] = round(float(market_value), 4)
             positions.at[idx, "unrealized_pnl"] = round(float(unrealized_pnl), 4)
             prior_peak = float(row.get("peak_price", entry_price) or entry_price)
@@ -157,7 +164,7 @@ class PositionManager:
         self._write_positions(positions)
         return positions
 
-    def reduce_position(self, position_row: dict, fraction=0.5):
+    def reduce_position(self, position_row: dict, fraction=0.5, exit_price=None, filled_shares=None):
         positions = self._read_positions()
         if positions.empty or "position_id" not in positions.columns:
             return positions
@@ -171,13 +178,19 @@ class PositionManager:
         size_usdc = float(positions.at[idx, "size_usdc"] or 0.0)
         entry_price = float(positions.at[idx, "entry_price"] or 0.0)
         token_id = str(positions.at[idx, "token_id"] or "") if "token_id" in positions.columns else ""
-        exit_price = self.price_service.get_latest_price(token_id) if token_id else None
-        exit_price = float(exit_price if exit_price is not None else positions.at[idx, "current_price"] or entry_price)
+        if exit_price is None:
+            quote = self.price_service.get_quote(token_id) if token_id else {}
+            live_price = quote.get("best_bid") or quote.get("midpoint") or quote.get("last_trade_price") or quote.get("price")
+            exit_price = float(live_price if live_price is not None else positions.at[idx, "current_price"] or entry_price)
+        else:
+            exit_price = float(exit_price)
 
-        shares_closed = shares * fraction
+        shares_closed = float(filled_shares) if filled_shares is not None else shares * fraction
+        shares_closed = min(shares, max(0.0, shares_closed))
         shares_remaining = shares - shares_closed
-        gross_realized_pnl = shares_closed * (exit_price - entry_price)
-        fees_paid_exit = shares_closed * exit_price * self.price_service.max_age_seconds * 0 + 0.0
+        effective_exit_price = exit_price * (1.0 - self.slippage_rate)
+        gross_realized_pnl = shares_closed * (effective_exit_price - entry_price)
+        fees_paid_exit = shares_closed * effective_exit_price * self.fee_rate
         net_realized_pnl = gross_realized_pnl - fees_paid_exit
 
         positions.at[idx, "shares"] = shares_remaining
@@ -193,7 +206,7 @@ class PositionManager:
         self._write_positions(positions)
         return positions
 
-    def close_position(self, position_row: dict, reason="policy_exit"):
+    def close_position(self, position_row: dict, reason="policy_exit", exit_price=None, filled_shares=None):
         positions = self._read_positions()
         if positions.empty or "position_id" not in positions.columns:
             return pd.DataFrame()
@@ -204,15 +217,21 @@ class PositionManager:
 
         row = positions[mask].iloc[0].to_dict()
         token_id = str(row.get("token_id", "") or "")
-        live_price = self.price_service.get_latest_price(token_id) if token_id else None
-        exit_price = float(live_price if live_price is not None else row.get("current_price", row.get("entry_price", 0.5)))
+        if exit_price is None:
+            quote = self.price_service.get_quote(token_id) if token_id else {}
+            live_price = quote.get("best_bid") or quote.get("midpoint") or quote.get("last_trade_price") or quote.get("price")
+            exit_price = float(live_price if live_price is not None else row.get("current_price", row.get("entry_price", 0.5)))
+        else:
+            exit_price = float(exit_price)
         entry_price = float(row.get("entry_price", exit_price))
         size_usdc = float(row.get("size_usdc", 0.0) or 0.0)
         fees_paid = float(row.get("fees_paid", 0.0) or 0.0)
         shares = float(row.get("shares", 0.0) or 0.0)
-        market_value = shares * exit_price
-        gross_realized_pnl = shares * (exit_price - entry_price)
-        fees_paid_exit = 0.0
+        shares = min(shares, max(0.0, float(filled_shares) if filled_shares is not None else shares))
+        effective_exit_price = exit_price * (1.0 - self.slippage_rate)
+        market_value = shares * effective_exit_price
+        gross_realized_pnl = shares * (effective_exit_price - entry_price)
+        fees_paid_exit = shares * effective_exit_price * self.fee_rate
         net_realized_pnl = gross_realized_pnl - fees_paid_exit - fees_paid
 
         row["current_price"] = exit_price
@@ -239,6 +258,41 @@ class PositionManager:
         closed_df.to_csv(self.episode_file, mode="a", header=not self.episode_file.exists(), index=False)
         return closed_df
 
+    def get_exit_reason(self, row: dict, alerts_df: pd.DataFrame | None = None):
+        confidence = float(row.get("confidence", 0.0))
+        market = str(row.get("market", ""))
+        entry_price = float(row.get("entry_price", 0.0) or 0.0)
+        current_price = float(row.get("current_price", entry_price) or entry_price)
+        peak_price = float(row.get("peak_price", entry_price) or entry_price)
+        roi_pct = ((current_price - entry_price) / entry_price) if entry_price else 0.0
+        trailing_floor = peak_price * (1.0 - self.trailing_stop_pct)
+        opened_at = pd.to_datetime(row.get("opened_at"), errors="coerce")
+        minutes_open = (pd.Timestamp.now() - opened_at).total_seconds() / 60.0 if pd.notna(opened_at) else 0.0
+        spread = float(row.get("spread", 0.0) or 0.0)
+        bid_size = float(row.get("bid_size", self.min_bid_size_to_exit) or self.min_bid_size_to_exit)
+
+        alert_markets = set()
+        if alerts_df is not None and not alerts_df.empty and "market" in alerts_df.columns:
+            alert_markets = set(alerts_df["market"].dropna().astype(str).tolist())
+
+        if (current_price - entry_price) >= self.take_profit_price_move:
+            return "take_profit_price_move"
+        if roi_pct >= self.take_profit_roi_pct:
+            return "take_profit_roi"
+        if peak_price > entry_price and current_price <= trailing_floor:
+            return "trailing_stop"
+        if minutes_open >= self.time_stop_minutes:
+            return "time_stop"
+        if spread > self.max_spread_to_exit:
+            return None
+        if bid_size < self.min_bid_size_to_exit:
+            return None
+        if confidence < 0.45:
+            return "confidence_drop"
+        if market in alert_markets:
+            return "market_alert"
+        return None
+
     def apply_exit_rules(self, alerts_df: pd.DataFrame | None = None):
         positions = self._read_positions()
         if positions.empty:
@@ -247,49 +301,17 @@ class PositionManager:
         closed = []
         remaining_rows = []
 
-        alert_markets = set()
-        if alerts_df is not None and not alerts_df.empty and "market" in alerts_df.columns:
-            alert_markets = set(alerts_df["market"].dropna().astype(str).tolist())
-
         for _, row in positions.iterrows():
-            confidence = float(row.get("confidence", 0.0))
-            pnl = float(row.get("unrealized_pnl", 0.0))
-            market = str(row.get("market", ""))
-            entry_price = float(row.get("entry_price", 0.0) or 0.0)
-            current_price = float(row.get("current_price", entry_price) or entry_price)
-            peak_price = float(row.get("peak_price", entry_price) or entry_price)
-            roi_pct = ((current_price - entry_price) / entry_price) if entry_price else 0.0
-            trailing_floor = peak_price * (1.0 - self.trailing_stop_pct)
-            opened_at = pd.to_datetime(row.get("opened_at"), errors="coerce")
-            minutes_open = (pd.Timestamp.now() - opened_at).total_seconds() / 60.0 if pd.notna(opened_at) else 0.0
-            spread = float(row.get("spread", 0.0) or 0.0)
-            bid_size = float(row.get("bid_size", self.min_bid_size_to_exit) or self.min_bid_size_to_exit)
-
-            close_reason = None
-            if (current_price - entry_price) >= self.take_profit_price_move:
-                close_reason = "take_profit_price_move"
-            elif roi_pct >= self.take_profit_roi_pct:
-                close_reason = "take_profit_roi"
-            elif peak_price > entry_price and current_price <= trailing_floor:
-                close_reason = "trailing_stop"
-            elif minutes_open >= self.time_stop_minutes:
-                close_reason = "time_stop"
-            elif spread > self.max_spread_to_exit:
-                close_reason = None
-            elif bid_size < self.min_bid_size_to_exit:
-                close_reason = None
-            elif confidence < 0.45:
-                close_reason = "confidence_drop"
-            elif market in alert_markets:
-                close_reason = "market_alert"
+            close_reason = self.get_exit_reason(row.to_dict(), alerts_df=alerts_df)
 
             if close_reason:
                 closed_row = row.to_dict()
                 shares = float(closed_row.get("shares", 0.0) or 0.0)
                 entry_price = float(closed_row.get("entry_price", 0.0) or 0.0)
                 exit_price = float(closed_row.get("current_price", entry_price) or entry_price)
-                gross_realized_pnl = shares * (exit_price - entry_price)
-                fees_paid_exit = 0.0
+                effective_exit_price = exit_price * (1.0 - self.slippage_rate)
+                gross_realized_pnl = shares * (effective_exit_price - entry_price)
+                fees_paid_exit = shares * effective_exit_price * self.fee_rate
                 net_realized_pnl = gross_realized_pnl - fees_paid_exit - float(closed_row.get("fees_paid", 0.0) or 0.0)
                 closed_row["exit_price"] = exit_price
                 closed_row["gross_realized_pnl"] = gross_realized_pnl
@@ -332,3 +354,4 @@ class PositionManager:
             return pd.read_csv(self.closed_file)
         except Exception:
             return pd.DataFrame()
+

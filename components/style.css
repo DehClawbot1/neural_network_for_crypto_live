@@ -1,0 +1,91 @@
+.main { background-color: #0e1117; }
+.hero-box {
+    padding: 1.2rem 1.4rem;
+    border-radius: 18px;
+    background: linear-gradient(135deg, #121826 0%, #0f172a 100%);
+    border: 1px solid rgba(255,255,255,0.08);
+    margin-bottom: 1rem;
+}
+.market-card {
+    background: linear-gradient(180deg, #121826 0%, #111827 100%);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 20px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+    box-shadow: 0 8px 20px rgba(0,0,0,0.18);
+}
+.market-title {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: #f8fafc;
+    margin-bottom: 0.65rem;
+    line-height: 1.35;
+}
+.signal-badge {
+    display: inline-block;
+    padding: 0.35rem 0.65rem;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 700;
+    margin-right: 0.35rem;
+    margin-bottom: 0.45rem;
+}
+.badge-watch { background: rgba(245, 158, 11, 0.16); color: #fbbf24; }
+.badge-strong { background: rgba(16, 185, 129, 0.16); color: #34d399; }
+.badge-top { background: rgba(59, 130, 246, 0.16); color: #60a5fa; }
+.badge-ignore { background: rgba(148, 163, 184, 0.16); color: #cbd5e1; }
+.meta-line {
+    color: #cbd5e1;
+    font-size: 0.92rem;
+    margin-bottom: 0.3rem;
+}
+.reason-box {
+    margin-top: 0.7rem;
+    color: #94a3b8;
+    font-size: 0.88rem;
+    padding: 0.7rem 0.8rem;
+    border-radius: 14px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.05);
+}
+.section-title {
+    font-size: 1.1rem;
+    font-weight: 700;
+    margin-top: 0.5rem;
+    margin-bottom: 0.9rem;
+    color: #f8fafc;
+}
+.overview-card {
+    background: linear-gradient(180deg, #121826 0%, #111827 100%);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 18px;
+    padding: 0.9rem 1rem;
+    margin-bottom: 1rem;
+}
+.live-dot {
+    display:inline-block;
+    width:10px;
+    height:10px;
+    background:#22c55e;
+    border-radius:50%;
+    margin-right:8px;
+    box-shadow:0 0 10px rgba(34,197,94,0.8);
+}
+.confidence-bar-wrap {
+    width:100%;
+    height:10px;
+    background:rgba(255,255,255,0.08);
+    border-radius:999px;
+    overflow:hidden;
+    margin-top:0.45rem;
+    margin-bottom:0.2rem;
+}
+.confidence-bar-fill {
+    height:100%;
+    border-radius:999px;
+    background:linear-gradient(90deg, #3b82f6 0%, #10b981 100%);
+}
+.small-muted {
+    color:#94a3b8;
+    font-size:0.85rem;
+}

@@ -108,7 +108,7 @@ class TradeManager:
                 live_price = market_prices[trade.market]
                 trade.update_market(live_price)
 
-    def process_exits(self, current_timestamp: datetime, alerts_df: pd.DataFrame = None):
+    def process_exits(self, current_timestamp: datetime, alerts_df: pd.DataFrame = None, execution_client=None, execution_client=None):
         closed_trades: List[TradeLifecycle] = []
         close_reasons: Dict[str, str] = {}
 
@@ -336,8 +336,7 @@ class TradeManager:
 
         if reconciled_positions_df is None or reconciled_positions_df.empty:
             if self.active_trades:
-                logger.warning("[~] Exchange shows no open positions. Clearing %s local live trades.", len(self.active_trades))
-            self.active_trades = {}
+                logger.warning("[~] Reconciled live positions came back empty. Keeping %s local trades in memory to avoid ghost closes after a transient DB/API failure.", len(self.active_trades))
             return
 
         rebuilt_trades: Dict[str, TradeLifecycle] = {}

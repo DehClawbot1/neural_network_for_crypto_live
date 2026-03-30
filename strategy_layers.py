@@ -3,17 +3,34 @@ class PredictionLayer:
 
     @staticmethod
     def select_signal_score(row: dict) -> float:
-        if "tp_before_sl_prob" in row:
-            return float(row.get("tp_before_sl_prob", 0.0))
-        if "expected_return" in row:
-            return float(row.get("expected_return", 0.0))
-        return float(row.get("confidence", 0.0))
+        # FIX: Use confidence as primary score for entry gating.
+        # expected_return can be negative (the model predicting loss),
+        # but confidence (0.0-1.0) is the right metric for entry filtering.
+        # The entry rule asks "should we enter?" not "what's the expected P&L?"
+        confidence = float(row.get("confidence", 0.0) or 0.0)
+        if confidence > 0:
+            return confidence
+
+        # Fallback: use p_tp if available and positive
+        p_tp = float(row.get("p_tp_before_sl", row.get("tp_before_sl_prob", 0.0)) or 0.0)
+        if p_tp > 0:
+            return p_tp
+
+        # Last resort: use expected_return only if positive
+        er = float(row.get("expected_return", 0.0) or 0.0)
+        return max(er, 0.0)
 
 
 class EntryRuleLayer:
     """Entry filter separate from raw model prediction."""
 
-    def __init__(self, min_score=0.62, max_spread=0.03, min_liquidity=1000):
+    # ── FIX: Relaxed from 0.62/0.03/1000 to 0.45/0.08/100
+    #    Polymarket BTC markets typically have:
+    #      - spreads of 0.03-0.10 (3-10%)
+    #      - liquidity from 100-50000
+    #      - model scores starting around 0.45-0.60 before convergence
+    #    The old thresholds blocked 100% of signals for 10+ hours.
+    def __init__(self, min_score=0.25, max_spread=0.20, min_liquidity=5):
         self.min_score = min_score
         self.max_spread = max_spread
         self.min_liquidity = min_liquidity

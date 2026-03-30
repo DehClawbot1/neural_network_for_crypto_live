@@ -7,6 +7,15 @@ from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostin
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 
+# ── BUG FIX I: Use hardware config for parallelism ──
+try:
+    from hardware_config import get_sklearn_jobs, get_lightgbm_params
+    _N_JOBS = get_sklearn_jobs()
+    _LGB_EXTRA = get_lightgbm_params()
+except ImportError:
+    _N_JOBS = -1
+    _LGB_EXTRA = {}
+
 try:
     from lightgbm import LGBMClassifier, LGBMRegressor
 except Exception:  # pragma: no cover
@@ -24,6 +33,8 @@ class Stage1Models:
     """
     Stronger tabular ensemble stage with calibrated classification outputs.
     Falls back to sklearn if optional libraries are unavailable.
+
+    BUG FIX I: Now uses all available CPU cores via n_jobs parameter.
     """
 
     FEATURE_COLUMNS = [
@@ -68,20 +79,28 @@ class Stage1Models:
 
     def _build_classifier(self):
         if LGBMClassifier is not None:
-            base = LGBMClassifier(
-                n_estimators=300,
-                learning_rate=0.05,
-                num_leaves=31,
-                subsample=0.9,
-                colsample_bytree=0.9,
-                random_state=42,
-            )
+            # ── BUG FIX I: Use all cores + optional GPU ──
+            lgb_params = {
+                "n_estimators": 300,
+                "learning_rate": 0.05,
+                "num_leaves": 31,
+                "subsample": 0.9,
+                "colsample_bytree": 0.9,
+                "random_state": 42,
+                "n_jobs": _N_JOBS,
+                "verbose": -1,
+            }
+            # Merge GPU params if available
+            for k, v in _LGB_EXTRA.items():
+                if k != "n_jobs":  # don't override n_jobs if GPU set it
+                    lgb_params[k] = v
+            base = LGBMClassifier(**lgb_params)
             return Pipeline([
                 ("imputer", SimpleImputer(strategy="median")),
                 ("model", CalibratedClassifierCV(base, method="sigmoid", cv=3)),
             ])
         if CatBoostClassifier is not None:
-            base = CatBoostClassifier(iterations=300, learning_rate=0.05, depth=6, verbose=False)
+            base = CatBoostClassifier(iterations=300, learning_rate=0.05, depth=6, verbose=False, thread_count=_N_JOBS)
             return Pipeline([
                 ("imputer", SimpleImputer(strategy="median")),
                 ("model", CalibratedClassifierCV(base, method="sigmoid", cv=3)),
@@ -93,14 +112,25 @@ class Stage1Models:
 
     def _build_regressor(self):
         if LGBMRegressor is not None:
+            lgb_params = {
+                "n_estimators": 300,
+                "learning_rate": 0.05,
+                "num_leaves": 31,
+                "random_state": 42,
+                "n_jobs": _N_JOBS,
+                "verbose": -1,
+            }
+            for k, v in _LGB_EXTRA.items():
+                if k != "n_jobs":
+                    lgb_params[k] = v
             return Pipeline([
                 ("imputer", SimpleImputer(strategy="median")),
-                ("model", LGBMRegressor(n_estimators=300, learning_rate=0.05, num_leaves=31, random_state=42)),
+                ("model", LGBMRegressor(**lgb_params)),
             ])
         if CatBoostRegressor is not None:
             return Pipeline([
                 ("imputer", SimpleImputer(strategy="median")),
-                ("model", CatBoostRegressor(iterations=300, learning_rate=0.05, depth=6, verbose=False)),
+                ("model", CatBoostRegressor(iterations=300, learning_rate=0.05, depth=6, verbose=False, thread_count=_N_JOBS)),
             ])
         return Pipeline([
             ("imputer", SimpleImputer(strategy="median")),

@@ -79,3 +79,4 @@ class WalkForwardEvaluator:
         ])
         result.to_csv(self.output_file, index=False)
         return result
+

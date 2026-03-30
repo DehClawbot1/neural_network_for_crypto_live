@@ -44,3 +44,4 @@ class SimulationEngine:
         if df.empty:
             return df
         return df[df["status"] == "OPEN"]
+

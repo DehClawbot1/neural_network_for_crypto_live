@@ -604,7 +604,7 @@ class OrderManager:
                 }
                 self._update_order_status(order_id, "FILLED", fill_price=fill_payload["price"], fill_size=fill_payload["size"])
                 self.record_fill(fill_payload)
-                return {"filled": True, "response": last_response}
+                return {"filled": True, "response": fill_payload, "order_status": last_response}
             if status in ["CANCELED", "FAILED", "REJECTED"]:
                 self._update_order_status(order_id, status)
                 return {"filled": False, "response": last_response}

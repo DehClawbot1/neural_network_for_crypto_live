@@ -1,315 +1,93 @@
-# Neural Network for Crypto
+# Balance Fix + Market Orders + Money Management
 
-Public-data Polymarket research system for **BTC-related markets**, **smart-wallet tracking**, **paper-trading simulation**, and **historical model training**.
+## The Problem
 
-## What this project is
+Your bot keeps saying `insufficient_funds` even though you have money on Polymarket.
 
-This repo is for:
-- public market discovery
-- public wallet / leaderboard analysis
-- historical dataset building
-- supervised model research
-- path-replay backtesting
-- paper-trading dashboards
+## Root Cause
 
-This repo is **not** for:
-- connecting your live Polymarket account
-- placing real orders
-- real-money execution
-- storing or requiring your private trading credentials
+The Polymarket CLOB API returns balance in **microdollars** (1,000,000 = $1.00).
 
-## Safety / mode
-
-Current intended mode:
-- **public-data only**
-- **paper-trading only**
-- **research / backtesting only**
-
-You do **not** need a Polymarket API key for the current setup.
-
-The project uses public endpoints only:
-- **Gamma API** for market discovery
-- **Data API** for leaderboard + public wallet trades
-- **CLOB read endpoints** for price history
-- optionally public **CLOB WebSocket** for live market updates
-
-## Current architecture
-
-## Runtime
-
-### `run_bot.py`
-Main launcher.
-
-It now:
-1. validates environment
-2. checks existing weights
-3. runs the research pipeline refresh
-4. starts the continuous supervisor loop
-
-### `supervisor.py`
-Continuous monitoring loop for:
-- fetching public BTC-related market/account activity
-- scoring paper opportunities
-- simulating paper positions
-- updating logs for the dashboard
-
-## Data collection
-
-### `market_monitor.py`
-Uses **Gamma** market discovery and tracks:
-- `condition_id`
-- `clob_token_ids`
-- `yes_token_id`
-- `no_token_id`
-- liquidity / volume / last trade / end date
-
-### `leaderboard_scraper.py`
-Uses the public **Data API** to:
-- fetch top crypto wallets
-- scan recent public trades
-- extract BTC-related signal candidates
-
-### `clob_history.py`
-Uses public **CLOB `/prices-history`** for token-level price history.
-
-This is the correct data source for:
-- forward-return labels
-- TP-before-SL labels
-- MFE / MAE
-- replay simulation
-
-## Dataset / features / labels
-
-### `historical_dataset_builder.py`
-Builds the project dataset around:
-- one signal
-- one timestamp
-- one market
-- only information available at that moment
-
-It now merges:
-- market microstructure fields
-- rolling wallet metrics
-- BTC context features
-- wallet alpha summaries
-
-### `wallet_alpha_builder.py`
-Builds wallet quality features such as:
-- rolling trade count
-- rolling forward return
-- rolling win rate
-- rolling alpha proxy
-- TP precision proxy
-- recent streak
-
-### `target_builder.py`
-Builds BTC context features like:
-- `btc_spot_return_5m`
-- `btc_spot_return_15m`
-- `btc_realized_vol_15m`
-- `btc_volume_proxy`
-
-### `contract_target_builder.py`
-Builds event-style contract labels, including:
-- `tp_before_sl_60m`
-- `forward_return_15m`
-- `mfe_60m`
-- `mae_60m`
-
-## Models / evaluation
-
-### `supervised_models.py`
-Trains supervised baseline models for:
-- classification: `tp_before_sl_60m`
-- regression: `forward_return_15m`
-
-### `model_inference.py`
-Loads trained supervised models and outputs:
-- `p_tp_before_sl`
-- `expected_return`
-- `edge_score`
-
-### `time_split_trainer.py`
-Uses ordered train / validation / test splits instead of random splits.
-
-### `walk_forward_evaluator.py`
-Provides a simple walk-forward evaluation pass.
-
-### `evaluator.py`
-Writes research metrics such as:
-- accuracy
-- precision
-- recall
-- F1
-- Sharpe-like metric
-- drawdown
-
-## Simulation / paper trading
-
-### `pnl_engine.py`
-Implements correct Polymarket-style share accounting.
-
-Core formula:
-
-```text
-shares = capital_usdc / entry_price
-pnl = shares * (exit_price - entry_price) - fees
+The tutorial code shows the correct way:
+```python
+balance = auth_client.get_balance_allowance(...)
+usdc_balance = int(balance['balance']) / 1e6  # ← This division was missing!
 ```
 
-### `position_manager.py`
-Tracks open and closed paper positions using:
-- `outcome_side` (`YES` / `NO`)
-- `position_action` (`ENTER` / `EXIT`)
-- share-based mark-to-market logic
-
-### `path_replay_simulator.py`
-Replays future price paths bar by bar and computes:
-- entry time
-- exit time
-- holding time
-- exit reason
-- gross / net pnl
-- MFE
-- MAE
-- max drawdown during trade
-
-### `strategy_layers.py`
-Starts separating:
-- prediction layer
-- entry rule layer
-- exit rule layer
-
-## UI
-
-### `dashboard.py`
-Streamlit dashboard with:
-- **Overview**
-- **Opportunities**
-- **Markets & Whales**
-- **Learning**
-- **Raw Data**
-
-Recent UI improvements include:
-- better opportunity cards
-- confidence bars
-- most successful trades view
-- replay metrics
-- learning metrics surfaced in the browser
-
-## Quick start
-
-## 1) Install
-
-```bash
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+But `order_manager.py` was reading the raw value without dividing:
+```python
+available_balance = float(readiness.get("balance", 0.0))  # BUG: treats microdollars as dollars
 ```
 
-Current requirements include the newer modeling stack used by the refactor, including packages such as:
-- `scikit-learn`
-- `joblib`
-- `lightgbm`
-- `catboost`
+So if you had $5.00, the API returned `5000000`, and the bot compared `5000000 >= 10` (which passes) but then the actual CLOB order creation internally also expected normalized amounts, causing a mismatch.
 
-## 2) Create / validate local env
+## What's Fixed
+
+### 1. Balance Normalization (`order_manager.py`)
+- Added `_normalize_balance()` method that divides by 1e6 when the raw value looks like microdollars
+- Added `_get_available_balance()` that logs both raw and normalized values for debugging
+- All balance checks now use normalized values
+
+### 2. Market Orders (`order_manager.py`)
+- New `submit_market_entry()` method for Fill-or-Kill (FOK) market orders
+- Matches the tutorial pattern exactly:
+  ```python
+  market_order = MarketOrderArgs(token_id=yes_token_id, amount=5.0, side=BUY)
+  signed = auth_client.create_market_order(market_order)
+  response = auth_client.post_order(signed, OrderType.FOK)
+  ```
+- Better for fast-moving Bitcoin 5-min markets
+
+### 3. Money Management (`money_manager.py`)
+- Bets are now sized as % of balance, not fixed $10/$50
+- High confidence (>70%): 5% of balance
+- Medium confidence (50-70%): 2% of balance
+- Low confidence (<50%): 1% of balance
+- Reduces bet size after consecutive losses
+- Never exceeds 25% total exposure across all positions
+- Min bet: $0.50, Max bet: $20.00
+
+### 4. Supervisor Wiring (`supervisor.py`)
+- Entry path uses market orders when `USE_MARKET_ORDERS=True` (default)
+- Bet sizing uses MoneyManager instead of fixed amounts
+- Better logging of balance and bet decisions
+
+## How to Apply
 
 ```bash
-python api_setup.py
-```
+# 1. Copy all files to your project root
+cp fixes/*.py /path/to/your/project/
 
-## 3) Run the system
+# 2. Run the apply script
+cd /path/to/your/project
+python apply_all_betting_fixes.py
 
-```bash
+# 3. Verify balance reads correctly
+python diagnose_balance_fix.py
+
+# 4. Start trading
 python run_bot.py
 ```
 
-In another terminal:
+## Files
 
-```bash
-python -m streamlit run dashboard.py
+| File | Description |
+|------|-------------|
+| `order_manager.py` | PATCHED: Balance normalization + market order support |
+| `config.py` | PATCHED: Money management settings |
+| `money_manager.py` | NEW: Intelligent bet sizing |
+| `supervisor_betting_patch.py` | NEW: Patches supervisor for market orders |
+| `diagnose_balance_fix.py` | NEW: Diagnostic script to verify balance |
+| `apply_all_betting_fixes.py` | Apply script that patches supervisor.py + run_bot.py |
+
+## Tuning
+
+Edit `config.py` to adjust money management:
+
+```python
+MAX_RISK_PER_TRADE_PCT = 0.05  # 5% per trade (change to 0.10 for 10%)
+MIN_BET_USDC = 0.50            # Minimum bet
+MAX_BET_USDC = 20.0            # Maximum bet
+USE_MARKET_ORDERS = True       # Set False to use limit orders instead
+MAX_TOTAL_EXPOSURE_PCT = 0.25  # Max 25% of balance in open positions
 ```
-
-Optional local API:
-
-```bash
-python -m uvicorn web_api:app --reload
-```
-
-Docs:
-
-```text
-http://127.0.0.1:8000/docs
-```
-
-## Recommended Windows usage
-
-If the repo already exists locally:
-
-```powershell
-git pull origin main
-python -m pip install -r requirements.txt
-python run_bot.py
-```
-
-And in a second PowerShell window:
-
-```powershell
-python -m streamlit run dashboard.py
-```
-
-## Main output files
-
-Generated in `logs/`:
-
-- `signals.csv`
-- `daily_summary.txt`
-- `markets.csv`
-- `whales.csv`
-- `market_distribution.csv`
-- `alerts.csv`
-- `positions.csv`
-- `closed_positions.csv`
-- `historical_dataset.csv`
-- `btc_targets.csv`
-- `contract_targets.csv`
-- `wallet_alpha.csv`
-- `wallet_alpha_history.csv`
-- `supervised_eval.csv`
-- `time_split_eval.csv`
-- `path_replay_backtest.csv`
-- `model_status.csv`
-
-## Current reality
-
-This repo is improving fast, but it is still a **research system under active refactor**.
-
-The newer supervised / event-driven path is the direction of travel.
-The older dummy RL path still exists in parts of the codebase, but it should no longer be treated as the core intelligence for the real goal.
-
-## Troubleshooting
-
-### `ModuleNotFoundError` when starting
-
-Usually this means dependencies were not refreshed after a newer modeling/UI pass.
-
-Run:
-
-```powershell
-python -m pip install -r requirements.txt
-```
-
-Then retry:
-
-```powershell
-python run_bot.py
-```
-
-If the error mentions a specific package like `joblib`, `lightgbm`, or `catboost`, reinstalling from `requirements.txt` should fix it.
-
-## Next intended direction
-
-- use Gamma/Data/CLOB more directly across the pipeline
-- improve wallet rolling metrics further
-- improve token-level historical labeling
-- rank signals primarily from trained model outputs
-- keep the whole project in paper/research mode

@@ -46,7 +46,7 @@ class StrategyBacktester:
         drawdown = cumulative - running_max
         max_drawdown = float(drawdown.min()) if len(drawdown) else 0.0
 
-        hold_col = "holding_rows" if "holding_rows" in df.columns else "holding_time" if "holding_time" in df.columns else None
+        hold_col = "holding_minutes" if "holding_minutes" in df.columns else "holding_rows" if "holding_rows" in df.columns else "holding_time" if "holding_time" in df.columns else None
         avg_hold = float(df[hold_col].astype(float).mean()) if hold_col else np.nan
 
         summary = pd.DataFrame(
@@ -102,3 +102,4 @@ class StrategyBacktester:
 if __name__ == "__main__":
     summary = StrategyBacktester(logs_dir=Path("logs")).write()
     print(summary if not summary.empty else "No path_replay_backtest.csv found yet.")
+

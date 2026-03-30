@@ -36,7 +36,7 @@ class TargetBuilder:
         if df.empty:
             return df
 
-        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce", format="mixed")
         df = df.sort_values("timestamp").reset_index(drop=True)
 
         horizon_steps = max(1, horizon_minutes // 5)
@@ -55,3 +55,4 @@ class TargetBuilder:
         if not df.empty:
             df.to_csv(self.output_file, index=False)
         return df
+

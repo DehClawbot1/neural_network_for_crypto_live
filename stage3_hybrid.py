@@ -4,11 +4,14 @@ import pandas as pd
 class Stage3HybridScorer:
     """
     Hybrid scorer combining tabular outputs, temporal outputs, and execution/risk penalties.
+    Also provides a simple ensemble-agreement gate so tree-based and neural-style
+    probabilities can both be required before a higher-confidence trade is allowed.
     """
 
-    def __init__(self, transaction_cost=0.01, risk_penalty=0.5):
+    def __init__(self, transaction_cost=0.01, risk_penalty=0.5, agreement_threshold=0.65):
         self.transaction_cost = transaction_cost
         self.risk_penalty = risk_penalty
+        self.agreement_threshold = agreement_threshold
 
     def run(self, df: pd.DataFrame):
         if df is None or df.empty:
@@ -59,4 +62,27 @@ class Stage3HybridScorer:
         out["entry_ev"] = out["supervised_edge"] - self.transaction_cost - spread_penalty.astype(float)
         out["risk_adjusted_ev"] = out["entry_ev"] - out["p_loss"] * out["expected_loss"] * self.risk_penalty - time_penalty.astype(float) * 0.05 - crowding_penalty.astype(float) * 0.01
         out["hybrid_edge"] = out["risk_adjusted_ev"] * (1.0 + out["execution_quality_score"].clip(lower=0.0))
+
+        if "temporal_p_tp_before_sl" in out.columns:
+            out["rf_probability"] = out["p_tp_before_sl"].astype(float)
+            out["nn_probability"] = out["temporal_p_tp_before_sl"].astype(float)
+            out["ensemble_agreement"] = (
+                (out["rf_probability"] >= self.agreement_threshold)
+                & (out["nn_probability"] >= self.agreement_threshold)
+            ).astype(int)
+            out["ensemble_probability"] = (out["rf_probability"] + out["nn_probability"]) / 2.0
+            out["ensemble_live_candidate"] = (
+                (out["ensemble_agreement"] == 1)
+                & (out["ensemble_probability"] >= self.agreement_threshold)
+            ).astype(int)
+        else:
+            out["rf_probability"] = out["p_tp_before_sl"].astype(float)
+            out["nn_probability"] = out.get("temporal_p_tp_before_sl", 0.5)
+            if not isinstance(out["nn_probability"], pd.Series):
+                out["nn_probability"] = pd.Series([float(out["nn_probability"])] * len(out), index=out.index)
+            out["nn_probability"] = out["nn_probability"].astype(float)
+            out["ensemble_agreement"] = 0
+            out["ensemble_probability"] = out["rf_probability"]
+            out["ensemble_live_candidate"] = 0
         return out
+

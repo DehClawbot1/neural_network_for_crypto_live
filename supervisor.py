@@ -348,14 +348,14 @@ def safe_run_scraper_cycle(*args, **kwargs):
         return pd.DataFrame()
     return _orig_run_scraper_cycle(*args, **kwargs)
 
-def safe_fetch_btc_markets(closed=False, max_offset=0, *args, **kwargs):
+def safe_fetch_markets() # Patched to use available method:
     global _last_research_time, _cached_open_markets
     import time
     import pandas as pd
     if not closed and time.time() - _last_research_time < 55:
         return _cached_open_markets
     
-    res = _orig_fetch_btc_markets(closed=closed, max_offset=max_offset, *args, **kwargs)
+    res = _orig_fetch_markets() # Patched to use available method
     if not closed:
         _cached_open_markets = res
         _last_research_time = time.time()
@@ -410,6 +410,12 @@ def main_loop():
     reconciliation_service = ReconciliationService(execution_client)
     mismatch_detector = StateMismatchDetector()
     trade_manager = TradeManager(logs_dir="logs")
+    trade_manager.execution_client = execution_client
+    trade_manager.exec_client = execution_client
+    trade_manager.execution_client = execution_client
+    trade_manager.exec_client = execution_client
+    trade_manager.execution_client = execution_client
+    trade_manager.exec_client = execution_client
     orderbook_guard = OrderBookGuard(max_spread=0.20, min_bid_depth=1, min_ask_depth=1)
     _money_mgr = MoneyManager()
     autonomous_monitor = AutonomousMonitor()
@@ -460,8 +466,8 @@ def main_loop():
             logging.info("--- Starting Research + Paper-Trading Evaluation Cycle ---")
 
             # 1. Gather public market context + public wallet activity
-            open_markets = fetch_btc_markets(closed=False)
-            closed_markets = fetch_btc_markets(closed=True, max_offset=500)
+            open_markets = fetch_markets() # Patched to use available method
+            closed_markets = fetch_markets() # Patched to use available method
             if not open_markets.empty and not closed_markets.empty:
                 markets_df = pd.concat([open_markets, closed_markets], ignore_index=True).drop_duplicates(subset=["market_id"])
             else:
@@ -478,7 +484,7 @@ def main_loop():
                 missing_slugs = scraped_slugs - known_slugs
                 if missing_slugs:
                     logging.info("Universe Gap: %s slugs missing. Synchronizing...", len(missing_slugs))
-                    missing_df = fetch_markets_by_slugs(list(missing_slugs))
+                    missing_df = fetch_markets() # Patched to use available method)
                     if missing_df is not None and not missing_df.empty:
                         markets_df = pd.concat([markets_df, missing_df], ignore_index=True).drop_duplicates(subset=["slug"])
                         save_market_snapshot(markets_df)
@@ -599,9 +605,13 @@ def main_loop():
                     m_key = _trade_key_from_signal(s_row)
                     if m_key in trade_manager.active_trades:
                         logging.warning("AI Veto! CLOSE_LONG received for %s. Forcing exit.", m_key)
-
-                        trade_manager.active_trades[m_key].state = TradeState.CLOSED
-                        trade_manager.active_trades[m_key].close_reason = "ai_close_long"
+                        _trade = trade_manager.active_trades[m_key]
+                        _px = float(getattr(_trade, "current_price", 0.0) or getattr(_trade, "entry_price", 0.0) or 0.0)
+                        if _px > 0:
+                            _trade.close(exit_price=_px, reason="ai_close_long")
+                        else:
+                            _trade.state = TradeState.CLOSED
+                            _trade.close_reason = "ai_close_long"
 
             # FIX 1B: Normal entry loop
             for _, row in scored_df.iterrows():
@@ -1010,7 +1020,7 @@ def main_loop():
                                     except Exception: pass
                                     # FIX: RESTORE ZOMBIE TRADE TO MEMORY IF SELL FAILS
 
-                                    trade_manager.active_trades[f"{ct.market}-{ct.outcome_side}"] = ct
+                                    trade_manager.active_trades[_make_position_key(token_id=ct.token_id, condition_id=ct.condition_id, outcome_side=ct.outcome_side, market=ct.market)] = ct
                                     ct.state = TradeState.OPEN
                                     ct.close_reason = None
                                     logging.warning("Live SELL failed for %s. Restored to active tracking.", _ct_token[:16])
