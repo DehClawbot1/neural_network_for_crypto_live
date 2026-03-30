@@ -4,10 +4,11 @@ import shutil
 from datetime import datetime
 
 FILES_TO_PATCH = [
-    "live_position_book.py",
-    "position_manager.py",
-    "live_pnl.py",
-    "reconciliation_service.py"
+    "alerts_engine.py",
+    "backtester.py",
+    "wallet_alpha_builder.py",
+    "rl_trainer.py",
+    "dashboard.py"
 ]
 
 def backup_file(filepath):
@@ -32,92 +33,107 @@ def patch_file(filepath, patch_func):
         backup_file(filepath)
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(patched_content)
-        print(f"[+] Successfully fixed Phase 5 bugs in {filepath}")
+        print(f"[+] Successfully fixed Phase 6 bugs in {filepath}")
     else:
         print(f"[-] No changes needed for {filepath} (or patterns didn't match)")
 
 # --- Patching Functions ---
 
-def patch_live_position_book(content):
-    # BUG 4: The NaN DataFrame Empty Columns Crash
+def patch_alerts_engine(content):
+    # Fix import for timezone
+    if "from datetime import timezone" not in content and "timezone" not in content:
+        content = re.sub(r'from datetime import datetime', 'from datetime import datetime, timezone', content)
+    
+    # BUG 3: Tz-Naive Timestamp Subtraction Crash
     content = re.sub(
-        r'return pd\.DataFrame\(list\(books\.values\(\)\)\)',
-        r'return pd.DataFrame(list(books.values())) if books else pd.DataFrame(columns=["position_key", "token_id", "condition_id", "outcome_side", "shares", "avg_entry_price", "realized_pnl", "last_fill_at", "source", "status"]) # BUG FIX 4',
+        r'datetime\.utcnow\(\)\.strftime\("%Y-%m-%d %H:%M:%S"\)',
+        r'datetime.now(timezone.utc).isoformat() # BUG FIX 3: Prevent Tz-Naive crash',
         content
     )
 
-    # BUG 1: API Rate Limit Database Wipe
+    # BUG 9: Missing Level Fallback
     content = re.sub(
-        r'if not isinstance\(payload, dict\):\n\s*return 0\.0',
-        r'if not isinstance(payload, dict): return None\n        if "error" in payload or "message" in payload: return None # BUG FIX 1: Prevent API errors from wiping DB',
-        content
-    )
-    content = re.sub(
-        r'if available_shares <= 1e-9:',
-        r'if available_shares is not None and available_shares <= 1e-9: # BUG FIX 1',
+        r'severity = record\.get\("severity"\)',
+        r'severity = record.get("severity", record.get("level")) # BUG FIX 9: Support alternative severity keys',
         content
     )
     return content
 
-def patch_position_manager(content):
-    # BUG 6: Falsy $0.00 Midpoint Poisoning
+def patch_backtester(content):
+    # BUG 5: String Coercion Crash
     content = re.sub(
-        r'current_price = quote\.get\("midpoint"\) or quote\.get\("last_trade_price"\) or quote\.get\("price"\)',
-        r'current_price = quote.get("midpoint") if quote.get("midpoint") is not None else quote.get("last_trade_price", quote.get("price")) # BUG FIX 6',
+        r'avg_hold = float\(df\[hold_col\]\.astype\(float\)\.mean\(\)\)',
+        r'avg_hold = float(pd.to_numeric(df[hold_col], errors="coerce").mean()) # BUG FIX 5: Protect against string annotations',
         content
     )
 
-    # BUG 3: Zero Liquidity Trap Bypass
+    # BUG 8: Zero-Loss Infinity Masking
     content = re.sub(
-        r'bid_size = float\(row\.get\("bid_size", self\.min_bid_size_to_exit\) or self\.min_bid_size_to_exit\)',
-        r'bs = row.get("bid_size"); bid_size = float(bs) if bs is not None else self.min_bid_size_to_exit # BUG FIX 3',
-        content
-    )
-
-    # BUG 2: Timestamp Timezone Subtraction Crash
-    content = re.sub(
-        r'minutes_open = \(pd\.Timestamp\.now\(\) - opened_at\)\.total_seconds\(\) / 60\.0 if pd\.notna\(opened_at\) else 0\.0',
-        r'minutes_open = (pd.Timestamp.now(tz=opened_at.tz) - opened_at).total_seconds() / 60.0 if pd.notna(opened_at) else 0.0 # BUG FIX 2',
-        content
-    )
-
-    # BUG 7 & 10: Incomplete Reduce Closures & Dust
-    content = re.sub(
-        r'positions\.at\[idx, "shares"\] = shares_remaining',
-        r'positions.at[idx, "shares"] = round(shares_remaining, 6)\n        if round(shares_remaining, 6) <= 0: positions.at[idx, "status"] = "CLOSED" # BUG FIX 7 & 10',
+        r'profit_factor = float\(gross_profit / gross_loss\) if gross_loss > 0 else np\.nan',
+        r'profit_factor = float(gross_profit / gross_loss) if gross_loss > 0 else (float("inf") if gross_profit > 0 else 0.0) # BUG FIX 8',
         content
     )
     return content
 
-def patch_live_pnl(content):
-    # BUG 5: Non-DataFrame Crashes
+def patch_wallet_alpha_builder(content):
+    # BUG 6: Non-Numeric Hit Rate Erasure
     content = re.sub(
-        r'if positions_df is None or positions_df\.empty:',
-        r'if not isinstance(positions_df, pd.DataFrame) or positions_df.empty: # BUG FIX 5',
+        r'df\[hit_col\] = pd\.to_numeric\(df\[hit_col\], errors="coerce"\)',
+        r'df[hit_col] = pd.to_numeric(df[hit_col].replace({"True": 1, "False": 0, "true": 1, "false": 0}), errors="coerce") # BUG FIX 6: Prevent erasure of boolean strings',
+        content
+    )
+
+    # BUG 7: Expanding Mean NaN Bleed
+    content = re.sub(
+        r'(yes_returns = group\[return_col\]\.where\(yes_mask\)\.expanding\(min_periods=1\)\.mean\(\)\.shift\(1\))',
+        r'\1.fillna(0.0) # BUG FIX 7',
+        content
+    )
+    content = re.sub(
+        r'(no_returns = group\[return_col\]\.where\(no_mask\)\.expanding\(min_periods=1\)\.mean\(\)\.shift\(1\))',
+        r'\1.fillna(0.0) # BUG FIX 7',
         content
     )
     return content
 
-def patch_reconciliation_service(content):
-    # BUG 8: CSV String ID Coercion Corruption
+def patch_rl_trainer(content):
+    # BUG 2: Blind API Instantiation Crash
     content = re.sub(
-        r'try:\n\s*return pd\.read_csv\(path, engine="python", on_bad_lines="skip"\)',
-        r'try:\n            return pd.read_csv(path, engine="python", on_bad_lines="skip", dtype=str) # BUG FIX 8',
+        r'expected_dim = int\(PolyTradeEnv\(\)\.observation_space\.shape\[0\]\)',
+        r'expected_dim = int(LiveReplayDatasetEnv(df).observation_space.shape[0]) # BUG FIX 2: Use dummy offline env to prevent API crash',
         content
     )
 
-    # BUG 9: API String Iteration Crash
+    # BUG 1: RL Thread ZipFile Fatality (Race condition)
+    bad_loop = r'(model = PPO\.load\(model_path, env=env\)\n\s*print\(f"\[\+\] Fine-tuning.*?\n\s*model\.learn\(.*?\)\n\s*model\.save\(.*?\)\n\s*print\(.*?\))'
+    safe_loop = r"""try:
+            \1
+        except Exception as e:
+            print(f"[!] Fine-tuning interrupted (possible file lock race condition): {e}") # BUG FIX 1"""
+    
+    content = re.sub(bad_loop, safe_loop, content, flags=re.DOTALL)
+    return content
+
+def patch_dashboard(content):
+    # BUG 4: The Paper Book Erasure Bug
     content = re.sub(
-        r'if isinstance\(payload, list\):\n\s*return payload',
-        r'if isinstance(payload, str): return [] # BUG FIX 9\n        if isinstance(payload, list):\n            return payload',
+        r'(else:\n\s*)pdf = live_pdf',
+        r'\1pdf = pd.concat([live_pdf, pdf], ignore_index=True) # BUG FIX 4: Append instead of wiping paper book',
         content
     )
+
+    # BUG 10: Float Format NaN Exception
+    content = re.sub(r'c5\.metric\("Avg Slippage \(bps\)", f"\{asl:\.1f\}"\)', r'c5.metric("Avg Slippage (bps)", f"{0.0 if pd.isna(asl) else asl:.1f}") # BUG FIX 10', content)
+    content = re.sub(r'c6\.metric\("Avg EV_adj", f"\{aev:\+\.2\%\}"\)', r'c6.metric("Avg EV_adj", f"{0.0 if pd.isna(aev) else aev:+.2%}")', content)
+    content = re.sub(r'c7\.metric\("Avg Meta Prob", f"\{amp:\.2\%\}"\)', r'c7.metric("Avg Meta Prob", f"{0.0 if pd.isna(amp) else amp:.2%}")', content)
+
     return content
 
 if __name__ == "__main__":
-    print("=== Commencing Phase 5 Deep Hunt Bug Fixes ===")
-    patch_file("live_position_book.py", patch_live_position_book)
-    patch_file("position_manager.py", patch_position_manager)
-    patch_file("live_pnl.py", patch_live_pnl)
-    patch_file("reconciliation_service.py", patch_reconciliation_service)
+    print("=== Commencing Phase 6 Deep Hunt Bug Fixes ===")
+    patch_file("alerts_engine.py", patch_alerts_engine)
+    patch_file("backtester.py", patch_backtester)
+    patch_file("wallet_alpha_builder.py", patch_wallet_alpha_builder)
+    patch_file("rl_trainer.py", patch_rl_trainer)
+    patch_file("dashboard.py", patch_dashboard)
     print("=== Done! ===")

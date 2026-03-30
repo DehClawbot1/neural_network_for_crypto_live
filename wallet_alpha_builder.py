@@ -66,7 +66,7 @@ class WalletAlphaBuilder:
         df[return_col] = pd.to_numeric(df[return_col], errors="coerce")
         df["_return_positive"] = (df[return_col] > 0).astype(float)
         if hit_col and hit_col in df.columns:
-            df[hit_col] = pd.to_numeric(df[hit_col], errors="coerce")
+            df[hit_col] = pd.to_numeric(df[hit_col].replace({"True": 1, "False": 0, "true": 1, "false": 0}), errors="coerce") # BUG FIX 6: Prevent erasure of boolean strings
 
         parts = []
         for wallet, group in df.groupby(wallet_col):
@@ -101,8 +101,8 @@ class WalletAlphaBuilder:
                 yes_mask = group["outcome_side"].astype(str).str.upper() == "YES"
                 no_mask = group["outcome_side"].astype(str).str.upper() == "NO"
                 # For side-specific averages, use expanding mean (simpler, still fast)
-                yes_returns = group[return_col].where(yes_mask).expanding(min_periods=1).mean().shift(1)
-                no_returns = group[return_col].where(no_mask).expanding(min_periods=1).mean().shift(1)
+                yes_returns = group[return_col].where(yes_mask).expanding(min_periods=1).mean().shift(1).fillna(0.0) # BUG FIX 7
+                no_returns = group[return_col].where(no_mask).expanding(min_periods=1).mean().shift(1).fillna(0.0) # BUG FIX 7
                 wallet_rows["yes_side_avg_return"] = yes_returns.values
                 wallet_rows["no_side_avg_return"] = no_returns.values
             else:

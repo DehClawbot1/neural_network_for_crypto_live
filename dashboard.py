@@ -785,9 +785,9 @@ def render_shadow(shadow_df):
     c3.metric("DOA / Vetoed", len(doa))
     c4.metric("TP Rate", fmt_pct(tp))
     c5, c6, c7 = st.columns(3)
-    c5.metric("Avg Slippage (bps)", f"{asl:.1f}")
-    c6.metric("Avg EV_adj", f"{aev:+.2%}")
-    c7.metric("Avg Meta Prob", f"{amp:.2%}")
+    c5.metric("Avg Slippage (bps)", f"{0.0 if pd.isna(asl) else asl:.1f}") # BUG FIX 10
+    c6.metric("Avg EV_adj", f"{0.0 if pd.isna(aev) else aev:+.2%}")
+    c7.metric("Avg Meta Prob", f"{0.0 if pd.isna(amp) else amp:.2%}")
     if "outcome" in shadow_df.columns:
         oc = shadow_df["outcome"].value_counts().reset_index()
         oc.columns = ["Outcome", "Count"]
@@ -909,7 +909,7 @@ def main():
                             merged[col] = merged[col].where(merged[col].notna(), merged[csv_col])
                     pdf = normalize_dataframe_columns(merged)
                 else:
-                    pdf = live_pdf
+                    pdf = pd.concat([live_pdf, pdf], ignore_index=True) # BUG FIX 4: Append instead of wiping paper book
     cdf = load("closed")
     sup = load("supervised_eval")
     tsd = load("time_split")

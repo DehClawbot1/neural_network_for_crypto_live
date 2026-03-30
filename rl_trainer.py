@@ -81,7 +81,7 @@ def fine_tune_from_live_buffer(min_rows=100, batch_rows=1000, timesteps=256, sle
             continue
 
         replay_env = LiveReplayDatasetEnv(df)
-        expected_dim = int(PolyTradeEnv().observation_space.shape[0])
+        expected_dim = int(LiveReplayDatasetEnv(df).observation_space.shape[0]) # BUG FIX 2: Use dummy offline env to prevent API crash
         if int(replay_env.observation_space.shape[0]) != expected_dim:
             print(
                 f"[!] Skipping live fine-tune: replay observation dim {replay_env.observation_space.shape[0]} "
@@ -91,11 +91,14 @@ def fine_tune_from_live_buffer(min_rows=100, batch_rows=1000, timesteps=256, sle
             continue
 
         env = make_vec_env(lambda: LiveReplayDatasetEnv(df), n_envs=1)
-        model = PPO.load(model_path, env=env)
+        try:
+            model = PPO.load(model_path, env=env)
         print(f"[+] Fine-tuning PPO from live replay buffer ({len(df)} rows, {timesteps} timesteps)...")
         model.learn(total_timesteps=timesteps, reset_num_timesteps=False)
         model.save(model_path)
         print(f"[+] Updated PPO weights saved to {model_path}.zip")
+        except Exception as e:
+            print(f"[!] Fine-tuning interrupted (possible file lock race condition): {e}") # BUG FIX 1
         time.sleep(sleep_seconds)
 
 

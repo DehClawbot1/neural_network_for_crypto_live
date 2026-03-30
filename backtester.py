@@ -39,7 +39,7 @@ class StrategyBacktester:
         losses = (pnl <= 0).sum()
         gross_profit = pnl[pnl > 0].sum()
         gross_loss = abs(pnl[pnl < 0].sum())
-        profit_factor = float(gross_profit / gross_loss) if gross_loss > 0 else np.nan
+        profit_factor = float(gross_profit / gross_loss) if gross_loss > 0 else (float("inf") if gross_profit > 0 else 0.0) # BUG FIX 8
         sharpe_like = float(pnl.mean() / pnl.std()) if pnl.std() > 0 else 0.0
         cumulative = pnl.cumsum()
         running_max = cumulative.cummax()
@@ -47,7 +47,7 @@ class StrategyBacktester:
         max_drawdown = float(drawdown.min()) if len(drawdown) else 0.0
 
         hold_col = "holding_minutes" if "holding_minutes" in df.columns else "holding_rows" if "holding_rows" in df.columns else "holding_time" if "holding_time" in df.columns else None
-        avg_hold = float(df[hold_col].astype(float).mean()) if hold_col else np.nan
+        avg_hold = float(pd.to_numeric(df[hold_col], errors="coerce").mean()) # BUG FIX 5: Protect against string annotations if hold_col else np.nan
 
         summary = pd.DataFrame(
             [

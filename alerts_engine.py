@@ -1,7 +1,7 @@
 import logging
 import uuid
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 from incident_manager import IncidentManager
@@ -24,7 +24,7 @@ class AlertsEngine:
 
     def _normalize_alert(self, record: dict):
         alert_type = str(record.get("alert_type", "UNKNOWN"))
-        severity = record.get("severity")
+        severity = record.get("severity", record.get("level")) # BUG FIX 9: Support alternative severity keys
         if severity is None:
             if alert_type == "PROBABILITY_MOVE":
                 severity = "warning"
@@ -42,7 +42,7 @@ class AlertsEngine:
                 message = alert_type
         normalized = {
             "alert_id": record.get("alert_id", str(uuid.uuid4())),
-            "timestamp": record.get("timestamp", datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")),
+            "timestamp": record.get("timestamp", datetime.now(timezone.utc).isoformat() # BUG FIX 3: Prevent Tz-Naive crash),
             "alert_type": alert_type,
             "severity": severity,
             "status": record.get("status", "open"),
