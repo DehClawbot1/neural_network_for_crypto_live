@@ -773,7 +773,7 @@ def main_loop():
                         fill_payload = fill_result.get("response") or {}
                         actual_fill_price = float(fill_payload.get("price", fill_price) or fill_price)
                         sz = fill_payload.get("size", _order_shares)
-                                        actual_fill_size = float(sz) if (sz is not None and str(sz).strip() and float(sz) > 0) else _order_shares # BUG 8 FIX
+                        actual_fill_size = float(sz) if (sz is not None and str(sz).strip() and float(sz) > 0) else _order_shares # BUG 8 FIX
                         
                         log_live_fill_event(signal_row, actual_fill_price, size_usdc, action_type="LIVE_TRADE")
                         # Register trade AFTER confirmed fill (not before)
