@@ -503,6 +503,7 @@ def main_loop():
             # 3. Build features, run supervised inference, and score paper-trading opportunities
             if signals_df is not None and not signals_df.empty: signals_df = signals_df.loc[:, ~signals_df.columns.duplicated()]
             features_df = feature_builder.build_features(signals_df, markets_df)
+            if features_df is not None: features_df = features_df.loc[:, ~features_df.columns.duplicated()].copy()
             if features_df is not None and not features_df.empty: features_df = features_df.loc[:, ~features_df.columns.duplicated()]
             log_raw_candidates(features_df)
             inferred_df = model_inference.run(features_df)
@@ -519,6 +520,7 @@ def main_loop():
             log_raw_candidates(inferred_df)
             if inferred_df is not None and not inferred_df.empty: inferred_df = inferred_df.loc[:, ~inferred_df.columns.duplicated()]
             scored_df = signal_engine.score_features(inferred_df)
+            if scored_df is not None: scored_df = scored_df.loc[:, ~scored_df.columns.duplicated()].copy()
             if scored_df is not None and not scored_df.empty: scored_df = scored_df.loc[:, ~scored_df.columns.duplicated()]
 
             if shadow_purgatory is not None and not scored_df.empty:
@@ -1048,6 +1050,7 @@ def main_loop():
 
             # 5. Phase 2 analytics outputs
             trades_df = safe_read_csv(EXECUTION_FILE)
+            if scored_df is not None: scored_df = scored_df.loc[:, ~scored_df.columns.duplicated()].copy()
             trader_signals_df = scored_df.rename(columns={"trader_wallet": "wallet_copied", "market_title": "market"})
             trader_analytics.write(trader_signals_df, trades_df)
             backtester.write(trader_signals_df)
