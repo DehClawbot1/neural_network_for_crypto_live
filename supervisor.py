@@ -472,6 +472,7 @@ def main_loop():
             else:
                 markets_df = open_markets if not open_markets.empty else closed_markets
             autonomous_monitor.write_heartbeat("market_monitor", status="ok", message="markets_fetched", extra={"rows": len(markets_df) if markets_df is not None else 0})
+            if markets_df is not None and not markets_df.empty: markets_df = markets_df.loc[:, ~markets_df.columns.duplicated()]
             save_market_snapshot(markets_df)
             signals_df = run_scraper_cycle()
             autonomous_monitor.write_heartbeat("signal_engine", status="ok", message="signals_scraped", extra={"rows": len(signals_df) if signals_df is not None else 0})
@@ -486,7 +487,8 @@ def main_loop():
                     missing_df = fetch_btc_markets(closed=False)
                     if missing_df is not None and not missing_df.empty:
                         markets_df = pd.concat([markets_df, missing_df], ignore_index=True).drop_duplicates(subset=["slug"])
-                        save_market_snapshot(markets_df)
+                        if markets_df is not None and not markets_df.empty: markets_df = markets_df.loc[:, ~markets_df.columns.duplicated()]
+            save_market_snapshot(markets_df)
 
             if signals_df.empty:
                 logging.info("No actionable signals found. Checking active positions...")
@@ -499,7 +501,9 @@ def main_loop():
             previous_markets_df = markets_df.copy()
 
             # 3. Build features, run supervised inference, and score paper-trading opportunities
+            if signals_df is not None and not signals_df.empty: signals_df = signals_df.loc[:, ~signals_df.columns.duplicated()]
             features_df = feature_builder.build_features(signals_df, markets_df)
+            if features_df is not None and not features_df.empty: features_df = features_df.loc[:, ~features_df.columns.duplicated()]
             log_raw_candidates(features_df)
             inferred_df = model_inference.run(features_df)
             inferred_df = stage1_inference.run(inferred_df)
@@ -513,7 +517,9 @@ def main_loop():
             if "hybrid_edge" in inferred_df.columns:
                 inferred_df["edge_score"] = inferred_df["hybrid_edge"]
             log_raw_candidates(inferred_df)
+            if inferred_df is not None and not inferred_df.empty: inferred_df = inferred_df.loc[:, ~inferred_df.columns.duplicated()]
             scored_df = signal_engine.score_features(inferred_df)
+            if scored_df is not None and not scored_df.empty: scored_df = scored_df.loc[:, ~scored_df.columns.duplicated()]
 
             if shadow_purgatory is not None and not scored_df.empty:
                 merge_keys = [c for c in ["token_id", "timestamp", "trader_wallet", "market_slug", "market_title"] if c in scored_df.columns and c in inferred_df.columns]

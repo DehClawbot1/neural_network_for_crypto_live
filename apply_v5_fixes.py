@@ -1,43 +1,41 @@
 import os
-import glob
-import shutil
 
-def emergency_fixes():
-    # 1. Fix pnl_engine.py double return
-    if os.path.exists("pnl_engine.py"):
-        with open("pnl_engine.py", "r", encoding="utf-8", errors="ignore") as f:
-            c = f.read()
-        c = c.replace("return int((return float(", "return int((float(")
-        with open("pnl_engine.py", "w", encoding="utf-8") as f:
-            f.write(c)
-        print("[+] Fixed pnl_engine.py syntax")
+def fix_duplicate_columns():
+    file_path = "supervisor.py"
+    if not os.path.exists(file_path):
+        print(f"[-] {file_path} not found.")
+        return
+    
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        content = f.read()
 
-    # 2. Fix alerts_engine.py commented bracket
-    if os.path.exists("alerts_engine.py"):
-        with open("alerts_engine.py", "r", encoding="utf-8", errors="ignore") as f:
-            c = f.read()
-        c = c.replace("isoformat() # BUG FIX 3: Prevent Tz-Naive crash", "isoformat()")
-        with open("alerts_engine.py", "w", encoding="utf-8") as f:
-            f.write(c)
-        print("[+] Fixed alerts_engine.py syntax")
+    # Fix 1: Protect signals_df and features_df
+    target1 = "features_df = feature_builder.build_features(signals_df, markets_df)"
+    replacement1 = """if signals_df is not None and not signals_df.empty: signals_df = signals_df.loc[:, ~signals_df.columns.duplicated()]
+            features_df = feature_builder.build_features(signals_df, markets_df)
+            if features_df is not None and not features_df.empty: features_df = features_df.loc[:, ~features_df.columns.duplicated()]"""
+    if "signals_df.loc[:, ~signals_df.columns.duplicated()]" not in content:
+        content = content.replace(target1, replacement1)
 
-    # 3. Restore and cleanly patch rl_trainer.py
-    baks = sorted(glob.glob("rl_trainer.py.*.bak"))
-    if baks:
-        shutil.copy(baks[-1], "rl_trainer.py")
-        with open("rl_trainer.py", "r", encoding="utf-8", errors="ignore") as f:
-            c = f.read()
-        
-        # Apply the fix safely without messing up indentation
-        c = c.replace(
-            "expected_dim = int(PolyTradeEnv().observation_space.shape[0])",
-            "expected_dim = int(LiveReplayDatasetEnv(df).observation_space.shape[0])"
-        )
-        with open("rl_trainer.py", "w", encoding="utf-8") as f:
-            f.write(c)
-        print("[+] Restored and safely patched rl_trainer.py")
-    else:
-        print("[-] Could not find rl_trainer.py backup to restore.")
+    # Fix 2: Protect inferred_df and scored_df before processing
+    target2 = "scored_df = signal_engine.score_features(inferred_df)"
+    replacement2 = """if inferred_df is not None and not inferred_df.empty: inferred_df = inferred_df.loc[:, ~inferred_df.columns.duplicated()]
+            scored_df = signal_engine.score_features(inferred_df)
+            if scored_df is not None and not scored_df.empty: scored_df = scored_df.loc[:, ~scored_df.columns.duplicated()]"""
+    if "inferred_df.loc[:, ~inferred_df.columns.duplicated()]" not in content:
+        content = content.replace(target2, replacement2)
+
+    # Fix 3: Protect markets_df before merging
+    target3 = "save_market_snapshot(markets_df)"
+    replacement3 = """if markets_df is not None and not markets_df.empty: markets_df = markets_df.loc[:, ~markets_df.columns.duplicated()]
+            save_market_snapshot(markets_df)"""
+    if "markets_df.loc[:, ~markets_df.columns.duplicated()]" not in content:
+        content = content.replace(target3, replacement3)
+
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    print("[+] Successfully patched supervisor.py to prevent duplicate column crashes!")
 
 if __name__ == "__main__":
-    emergency_fixes()
+    fix_duplicate_columns()
