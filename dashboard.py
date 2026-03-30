@@ -1,748 +1,997 @@
+"""
+Neural Network for Crypto — Dashboard v2 (FIXED)
+Full-featured trading terminal with all original panels preserved.
+
+FIXES APPLIED:
+  1. Conditional load_dotenv() — respects _INTERACTIVE_MODE from start.py
+  2. Cached ExecutionClient — no longer re-created on every Streamlit rerun
+  3. Live sidebar uses shared auth utility
+  4. Auto-refresh missing-package warning
+  5. Graceful handling of empty DataFrames throughout
+  6. Schema normalization applied consistently
+"""
+
 import os
 from pathlib import Path
+import sqlite3
 from datetime import datetime
 
 import pandas as pd
+import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
-BASE_DIR = Path(__file__).resolve().parent
-LOGS_DIR = BASE_DIR / "logs"
-SIGNALS_FILE = LOGS_DIR / "signals.csv"
-EXECUTION_FILE = LOGS_DIR / "execution_log.csv"
-LEGACY_SUMMARY_FILE = LOGS_DIR / "execution_log.csv"
-EPISODE_LOG_FILE = LOGS_DIR / "episode_log.csv"
-MARKETS_FILE = LOGS_DIR / "markets.csv"
-WHALES_FILE = LOGS_DIR / "whales.csv"
-ALERTS_FILE = LOGS_DIR / "alerts.csv"
-MODEL_STATUS_FILE = LOGS_DIR / "model_status.csv"
-WEIGHTS_FILE = BASE_DIR / "weights" / "ppo_polytrader.zip"
-TRADER_ANALYTICS_FILE = LOGS_DIR / "trader_analytics.csv"
-BACKTEST_FILE = LOGS_DIR / "backtest_summary.csv"
-DATASET_FILE = LOGS_DIR / "historical_dataset.csv"
-POSITIONS_FILE = LOGS_DIR / "positions.csv"
-CLOSED_POSITIONS_FILE = LOGS_DIR / "closed_positions.csv"
-MARKET_DISTRIBUTION_FILE = LOGS_DIR / "market_distribution.csv"
-SUPERVISED_EVAL_FILE = LOGS_DIR / "supervised_eval.csv"
-TIME_SPLIT_EVAL_FILE = LOGS_DIR / "time_split_eval.csv"
-PATH_REPLAY_FILE = LOGS_DIR / "path_replay_backtest.csv"
-BACKTEST_BY_WALLET_FILE = LOGS_DIR / "backtest_by_wallet.csv"
-MODEL_REGISTRY_FILE = BASE_DIR / "weights" / "model_registry.csv"
+# ── FIX 1: Use conditional dotenv loading ──
+from dashboard_auth import (
+    safe_load_dotenv,
+    get_trading_mode,
+    is_live_mode,
+    is_interactive_mode,
+    get_execution_client_cached,
+    get_wallet_address,
+    get_balance_info,
+)
 
-st.set_page_config(page_title="Neural Network for Crypto", page_icon="📈", layout="wide")
+safe_load_dotenv()
+
+try:
+    from streamlit_autorefresh import st_autorefresh
+except Exception:
+    st_autorefresh = None
+
+from schema import normalize_dataframe_columns
+from log_loader import load_execution_history as shared_load_execution_history
+
+BASE = Path(__file__).resolve().parent
+LOGS = BASE / "logs"
+WEIGHTS = BASE / "weights"
+
+FILES = {
+    "signals": LOGS / "signals.csv",
+    "execution": LOGS / "execution_log.csv",
+    "legacy_execution": LOGS / "daily_summary.txt",
+    "episode_log": LOGS / "episode_log.csv",
+    "markets": LOGS / "markets.csv",
+    "whales": LOGS / "whales.csv",
+    "alerts": LOGS / "alerts.csv",
+    "positions": LOGS / "positions.csv",
+    "closed": LOGS / "closed_positions.csv",
+    "model_status": LOGS / "model_status.csv",
+    "health": LOGS / "system_health.csv",
+    "heartbeats": LOGS / "service_heartbeats.csv",
+    "supervised_eval": LOGS / "supervised_eval.csv",
+    "time_split": LOGS / "time_split_eval.csv",
+    "replay": LOGS / "path_replay_backtest.csv",
+    "wallet_backtest": LOGS / "backtest_by_wallet.csv",
+    "registry": WEIGHTS / "model_registry.csv",
+    "shadow": LOGS / "shadow_results.csv",
+    "distribution": LOGS / "market_distribution.csv",
+}
+
+st.set_page_config(page_title="NNC Trading Terminal", page_icon="N", layout="wide", initial_sidebar_state="expanded")
 
 
-def load_csv(path):
-    path = Path(path)
-    if not path.exists():
+def inject_theme():
+    st.markdown("""<style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;500;600;700;800&display=swap');
+    :root{--bg-card:#111113;--border:rgba(255,255,255,0.06);--border-active:rgba(255,255,255,0.12);--text-primary:#fafafa;--text-secondary:#a1a1aa;--text-muted:#52525b;--green:#22c55e;--green-bg:rgba(34,197,94,0.08);--red:#ef4444;--red-bg:rgba(239,68,68,0.08);--amber:#f59e0b;--amber-bg:rgba(245,158,11,0.08);--blue:#3b82f6;--blue-bg:rgba(59,130,246,0.08);--cyan:#06b6d4;}
+    .main .block-container{padding-top:1.5rem;max-width:1440px;}
+    html,body,[class*="st-"]{font-family:'Outfit',sans-serif!important;}
+    .terminal-header{display:flex;justify-content:space-between;align-items:center;padding:0.8rem 0;margin-bottom:1.2rem;border-bottom:1px solid var(--border);}
+    .terminal-title{font-size:1.4rem;font-weight:800;letter-spacing:-0.03em;color:var(--text-primary);}
+    .terminal-title span{color:var(--cyan);}
+    .terminal-status{display:flex;align-items:center;gap:8px;font-size:0.82rem;color:var(--text-secondary);font-family:'JetBrains Mono',monospace;}
+    .pulse{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 8px rgba(34,197,94,0.6);animation:pg 2s ease-in-out infinite;}
+    @keyframes pg{0%,100%{opacity:1;}50%{opacity:0.4;}}
+    .metric-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:1.2rem;}
+    .m-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px 16px;transition:border-color 0.2s;}
+    .m-card:hover{border-color:var(--border-active);}
+    .m-label{font-size:0.7rem;font-weight:500;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px;}
+    .m-value{font-size:1.3rem;font-weight:700;font-family:'JetBrains Mono',monospace;letter-spacing:-0.02em;}
+    .m-sub{font-size:0.73rem;color:var(--text-muted);margin-top:2px;font-family:'JetBrains Mono',monospace;}
+    .clr-green{color:var(--green);}.clr-red{color:var(--red);}.clr-amber{color:var(--amber);}.clr-blue{color:var(--blue);}.clr-cyan{color:var(--cyan);}.clr-default{color:var(--text-primary);}
+    .sig-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px;margin-bottom:1rem;}
+    .sig-card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:16px 18px;transition:all 0.2s;}
+    .sig-card:hover{border-color:var(--border-active);transform:translateY(-1px);}
+    .sig-market{font-size:0.95rem;font-weight:600;color:var(--text-primary);margin-bottom:8px;line-height:1.3;}
+    .sig-badges{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;}
+    .badge{display:inline-block;padding:3px 10px;border-radius:100px;font-size:0.7rem;font-weight:600;letter-spacing:0.03em;}
+    .badge-top{background:var(--blue-bg);color:var(--blue);border:1px solid rgba(59,130,246,0.15);}
+    .badge-strong{background:var(--green-bg);color:var(--green);border:1px solid rgba(34,197,94,0.20);}
+    .badge-watch{background:var(--amber-bg);color:var(--amber);border:1px solid rgba(245,158,11,0.15);}
+    .badge-ignore{background:rgba(82,82,91,0.15);color:var(--text-muted);border:1px solid rgba(82,82,91,0.2);}
+    .sig-row{display:flex;justify-content:space-between;font-size:0.8rem;color:var(--text-secondary);padding:3px 0;font-family:'JetBrains Mono',monospace;}
+    .sig-row span:first-child{color:var(--text-muted);}
+    .conf-track{width:100%;height:4px;background:rgba(255,255,255,0.06);border-radius:100px;margin:10px 0 4px;overflow:hidden;}
+    .conf-fill{height:100%;border-radius:100px;background:linear-gradient(90deg,var(--cyan),var(--green));transition:width 0.4s ease;}
+    .health-grid{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:1rem;}
+    .health-pill{display:flex;align-items:center;gap:6px;background:var(--bg-card);border:1px solid var(--border);border-radius:100px;padding:6px 14px;font-size:0.78rem;color:var(--text-secondary);}
+    .dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;}
+    .dot-ok{background:var(--green);box-shadow:0 0 6px rgba(34,197,94,0.5);}.dot-warn{background:var(--amber);}.dot-err{background:var(--red);}.dot-off{background:var(--text-muted);}
+    .sec-title{font-size:0.85rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-muted);margin:1.4rem 0 0.7rem;padding-bottom:0.5rem;border-bottom:1px solid var(--border);}
+    .reason-box{margin-top:0.5rem;color:#94a3b8;font-size:0.82rem;padding:8px 10px;border-radius:10px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.04);}
+    .action-group-title{font-size:0.9rem;font-weight:700;margin:1rem 0 0.4rem;color:var(--text-primary);}
+    .stTabs [data-baseweb="tab-list"]{gap:0;border-bottom:1px solid var(--border);}
+    .stTabs [data-baseweb="tab"]{font-family:'Outfit',sans-serif;font-weight:600;font-size:0.85rem;padding:10px 20px;}
+    .stDataFrame{border-radius:10px;overflow:hidden;}
+    </style>""", unsafe_allow_html=True)
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False, ttl=30)
+def load(key):
+    path = FILES.get(key)
+    if path is None or not path.exists():
         return pd.DataFrame()
     try:
-        return pd.read_csv(path, engine="python", on_bad_lines="skip")
+        return normalize_dataframe_columns(pd.read_csv(str(path), engine="python", on_bad_lines="skip"))
     except Exception:
         return pd.DataFrame()
 
 
-def load_execution_history():
-    current_df = load_csv(EXECUTION_FILE)
-    legacy_df = load_csv(LOGS_DIR / "daily_summary.txt")
-    if current_df.empty and legacy_df.empty:
+def load_trades():
+    try:
+        return normalize_dataframe_columns(shared_load_execution_history(str(LOGS)))
+    except Exception:
         return pd.DataFrame()
-    if current_df.empty:
-        return legacy_df
-    if legacy_df.empty:
-        return current_df
-
-    combined = pd.concat([legacy_df, current_df], ignore_index=True, sort=False)
-    dedupe_cols = [c for c in ["timestamp", "market", "wallet_copied", "fill_price", "size_usdc", "action_type"] if c in combined.columns]
-    if dedupe_cols:
-        combined = combined.drop_duplicates(subset=dedupe_cols, keep="last")
-    return combined
 
 
-def inject_styles():
-    st.markdown(
-        """
-        <style>
-            .main { background-color: #0e1117; }
-            .hero-box {
-                padding: 1.2rem 1.4rem;
-                border-radius: 18px;
-                background: linear-gradient(135deg, #121826 0%, #0f172a 100%);
-                border: 1px solid rgba(255,255,255,0.08);
-                margin-bottom: 1rem;
-            }
-            .market-card {
-                background: linear-gradient(180deg, #121826 0%, #111827 100%);
-                border: 1px solid rgba(255,255,255,0.08);
-                border-radius: 20px;
-                padding: 1rem;
-                margin-bottom: 1rem;
-                box-shadow: 0 8px 20px rgba(0,0,0,0.18);
-            }
-            .market-title {
-                font-size: 1.05rem;
-                font-weight: 700;
-                color: #f8fafc;
-                margin-bottom: 0.65rem;
-                line-height: 1.35;
-            }
-            .signal-badge {
-                display: inline-block;
-                padding: 0.35rem 0.65rem;
-                border-radius: 999px;
-                font-size: 0.78rem;
-                font-weight: 700;
-                margin-right: 0.35rem;
-                margin-bottom: 0.45rem;
-            }
-            .badge-watch { background: rgba(245, 158, 11, 0.16); color: #fbbf24; }
-            .badge-strong { background: rgba(16, 185, 129, 0.16); color: #34d399; }
-            .badge-top { background: rgba(59, 130, 246, 0.16); color: #60a5fa; }
-            .badge-ignore { background: rgba(148, 163, 184, 0.16); color: #cbd5e1; }
-            .meta-line {
-                color: #cbd5e1;
-                font-size: 0.92rem;
-                margin-bottom: 0.3rem;
-            }
-            .reason-box {
-                margin-top: 0.7rem;
-                color: #94a3b8;
-                font-size: 0.88rem;
-                padding: 0.7rem 0.8rem;
-                border-radius: 14px;
-                background: rgba(255,255,255,0.03);
-                border: 1px solid rgba(255,255,255,0.05);
-            }
-            .section-title {
-                font-size: 1.1rem;
-                font-weight: 700;
-                margin-top: 0.5rem;
-                margin-bottom: 0.9rem;
-                color: #f8fafc;
-            }
-            .overview-card {
-                background: linear-gradient(180deg, #121826 0%, #111827 100%);
-                border: 1px solid rgba(255,255,255,0.08);
-                border-radius: 18px;
-                padding: 0.9rem 1rem;
-                margin-bottom: 1rem;
-            }
-            .live-dot {
-                display:inline-block;
-                width:10px;
-                height:10px;
-                background:#22c55e;
-                border-radius:50%;
-                margin-right:8px;
-                box-shadow:0 0 10px rgba(34,197,94,0.8);
-            }
-            .confidence-bar-wrap {
-                width:100%;
-                height:10px;
-                background:rgba(255,255,255,0.08);
-                border-radius:999px;
-                overflow:hidden;
-                margin-top:0.45rem;
-                margin-bottom:0.2rem;
-            }
-            .confidence-bar-fill {
-                height:100%;
-                border-radius:999px;
-                background:linear-gradient(90deg, #3b82f6 0%, #10b981 100%);
-            }
-            .small-muted {
-                color:#94a3b8;
-                font-size:0.85rem;
-            }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+@st.cache_data(show_spinner=False, ttl=15)
+def load_live_positions_from_db():
+    db_path = LOGS / "trading.db"
+    if not db_path.exists():
+        return pd.DataFrame()
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            df = pd.read_sql_query(
+                """
+                SELECT
+                    position_key AS position_id,
+                    token_id,
+                    condition_id,
+                    outcome_side,
+                    shares,
+                    avg_entry_price AS entry_price,
+                    avg_entry_price,
+                    realized_pnl,
+                    last_fill_at AS opened_at,
+                    status
+                FROM live_positions
+                WHERE status = 'OPEN' AND shares > 0
+                ORDER BY COALESCE(last_fill_at, '') DESC
+                """,
+                conn,
+            )
+        return normalize_dataframe_columns(df)
+    except Exception:
+        return pd.DataFrame()
 
 
-def render_header():
-    st.markdown(
-        f"""
-        <div class="hero-box">
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
-                <div>
-                    <h1 style="margin-bottom:0.35rem;">📈 Neural Network for Crypto</h1>
-                    <div style="color:#94a3b8; font-size:1rem;">
-                        Real-time public-data market tracker + whale tracker + paper-trading dashboard
-                    </div>
-                </div>
-                <div class="overview-card" style="min-width:240px; margin-bottom:0;">
-                    <div><span class="live-dot"></span><strong>Live</strong></div>
-                    <div class="small-muted">Last refresh: {datetime.now().strftime('%H:%M:%S')}</div>
-                </div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.info(
-        "This interface shows ranked paper-trading opportunities, public market tracking, whale activity, and alerts only. "
-        "It does not place real bets or connect to a live account."
-    )
+def latest_ts(df, cols=None):
+    if df is None or df.empty:
+        return None
+    for c in (cols or ["timestamp", "updated_at", "created_at", "closed_at", "opened_at"]):
+        if c in df.columns:
+            ts = pd.to_datetime(df[c], errors="coerce", utc=True).dropna()
+            if not ts.empty:
+                return ts.max()
+    return None
 
 
-def render_overview(signals_df, trades_df, markets_df, alerts_df):
-    st.markdown('<div class="section-title">Overview</div>', unsafe_allow_html=True)
-    c1, c2, c3, c4 = st.columns(4)
-
-    top_conf = "-"
-    if not signals_df.empty and "confidence" in signals_df.columns:
-        try:
-            top_conf = f"{float(signals_df['confidence'].max()):.2f}"
-        except Exception:
-            top_conf = "-"
-
-    tracked_market_count = len(markets_df)
-    if not markets_df.empty and "market_id" in markets_df.columns:
-        tracked_market_count = markets_df["market_id"].nunique()
-
-    with c1:
-        st.markdown('<div class="overview-card">', unsafe_allow_html=True)
-        st.metric("Ranked Signals", len(signals_df))
-        st.markdown('</div>', unsafe_allow_html=True)
-    with c2:
-        st.markdown('<div class="overview-card">', unsafe_allow_html=True)
-        st.metric("Paper Trades", len(trades_df))
-        st.markdown('</div>', unsafe_allow_html=True)
-    with c3:
-        st.markdown('<div class="overview-card">', unsafe_allow_html=True)
-        st.metric("Tracked BTC Markets", tracked_market_count)
-        st.markdown('</div>', unsafe_allow_html=True)
-    with c4:
-        st.markdown('<div class="overview-card">', unsafe_allow_html=True)
-        st.metric("Recent Alerts", len(alerts_df))
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    st.caption(f"Highest confidence: {top_conf} | Last refresh: {datetime.now().strftime('%H:%M:%S')}")
+def age_seconds(df, cols=None):
+    ts = latest_ts(df, cols)
+    return max(0, int((pd.Timestamp.utcnow() - ts).total_seconds())) if ts else None
 
 
-def badge_class(label: str) -> str:
-    label = str(label).upper()
-    if "HIGHEST" in label:
+def fmt_age(s):
+    if s is None:
+        return "unknown"
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    return f"{s // 3600}h"
+
+
+def fmt_pct(v):
+    try:
+        if pd.isna(v):
+            return "N/A"
+        return f"{float(v) * 100:.1f}%"
+    except Exception:
+        return "N/A"
+
+
+def fmt_num(v, d=4):
+    try:
+        if pd.isna(v):
+            return "N/A"
+        return f"{float(v):.{d}f}"
+    except Exception:
+        return "N/A"
+
+
+def fmt_money(v):
+    try:
+        if pd.isna(v):
+            return "N/A"
+        val = float(v)
+        sign = "+" if val > 0 else ""
+        return f"{sign}${val:,.2f}"
+    except Exception:
+        return "N/A"
+
+
+def optional_number(v, d=3):
+    try:
+        if v is None or pd.isna(v):
+            return "N/A"
+        return round(float(v), d)
+    except Exception:
+        return "N/A"
+
+
+def pnl_color(v):
+    try:
+        val = float(v)
+        if val > 0:
+            return "clr-green"
+        if val < 0:
+            return "clr-red"
+    except Exception:
+        pass
+    return "clr-default"
+
+
+def badge_cls(l):
+    l = str(l).upper()
+    if "HIGHEST" in l:
         return "badge-top"
-    if "STRONG" in label:
+    if "STRONG" in l:
         return "badge-strong"
-    if "WATCH" in label:
+    if "WATCH" in l:
         return "badge-watch"
     return "badge-ignore"
 
 
-def render_factor_matrix(signals_df):
-    st.markdown('<div class="section-title">Confidence Matrix</div>', unsafe_allow_html=True)
-    if signals_df.empty:
-        st.info("No ranked signals available yet.")
-        return
-
-    top_row = signals_df.sort_values(by="confidence", ascending=False).iloc[0].to_dict() if "confidence" in signals_df.columns else signals_df.iloc[0].to_dict()
-    factor_df = pd.DataFrame(
-        [
-            {"factor": "Whale Pressure", "score": float(top_row.get("whale_pressure", 0.0))},
-            {"factor": "Market Structure", "score": float(top_row.get("market_structure_score", 0.0))},
-            {"factor": "Volatility Risk", "score": float(top_row.get("volatility_risk", 0.0))},
-            {"factor": "Time Decay", "score": float(top_row.get("time_decay_score", 0.0))},
-            {"factor": "Liquidity", "score": float(top_row.get("liquidity_score", 0.0))},
-            {"factor": "Volume", "score": float(top_row.get("volume_score", 0.0))},
-        ]
-    )
-    st.caption(f"Top signal: {top_row.get('market', top_row.get('market_title', 'Unknown Market'))}")
-    fig = px.bar(factor_df, x="score", y="factor", orientation="h", title="Top Signal Factor Breakdown")
-    fig.update_layout(height=360, yaxis={"categoryorder": "total ascending"})
-    st.plotly_chart(fig, width="stretch")
+def freshness_status(a):
+    if a is None:
+        return "missing", "dot-off"
+    if a < 120:
+        return "fresh", "dot-ok"
+    if a <= 600:
+        return "delayed", "dot-warn"
+    return "stale", "dot-err"
 
 
-def render_top_opportunities(signals_df):
-    st.markdown('<div class="section-title">Top Paper-Trading Opportunities</div>', unsafe_allow_html=True)
+def ensure_safe(df):
+    if df is None or getattr(df, "empty", False):
+        return df
+    out = df.copy()
+    for c in out.columns:
+        if out[c].dtype == "object":
+            out[c] = out[c].apply(lambda x: "N/A" if x is None or (isinstance(x, float) and pd.isna(x)) else str(x))
+    return out
+
+
+def apply_filters(df, market_search="", wallet_search="", min_confidence=0.0, signal_label="All", side_filter="All", min_edge=-1.0, only_actionable=False, time_hours=None):
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    if market_search:
+        mc = next((c for c in ["market_title", "market"] if c in out.columns), None)
+        if mc:
+            out = out[out[mc].astype(str).str.contains(market_search, case=False, na=False)]
+    if wallet_search:
+        wc = next((c for c in ["trader_wallet", "wallet_copied"] if c in out.columns), None)
+        if wc:
+            out = out[out[wc].astype(str).str.contains(wallet_search, case=False, na=False)]
+    if "confidence" in out.columns:
+        out = out[pd.to_numeric(out["confidence"], errors="coerce").fillna(0) >= min_confidence]
+    if min_edge > -1.0 and "edge_score" in out.columns:
+        out = out[pd.to_numeric(out["edge_score"], errors="coerce").fillna(0) >= min_edge]
+    if signal_label != "All" and "signal_label" in out.columns:
+        out = out[out["signal_label"].astype(str) == signal_label]
+    if side_filter != "All":
+        sc = next((c for c in ["outcome_side", "side"] if c in out.columns), None)
+        if sc:
+            out = out[out[sc].astype(str).str.upper() == side_filter]
+    if only_actionable and "signal_label" in out.columns:
+        out = out[~out["signal_label"].astype(str).str.upper().isin(["IGNORE", "NO_ACTION"])]
+    if time_hours is not None:
+        for c in ["timestamp", "closed_at", "updated_at"]:
+            if c in out.columns:
+                ts = pd.to_datetime(out[c], errors="coerce", utc=True)
+                out = out[ts >= (pd.Timestamp.utcnow() - pd.Timedelta(hours=float(time_hours)))]
+                break
+    return out
+
+
+PL = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(family="Outfit,sans-serif", color="#a1a1aa", size=12), margin=dict(l=0, r=0, t=32, b=0), xaxis=dict(gridcolor="rgba(255,255,255,0.04)", zerolinecolor="rgba(255,255,255,0.06)"), yaxis=dict(gridcolor="rgba(255,255,255,0.04)", zerolinecolor="rgba(255,255,255,0.06)"), legend=dict(bgcolor="rgba(0,0,0,0)"))
+COLORS = ["#06b6d4", "#3b82f6", "#22c55e", "#f59e0b", "#ef4444", "#a855f7", "#ec4899"]
+
+
+def sfig(fig, h=320):
+    fig.update_layout(**PL, height=h)
+    return fig
+
+
+# ── Render functions ─────────────────────────────────────────────────────────
+
+def render_header(signals_df, markets_df):
+    ages = [a for a in [age_seconds(signals_df), age_seconds(markets_df)] if a is not None]
+    mode = get_trading_mode().upper()
+    mc = "clr-green" if mode == "LIVE" else "clr-amber"
+    fr = fmt_age(min(ages)) if ages else "unknown"
+    # ── FIX: Show interactive mode indicator ──
+    mode_label = f"{mode}"
+    if is_interactive_mode():
+        mode_label += " (interactive)"
+    st.markdown(f'<div class="terminal-header"><div class="terminal-title"><span>NNC</span> Trading Terminal</div><div class="terminal-status"><div class="pulse"></div><span class="{mc}">{mode_label}</span><span>|</span><span>Updated {fr} ago</span></div></div>', unsafe_allow_html=True)
+    st.info("Real-time public-data market tracker, whale tracker, and paper-trading dashboard. In LIVE mode, connects to Polymarket for balances and execution.")
+
+
+def render_metrics(signals_df, positions_df, closed_df, alerts_df, markets_df):
+    now = pd.Timestamp.utcnow()
+    st_th = 120
+    sig_count = 0
+    top_conf = "N/A"
+    if not signals_df.empty:
+        if "timestamp" in signals_df.columns:
+            ts = pd.to_datetime(signals_df["timestamp"], errors="coerce", utc=True)
+            sig_count = int((ts >= (now - pd.Timedelta(hours=1))).fillna(False).sum())
+        if "confidence" in signals_df.columns:
+            c = pd.to_numeric(signals_df["confidence"], errors="coerce").dropna()
+            # ── FIX 6: Guard against empty series before .max() ──
+            if not c.empty:
+                top_conf = f"{c.max():.2f}"
+    n_open = len(positions_df) if not positions_df.empty else 0
+    upnl = float(pd.to_numeric(positions_df.get("unrealized_pnl", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if not positions_df.empty and "unrealized_pnl" in positions_df.columns else 0.0
+    rpnl = 0.0
+    wr = "N/A"
+    n_closed = len(closed_df) if not closed_df.empty else 0
+    if not closed_df.empty:
+        pc = next((c for c in ["net_realized_pnl", "realized_pnl"] if c in closed_df.columns), None)
+        if pc:
+            ps = pd.to_numeric(closed_df[pc], errors="coerce").fillna(0)
+            rpnl = float(ps.sum())
+            if len(ps):
+                wr = f"{(ps > 0).mean() * 100:.1f}%"
+    nc = 0
+    if not alerts_df.empty:
+        sc = next((c for c in ["severity", "level"] if c in alerts_df.columns), None)
+        if sc:
+            nc = int(alerts_df[sc].astype(str).str.contains("critical", case=False, na=False).sum())
+    nm = int(markets_df["market_id"].nunique()) if not markets_df.empty and "market_id" in markets_df.columns else len(markets_df)
+    fa = {k: age_seconds(v) for k, v in [("signals", signals_df), ("markets", markets_df), ("alerts", alerts_df), ("positions", positions_df)]}
+    av = [a for a in fa.values() if a is not None]
+    ns = sum(1 for a in av if a > st_th)
+    sa = fa["signals"]
+    pa = fa["positions"]
+    cards = [
+        ("SIGNALS LAST HOUR", str(sig_count) if sa and sa <= st_th else ("N/A" if sa is None else str(sig_count)), "clr-cyan", ""),
+        ("OPEN POSITIONS", str(n_open), "clr-blue", ""),
+        ("REALIZED PNL", fmt_money(rpnl), pnl_color(rpnl), f"Win rate: {wr}"),
+        ("UNREALIZED PNL", fmt_money(upnl), pnl_color(upnl), ""),
+        ("CRITICAL ALERTS", str(nc), "clr-red" if nc else "clr-green", ""),
+        ("STALE FEEDS", str(ns), "clr-red" if ns else "clr-green", f"of {len(av)} monitored"),
+        ("TOP CONFIDENCE", top_conf, "clr-cyan", ""),
+        ("MARKETS WATCHED", str(nm), "clr-default", ""),
+        ("CLOSED POSITIONS", str(n_closed), "clr-default", ""),
+        ("MAX FRESHNESS AGE", fmt_age(max(av)) if av else "N/A", "clr-amber" if av and max(av) > st_th else "clr-green", ""),
+    ]
+    h = '<div class="metric-strip">'
+    for l, v, c, s in cards:
+        h += f'<div class="m-card"><div class="m-label">{l}</div><div class="m-value {c}">{v}</div>'
+        if s:
+            h += f'<div class="m-sub">{s}</div>'
+        h += '</div>'
+    h += '</div>'
+    st.markdown(h, unsafe_allow_html=True)
+    st.caption(f"Feed freshness — {' | '.join(f'{k}: {fmt_age(v)}' for k, v in fa.items())} | stale threshold: {st_th}s")
+
+
+def render_freshness(source_frames):
+    st.markdown('<div class="sec-title">Data Freshness</div>', unsafe_allow_html=True)
+    now = pd.Timestamp.utcnow()
+    rows = []
+    for label, path, df in source_frames:
+        p = Path(path)
+        fm = pd.Timestamp(p.stat().st_mtime, unit="s", tz="UTC") if p.exists() else None
+        lt = latest_ts(df)
+        best = max([t for t in [fm, lt] if t], default=None)
+        a = int((now - best).total_seconds()) if best else None
+        s, _ = freshness_status(a)
+        rows.append({"source": label, "latest_row": lt.strftime('%Y-%m-%d %H:%M:%S') if lt else "N/A", "file_modified": fm.strftime('%Y-%m-%d %H:%M:%S') if fm else "N/A", "age": f"{a}s" if a and a < 120 else (f"{round(a / 60, 1)}m" if a else "N/A"), "status": s})
+    st.dataframe(ensure_safe(pd.DataFrame(rows)), use_container_width=True, hide_index=True)
+
+
+def render_health(signals_df, markets_df, positions_df, model_status_df, replay_df, health_df):
+    st.markdown('<div class="sec-title">Pipeline Health</div>', unsafe_allow_html=True)
+
+    def chk(df, ma=600):
+        a = age_seconds(df)
+        if a is None:
+            return "dot-off"
+        return "dot-ok" if a <= ma else "dot-warn" if a <= 1800 else "dot-err"
+
+    items = [("Market monitor", chk(markets_df)), ("Whale tracker", chk(load("whales"))), ("Signal engine", chk(signals_df)), ("Order simulation", chk(positions_df)), ("Model status", chk(model_status_df, 1800)), ("System health", chk(health_df)), ("Replay available", "dot-ok" if replay_df is not None and not replay_df.empty else "dot-off"), ("Signals growing", "dot-ok" if signals_df is not None and len(signals_df) > 0 else "dot-off")]
+    h = '<div class="health-grid">'
+    for n, d in items:
+        h += f'<div class="health-pill"><div class="dot {d}"></div>{n}</div>'
+    h += '</div>'
+    st.markdown(h, unsafe_allow_html=True)
+
+
+def render_attention(signals_df, trades_df, alerts_df, positions_df, model_status_df, replay_df, health_df):
+    st.markdown('<div class="sec-title">Attention Needed</div>', unsafe_allow_html=True)
+    w = []
+    now = pd.Timestamp.utcnow()
+    st_ = latest_ts(signals_df)
+    if st_ is None or (now - st_).total_seconds() > 1800:
+        w.append("No signals in last 30 min")
+    pt = latest_ts(positions_df)
+    if pt is None or (now - pt).total_seconds() > 600:
+        w.append("Positions file stale")
+    if alerts_df is None or alerts_df.empty:
+        w.append("Alerts file missing or empty")
+    if model_status_df is None or model_status_df.empty:
+        w.append("Model outputs missing")
+    if replay_df is None or replay_df.empty:
+        w.append("No replay outputs available")
+    ht = latest_ts(health_df)
+    if ht is None or (now - ht).total_seconds() > 600:
+        w.append("System health feed stale")
+    if w:
+        for x in w:
+            st.warning(x)
+    else:
+        st.success("No immediate incidents detected.")
+
+
+def render_perf_charts(trades_df, closed_df, alerts_df, wbt_df, reg_df, positions_df):
+    st.markdown('<div class="sec-title">Performance Charts</div>', unsafe_allow_html=True)
+    if not closed_df.empty:
+        pc = next((c for c in ["net_realized_pnl", "realized_pnl"] if c in closed_df.columns), None)
+        tc = next((c for c in ["closed_at", "timestamp"] if c in closed_df.columns), None)
+        if pc and tc:
+            df = closed_df.copy()
+            df[tc] = pd.to_datetime(df[tc], errors="coerce")
+            df[pc] = pd.to_numeric(df[pc], errors="coerce").fillna(0)
+            df = df.dropna(subset=[tc]).sort_values(tc)
+            df["cum"] = df[pc].cumsum()
+            df["dd"] = df["cum"] - df["cum"].cummax()
+            df["day"] = df[tc].dt.date.astype(str)
+            daily = df.groupby("day")[pc].sum().reset_index(name="pnl")
+            c1, c2 = st.columns(2)
+            with c1:
+                fig = go.Figure(go.Scatter(x=df[tc], y=df["cum"], fill="tozeroy", fillcolor="rgba(6,182,212,0.08)", line=dict(color="#06b6d4", width=2)))
+                st.plotly_chart(sfig(fig, 280).update_layout(title="Cumulative Realized PnL"), use_container_width=True)
+            with c2:
+                fig = go.Figure(go.Scatter(x=df[tc], y=df["dd"], fill="tozeroy", fillcolor="rgba(239,68,68,0.08)", line=dict(color="#ef4444", width=2)))
+                st.plotly_chart(sfig(fig, 280).update_layout(title="Drawdown Curve"), use_container_width=True)
+            cols_ = ["#22c55e" if v >= 0 else "#ef4444" for v in daily["pnl"]]
+            fig = go.Figure(go.Bar(x=daily["day"], y=daily["pnl"], marker_color=cols_))
+            st.plotly_chart(sfig(fig, 240).update_layout(title="Daily PnL"), use_container_width=True)
+
+
+def render_signal_cards(signals_df):
     if signals_df.empty:
         st.warning("No ranked opportunities yet. Run supervisor.py first.")
         return
-
-    sort_df = signals_df.copy()
-    if "confidence" in sort_df.columns:
-        sort_df = sort_df.sort_values(by="confidence", ascending=False)
-
-    top_df = sort_df.head(8).reset_index(drop=True)
-    cols = st.columns(2)
-
-    for idx, (_, row) in enumerate(top_df.iterrows()):
-        with cols[idx % 2]:
-            label = row.get("signal_label", "UNKNOWN")
-            side = row.get("side", "UNKNOWN")
-            market = row.get("market", row.get("market_title", "Unknown Market"))
-            wallet = row.get("wallet_copied", row.get("trader_wallet", "Unknown"))
-            confidence = row.get("confidence", "-")
-            reason = row.get("reason", "No reason available")
-            market_url = row.get("market_url")
-
-            conf_pct = 0
-            try:
-                conf_pct = max(0, min(100, int(float(confidence) * 100)))
-            except Exception:
-                conf_pct = 0
-
-            st.markdown(
-                f"""
-                <div class="market-card">
-                    <div class="market-title">{market}</div>
-                    <div>
-                        <span class="signal-badge {badge_class(label)}">{label}</span>
-                        <span class="signal-badge badge-ignore">Observed side: {side}</span>
-                    </div>
-                    <div class="small-muted">Confidence score: {conf_pct}%</div>
-                    <div class="confidence-bar-wrap">
-                        <div class="confidence-bar-fill" style="width:{conf_pct}%;"></div>
-                    </div>
-                    <div class="meta-line"><b>Source wallet:</b> {wallet}</div>
-                    <div class="reason-box">{reason}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            if pd.notna(market_url) and market_url:
-                st.link_button("Open market on Polymarket", market_url, width="stretch")
+    v = signals_df.copy()
+    if "confidence" in v.columns:
+        v = v.sort_values("confidence", ascending=False)
+    v = v.head(8).reset_index(drop=True)
+    h = '<div class="sig-grid">'
+    for _, r in v.iterrows():
+        m = r.get("market_title", r.get("market", "Unknown"))
+        l = r.get("signal_label", "UNKNOWN")
+        s = r.get("outcome_side", r.get("side", "?"))
+        cf = r.get("confidence")
+        ed = r.get("edge_score")
+        pr = r.get("market_last_trade_price", r.get("current_price"))
+        pt = r.get("p_tp_before_sl")
+        er = r.get("expected_return")
+        w = str(r.get("wallet_copied", r.get("trader_wallet", "")))[:12]
+        rs = r.get("reason", r.get("reason_summary", "N/A"))
+        ac = r.get("recommended_action", r.get("action", r.get("entry_intent", "ignore")))
+        ts_ = r.get("timestamp", r.get("updated_at", "N/A"))
+        cp = 0
+        try:
+            cp = max(0, min(100, int(float(cf) * 100)))
+        except Exception:
+            pass
+        a_ = str(ac).strip().lower()
+        al = "ENTER" if a_ in ["enter", "open_long", "buy"] else "HOLD/WATCH" if a_ in ["hold", "watch"] else "LEAVE/EXIT" if a_ in ["leave", "exit", "close", "sell"] else "IGNORE"
+        h += f'<div class="sig-card"><div class="sig-market">{m}</div><div class="sig-badges"><span class="badge {badge_cls(l)}">{l}</span><span class="badge badge-ignore">{s}</span><span class="badge badge-watch">{al}</span></div><div class="conf-track"><div class="conf-fill" style="width:{cp}%"></div></div><div class="sig-row"><span>Confidence</span><span>{fmt_pct(cf)}</span></div><div class="sig-row"><span>P(TP before SL)</span><span>{fmt_num(pt, 3)}</span></div><div class="sig-row"><span>Edge score</span><span>{fmt_num(ed, 4)}</span></div><div class="sig-row"><span>Expected return</span><span>{fmt_num(er, 4)}</span></div><div class="sig-row"><span>Current price</span><span>{fmt_num(pr, 4)}</span></div><div class="sig-row"><span>Wallet</span><span>{w}</span></div><div class="sig-row"><span>Action</span><span>{al}</span></div><div class="sig-row"><span>Freshness</span><span>{ts_ if pd.notna(ts_) else "N/A"}</span></div><div class="reason-box">{rs}</div></div>'
+    h += '</div>'
+    st.markdown(h, unsafe_allow_html=True)
 
 
-def render_market_tracker(markets_df):
-    st.markdown('<div class="section-title">BTC Market Tracker</div>', unsafe_allow_html=True)
-    st.caption("Sortable market coverage view for BTC-related markets being tracked by the system.")
-    if markets_df.empty:
-        st.info("No BTC market snapshots yet.")
+def render_factor_matrix(signals_df):
+    st.markdown('<div class="sec-title">Signal Explanation Panel</div>', unsafe_allow_html=True)
+    if signals_df.empty:
+        st.info("No signals yet.")
         return
+    v = signals_df.copy()
+    if "confidence" in v.columns:
+        v = v.sort_values("confidence", ascending=False)
+    v = v.head(50).reset_index(drop=True)
+    opts = [f"{i + 1}. {r.get('market_title', r.get('market', '?'))} | {r.get('outcome_side', r.get('side', '?'))} | {r.get('signal_label', '?')}" for i, r in v.iterrows()]
+    sel = st.selectbox("Select signal", opts, key="fsel")
+    sr = v.iloc[opts.index(sel)].to_dict()
+    specs = [("Whale Pressure", "whale_pressure"), ("Market Structure", "market_structure_score"), ("Volatility Risk", "volatility_risk"), ("Time Decay", "time_decay_score"), ("Liquidity", "liquidity_score"), ("Volume", "volume_score"), ("Confidence", "confidence"), ("Edge Score", "edge_score")]
+    rows = [{"factor": n, "score": optional_number(sr.get(c)), "status": "missing" if pd.isna(sr.get(c)) else ""} for n, c in specs]
+    fdf = pd.DataFrame(rows)
+    fdf["numeric"] = pd.to_numeric(fdf["score"], errors="coerce")
+    fig = px.bar(fdf, x="numeric", y="factor", orientation="h", color_discrete_sequence=["#06b6d4"])
+    st.plotly_chart(sfig(fig, 380).update_layout(title="Factor Breakdown", yaxis={"categoryorder": "total ascending"}), use_container_width=True)
+    st.dataframe(ensure_safe(fdf[["factor", "score", "status"]]), use_container_width=True, hide_index=True)
 
-    view = markets_df.copy().tail(20)
-    st.dataframe(view[[c for c in ["question", "last_trade_price", "liquidity", "volume", "url"] if c in view.columns]], width="stretch")
 
-    if "last_trade_price" in view.columns and "question" in view.columns:
-        chart_df = view.dropna(subset=["last_trade_price"]).tail(12)
-        if not chart_df.empty:
-            fig = px.bar(chart_df, x="last_trade_price", y="question", orientation="h", title="Current BTC Market Prices")
-            fig.update_layout(height=420, yaxis={"categoryorder": "total ascending"})
-            st.plotly_chart(fig, width="stretch")
-
-
-def render_whale_tracker(whales_df):
-    st.markdown('<div class="section-title">Whale Activity Tracker</div>', unsafe_allow_html=True)
-    st.caption("Public wallet summaries showing who is most active and where concentration is forming.")
-    if whales_df.empty:
-        st.info("No whale summary yet.")
+def render_opp_table(signals_df):
+    st.markdown('<div class="sec-title">Opportunity Ranking Table</div>', unsafe_allow_html=True)
+    if signals_df.empty:
+        st.info("No candidates yet.")
         return
-
-    st.dataframe(whales_df.head(15), width="stretch")
-
-
-def render_market_distribution(distribution_df):
-    st.markdown('<div class="section-title">Whale Market Distribution</div>', unsafe_allow_html=True)
-    if distribution_df.empty:
-        st.info("No market distribution data yet.")
-        return
-
-    st.dataframe(distribution_df.head(15), width="stretch")
-    if "unique_wallets" in distribution_df.columns and "market_title" in distribution_df.columns:
-        chart_df = distribution_df.head(10)
-        fig = px.bar(chart_df, x="unique_wallets", y="market_title", orientation="h", title="Where the watched wallets are clustering")
-        fig.update_layout(height=380, yaxis={"categoryorder": "total ascending"})
-        st.plotly_chart(fig, width="stretch")
-
-
-def render_alerts(alerts_df):
-    st.markdown('<div class="section-title">Alerts</div>', unsafe_allow_html=True)
-    st.caption("Recent notable changes detected by the monitoring logic.")
-    if alerts_df.empty:
-        st.info("No alerts generated yet.")
-        return
-
-    st.dataframe(alerts_df.tail(20), width="stretch")
-
-
-def render_simulated_decisions(positions_df, closed_positions_df):
-    st.markdown('<div class="section-title">Simulated Trade Decisions</div>', unsafe_allow_html=True)
-    rows = []
-
-    if not positions_df.empty:
-        for _, row in positions_df.tail(10).iterrows():
-            rows.append(
-                {
-                    "market": row.get("market"),
-                    "token_id": row.get("token_id"),
-                    "status": "HOLDING",
-                    "outcome_side": row.get("outcome_side", row.get("side")),
-                    "entry_price": row.get("entry_price"),
-                    "live_price": row.get("current_price"),
-                    "shares": row.get("shares"),
-                    "cost_basis_usdc": (float(row.get("shares", 0.0) or 0.0) * float(row.get("entry_price", 0.0) or 0.0)),
-                    "market_value": row.get("market_value"),
-                    "realized_pnl": row.get("realized_pnl", 0.0),
-                    "profit_usdc": row.get("unrealized_pnl", 0.0),
-                    "reason": row.get("signal_label", "paper_hold"),
-                }
-            )
-
-    if not closed_positions_df.empty:
-        for _, row in closed_positions_df.tail(10).iterrows():
-            rows.append(
-                {
-                    "market": row.get("market"),
-                    "token_id": row.get("token_id"),
-                    "status": "CLOSED",
-                    "outcome_side": row.get("outcome_side", row.get("side")),
-                    "entry_price": row.get("entry_price"),
-                    "live_price": row.get("current_price", row.get("exit_price")),
-                    "shares": row.get("shares"),
-                    "market_value": row.get("market_value"),
-                    "realized_pnl": row.get("realized_pnl", row.get("net_pnl", 0.0)),
-                    "profit_usdc": row.get("unrealized_pnl", row.get("net_pnl", 0.0)),
-                    "reason": row.get("close_reason", row.get("exit_reason", "paper_exit")),
-                }
-            )
-
-    if not rows:
-        st.info("No simulated trade decisions yet.")
-        return
-
-    decisions_df = pd.DataFrame(rows)
-    st.dataframe(decisions_df.sort_values(by="profit_usdc", ascending=False), width="stretch")
-
-
-def render_positions(positions_df, closed_positions_df):
-    st.markdown('<div class="section-title">Paper Positions</div>', unsafe_allow_html=True)
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**Open Positions**")
-        if positions_df.empty:
-            st.info("No open paper positions.")
-        else:
-            cols = [c for c in ["position_id", "market", "token_id", "condition_id", "outcome_side", "entry_price", "current_price", "shares", "market_value", "unrealized_pnl", "realized_pnl", "confidence", "position_action", "opened_at"] if c in positions_df.columns]
-            st.dataframe(positions_df.tail(20)[cols] if cols else positions_df.tail(20), width="stretch")
-    with c2:
-        st.markdown("**Closed Positions**")
-        if closed_positions_df.empty:
-            st.info("No closed paper positions yet.")
-        else:
-            cols = [c for c in ["position_id", "market", "token_id", "condition_id", "outcome_side", "entry_price", "current_price", "shares", "market_value", "unrealized_pnl", "realized_pnl", "fees_paid", "close_reason", "max_drawdown", "mfe", "mae", "wallet_copied", "closed_at"] if c in closed_positions_df.columns]
-            st.dataframe(closed_positions_df.tail(20)[cols] if cols else closed_positions_df.tail(20), width="stretch")
-
-
-def render_paper_trades(trades_df):
-    st.markdown('<div class="section-title">Paper Trade Ledger</div>', unsafe_allow_html=True)
-    if trades_df.empty:
-        st.warning("No paper trades yet. Run supervisor.py first.")
-        return
-
-    st.dataframe(trades_df.sort_index(ascending=False).tail(30), width="stretch", height=420)
-
-
-def render_trade_chart(trades_df):
-    st.markdown('<div class="section-title">Simulated Fill Prices</div>', unsafe_allow_html=True)
-    if trades_df.empty or "fill_price" not in trades_df.columns:
-        st.info("No fill-price data yet.")
-        return
-
-    chart_df = trades_df.copy().tail(30)
-    chart_df["trade_index"] = range(1, len(chart_df) + 1)
-    fig = px.line(
-        chart_df,
-        x="trade_index",
-        y="fill_price",
-        color="side" if "side" in chart_df.columns else None,
-        hover_data=[col for col in ["market", "signal_label", "confidence"] if col in chart_df.columns],
-        title="Recent Simulated Fill Prices",
-        markers=True,
-    )
-    st.plotly_chart(fig, width="stretch")
-
-
-def render_best_trades(closed_positions_df, path_replay_df):
-    st.markdown('<div class="section-title">Most Successful Trades</div>', unsafe_allow_html=True)
-    source_df = closed_positions_df if not closed_positions_df.empty else path_replay_df
-    if source_df.empty:
-        st.info("No successful trade history yet.")
-        return
-
-    pnl_col = "unrealized_pnl" if "unrealized_pnl" in source_df.columns else "net_pnl" if "net_pnl" in source_df.columns else None
-    if pnl_col is None:
-        st.dataframe(source_df.head(10), width="stretch")
-        return
-
-    best_df = source_df.sort_values(by=pnl_col, ascending=False).head(10)
-    cols = [c for c in ["market", "entry_price", "current_price", "exit_price", pnl_col, "close_reason", "exit_reason", "wallet_copied"] if c in best_df.columns]
-    st.dataframe(best_df[cols], width="stretch")
+    v = signals_df.copy()
+    if "confidence" in v.columns:
+        v = v.sort_values("confidence", ascending=False)
+    rm = {"market_title": "Market", "outcome_side": "Side", "signal_label": "Label", "confidence": "Conf", "p_tp_before_sl": "P(TP)", "edge_score": "Edge", "expected_return": "E[R]", "wallet_copied": "Wallet", "market_last_trade_price": "Price", "recommended_action": "Action", "timestamp": "Time"}
+    cs = [c for c in rm if c in v.columns]
+    d = v[cs].rename(columns=rm).head(50)
+    st.dataframe(ensure_safe(d), use_container_width=True, hide_index=True)
+    st.download_button("Export CSV", d.to_csv(index=False).encode(), "opportunities.csv", "text/csv")
 
 
 def render_action_board(signals_df, positions_df):
-    st.markdown('<div class="section-title">Top 10 Entry / Hold / Leave Board</div>', unsafe_allow_html=True)
-    st.caption("Paper-trading action board only — not live execution advice.")
+    st.markdown('<div class="sec-title">Recommended Paper Actions</div>', unsafe_allow_html=True)
+    st.caption("Paper-trading decision board only — not live execution advice.")
     if signals_df.empty:
-        st.info("No ranked signals available yet.")
+        st.info("No signals yet.")
+        return
+    rk = signals_df.copy()
+    sc = [c for c in ["edge_score", "p_tp_before_sl", "confidence"] if c in rk.columns]
+    if sc:
+        rk = rk.sort_values(by=sc, ascending=[False] * len(sc))
+    rk = rk.head(20)
+    om = set(positions_df["market"].dropna().astype(str)) if not positions_df.empty and "market" in positions_df.columns else set()
+    gs = {"Enter": [], "Hold": [], "Exit / Leave": [], "Watch": []}
+    for _, r in rk.iterrows():
+        m = r.get("market_title", r.get("market", "Unknown"))
+        cf = pd.to_numeric(pd.Series([r.get("confidence")]), errors="coerce").iloc[0]
+        pt = pd.to_numeric(pd.Series([r.get("p_tp_before_sl")]), errors="coerce").iloc[0]
+        ed = pd.to_numeric(pd.Series([r.get("edge_score")]), errors="coerce").iloc[0]
+        ao = m in om
+        if ao and pd.notna(cf) and cf < 0.50:
+            g = "Exit / Leave"
+        elif ao:
+            g = "Hold"
+        elif pd.notna(pt) and pd.notna(ed) and pt >= 0.62 and ed > 0:
+            g = "Enter"
+        else:
+            g = "Watch"
+        gs[g].append({"market": m, "side": r.get("outcome_side", "N/A"), "confidence": optional_number(r.get("confidence"), 3), "edge": optional_number(r.get("edge_score"), 4), "E[R]": optional_number(r.get("expected_return"), 4), "price": optional_number(r.get("market_last_trade_price", r.get("current_price")), 4), "reason": r.get("reason_summary", r.get("reason", r.get("signal_label", "N/A")))})
+    for gn in ["Enter", "Hold", "Exit / Leave", "Watch"]:
+        st.markdown(f'<div class="action-group-title">{gn}</div>', unsafe_allow_html=True)
+        gd = pd.DataFrame(gs[gn])
+        if gd.empty:
+            st.caption("No rows.")
+        else:
+            st.dataframe(ensure_safe(gd), use_container_width=True, hide_index=True)
+
+
+def render_pnl_summary(positions_df, closed_df):
+    st.markdown('<div class="sec-title">PnL Summary</div>', unsafe_allow_html=True)
+    no = len(positions_df) if not positions_df.empty else 0
+    nc = len(closed_df) if not closed_df.empty else 0
+    rc = next((c for c in ["net_realized_pnl", "realized_pnl"] if c in closed_df.columns), None) if not closed_df.empty else None
+    uc = "unrealized_pnl" if not positions_df.empty and "unrealized_pnl" in positions_df.columns else None
+    rp = float(pd.to_numeric(closed_df[rc], errors="coerce").fillna(0).sum()) if rc else 0.0
+    up = float(pd.to_numeric(positions_df[uc], errors="coerce").fillna(0).sum()) if uc else 0.0
+    wr = "N/A"
+    ar = "N/A"
+    if rc and not closed_df.empty:
+        ps = pd.to_numeric(closed_df[rc], errors="coerce").fillna(0)
+        if len(ps):
+            wr = f"{(ps > 0).mean() * 100:.1f}%"
+            ar = f"{ps.mean():.2f}"
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Open", no)
+    c2.metric("Closed", nc)
+    c3.metric("Realized PnL", f"{rp:.2f}")
+    c4.metric("Unrealized PnL", f"{up:.2f}")
+    c5.metric("Win Rate", wr)
+    c6.metric("Avg Return", ar)
+
+
+def render_positions(positions_df, closed_df):
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown('<div class="sec-title">Open Positions</div>', unsafe_allow_html=True)
+        if positions_df.empty:
+            st.info("No open positions.")
+        else:
+            cs = [c for c in ["market", "outcome_side", "entry_price", "current_price", "shares", "market_value", "unrealized_pnl", "confidence", "status"] if c in positions_df.columns]
+            st.dataframe(ensure_safe(positions_df[cs].tail(20) if cs else positions_df.tail(20)), use_container_width=True, hide_index=True)
+    with c2:
+        st.markdown('<div class="sec-title">Closed Positions</div>', unsafe_allow_html=True)
+        if closed_df.empty:
+            st.info("No closed positions.")
+        else:
+            pc = next((c for c in ["net_realized_pnl", "realized_pnl", "net_pnl"] if c in closed_df.columns), None)
+            cs = [c for c in ["market", "outcome_side", "entry_price", "exit_price", pc, "close_reason", "closed_at"] if c and c in closed_df.columns]
+            st.dataframe(ensure_safe(closed_df[cs].tail(20) if cs else closed_df.tail(20)), use_container_width=True, hide_index=True)
+
+
+def render_best_trades(closed_df, replay_df):
+    st.markdown('<div class="sec-title">Best / Worst Trades</div>', unsafe_allow_html=True)
+    src = closed_df if not closed_df.empty else replay_df
+    if src.empty:
+        st.info("No trade history yet.")
+        return
+    pc = next((c for c in ["net_realized_pnl", "realized_pnl", "net_pnl"] if c in src.columns), None)
+    if not pc:
+        st.dataframe(ensure_safe(src.head(10)), use_container_width=True)
+        return
+    cs = [c for c in ["market", "entry_price", "exit_price", pc, "wallet_copied", "close_reason"] if c in src.columns]
+    l, r = st.columns(2)
+    with l:
+        st.markdown("**Top Winners**")
+        st.dataframe(ensure_safe(src.sort_values(pc, ascending=False).head(10)[cs]), use_container_width=True, hide_index=True)
+    with r:
+        st.markdown("**Top Losers**")
+        st.dataframe(ensure_safe(src.sort_values(pc, ascending=True).head(10)[cs]), use_container_width=True, hide_index=True)
+
+
+def render_markets(markets_df):
+    st.markdown('<div class="sec-title">BTC Market Tracker</div>', unsafe_allow_html=True)
+    if markets_df.empty:
+        st.info("No market data yet.")
+        return
+    search = st.text_input("Search markets", "", key="ms")
+    mc = next((c for c in ["market_title", "question", "market"] if c in markets_df.columns), None)
+    pc = next((c for c in ["last_trade_price", "current_price"] if c in markets_df.columns), None)
+    v = markets_df.copy()
+    if search and mc:
+        v = v[v[mc].astype(str).str.contains(search, case=False, na=False)]
+    if "liquidity" in v.columns:
+        v = v.sort_values("liquidity", ascending=False)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Tracked", len(v))
+    c2.metric("Avg Liquidity", f"{float(pd.to_numeric(v.get('liquidity', pd.Series()), errors='coerce').fillna(0).mean()):.2f}" if "liquidity" in v.columns else "N/A")
+    hv = "-"
+    if "volume" in v.columns and mc and not v.empty:
+        i = pd.to_numeric(v["volume"], errors="coerce").fillna(0).idxmax()
+        hv = str(v.loc[i, mc]) if i in v.index else "-"
+    c3.metric("Highest Volume", hv)
+    cs = [c for c in [mc, pc, "liquidity", "volume", "spread", "market_id", "url", "updated_at"] if c and c in v.columns]
+    st.dataframe(ensure_safe(v[cs].head(50)), use_container_width=True, hide_index=True)
+
+
+def render_whales(whales_df):
+    st.markdown('<div class="sec-title">Whale Activity Tracker</div>', unsafe_allow_html=True)
+    if whales_df.empty:
+        st.info("No whale data.")
+        return
+    wc = next((c for c in ["wallet_copied", "wallet", "trader_wallet"] if c in whales_df.columns), None)
+    mc = next((c for c in ["market", "market_title", "top_market"] if c in whales_df.columns), None)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Wallets", int(whales_df[wc].nunique()) if wc else len(whales_df))
+    c2.metric("Most Active", str(whales_df[wc].astype(str).value_counts().idxmax()) if wc and not whales_df.empty else "-")
+    c3.metric("Top Market", str(whales_df[mc].astype(str).value_counts().idxmax()) if mc and not whales_df.empty else "-")
+    cs = [c for c in [wc, "trade_count", "avg_size", "unique_markets", "alpha_score", "profit", "timestamp"] if c and c in whales_df.columns]
+    st.dataframe(ensure_safe(whales_df[cs].head(25) if cs else whales_df.head(25)), use_container_width=True, hide_index=True)
+
+
+def render_alerts(alerts_df):
+    st.markdown('<div class="sec-title">Alerts</div>', unsafe_allow_html=True)
+    if alerts_df.empty:
+        st.info("No alerts.")
+        return
+    ac = next((c for c in ["alert_type", "type"] if c in alerts_df.columns), None)
+    sc = next((c for c in ["severity", "level"] if c in alerts_df.columns), None)
+    af = st.selectbox("Type", ["All"] + (sorted(alerts_df[ac].dropna().astype(str).unique().tolist()) if ac else []), key="atf")
+    sf = st.selectbox("Severity", ["All"] + (sorted(alerts_df[sc].dropna().astype(str).unique().tolist()) if sc else []), key="asf")
+    v = alerts_df.copy()
+    if ac and af != "All":
+        v = v[v[ac].astype(str) == af]
+    if sc and sf != "All":
+        v = v[v[sc].astype(str) == sf]
+    nc = int(v[sc].astype(str).str.contains("critical", case=False, na=False).sum()) if sc and not v.empty else 0
+    nw = int(v[sc].astype(str).str.contains("warning", case=False, na=False).sum()) if sc and not v.empty else 0
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total", len(v))
+    c2.metric("Critical", nc)
+    c3.metric("Warning", nw)
+    cs = [c for c in ["timestamp", sc, ac, "market_title", "message", "source_module", "status"] if c and c in v.columns]
+    st.dataframe(ensure_safe(v[cs].tail(50) if cs else v.tail(50)), use_container_width=True, hide_index=True)
+
+
+def render_models(msd, rpd, rgd, sdf, sup, tsd, wbt):
+    st.markdown('<div class="sec-title">Model / Learning Status</div>', unsafe_allow_html=True)
+    missing = [f"{l}: {Path(p).name}" for l, p in [("contract targets", LOGS / "contract_targets.csv"), ("CLOB history", LOGS / "clob_price_history.csv"), ("replay", FILES["replay"]), ("supervised eval", FILES["supervised_eval"]), ("time-split eval", FILES["time_split"])] if not Path(p).exists()]
+    if missing:
+        st.warning("Missing: " + "; ".join(missing))
+    st.write(f"**Weights:** {'current' if (WEIGHTS / 'ppo_polytrader.zip').exists() else 'missing'}")
+    isa = fmt_num(sup.iloc[-1]["accuracy"], 3) if not sup.empty and "accuracy" in sup.columns else "N/A"
+    ta = fmt_num(tsd.iloc[-1]["test_accuracy"], 3) if not tsd.empty and "test_accuracy" in tsd.columns else "N/A"
+    sh = fmt_num(sup.iloc[-1]["sharpe"], 3) if not sup.empty and "sharpe" in sup.columns else "N/A"
+    ch = "N/A"
+    lt = "N/A"
+    if not rgd.empty:
+        nc = next((c for c in ["model_name", "name", "model_version"] if c in rgd.columns), None)
+        dc = next((c for c in ["promoted_at", "trained_at"] if c in rgd.columns), None)
+        if nc:
+            ch = str(rgd.iloc[-1][nc])
+        if dc:
+            lt = str(rgd.iloc[-1][dc])
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Test Acc", ta)
+    c2.metric("Replay Trades", len(rpd))
+    c3.metric("Sharpe", sh)
+    c4.metric("In-Sample", isa)
+    c5.metric("Champion", ch)
+    c6.metric("Last Train", lt)
+    if not msd.empty:
+        la = msd.iloc[-1].to_dict()
+        rows = int(la.get("closed_trade_rows", la.get("dataset_rows", 0)) or 0)
+        th = int(la.get("closed_trade_threshold", la.get("retrain_threshold", 0)) or 0)
+        pr = float(la.get("progress_ratio", 0) or 0)
+        act = la.get("last_action", "Unknown")
+        st.progress(max(0.0, min(1.0, pr)))
+        st.caption(f"Closed: {rows}/{th} | Progress: {pr:.0%}")
+        st.code(act, language="text")
+
+
+def render_shadow(shadow_df):
+    st.markdown('<div class="sec-title">Shadow Execution</div>', unsafe_allow_html=True)
+    st.caption("Shadow intents, slippage tax, DOA vetoes, and realized post-signal outcomes.")
+    if shadow_df.empty:
+        st.info("No shadow data yet.")
+        return
+    res = shadow_df[shadow_df.get("outcome", pd.Series()) != "PENDING"] if "outcome" in shadow_df.columns else pd.DataFrame()
+    doa = shadow_df[shadow_df.get("outcome", pd.Series()) == "DOA"] if "outcome" in shadow_df.columns else pd.DataFrame()
+    tp = float((res["outcome"] == "TP").mean()) if not res.empty and "outcome" in res.columns else 0.0
+    asl = float(pd.to_numeric(shadow_df.get("entry_slippage_bps"), errors="coerce").dropna().mean()) if "entry_slippage_bps" in shadow_df.columns else 0.0
+    aev = float(pd.to_numeric(shadow_df.get("ev_adj"), errors="coerce").dropna().mean()) if "ev_adj" in shadow_df.columns else 0.0
+    amp = float(pd.to_numeric(shadow_df.get("meta_prob"), errors="coerce").dropna().mean()) if "meta_prob" in shadow_df.columns else 0.0
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Shadow Intents", len(shadow_df))
+    c2.metric("Resolved", len(res))
+    c3.metric("DOA / Vetoed", len(doa))
+    c4.metric("TP Rate", fmt_pct(tp))
+    c5, c6, c7 = st.columns(3)
+    c5.metric("Avg Slippage (bps)", f"{asl:.1f}")
+    c6.metric("Avg EV_adj", f"{aev:+.2%}")
+    c7.metric("Avg Meta Prob", f"{amp:.2%}")
+    if "outcome" in shadow_df.columns:
+        oc = shadow_df["outcome"].value_counts().reset_index()
+        oc.columns = ["Outcome", "Count"]
+        fig = px.bar(oc, x="Outcome", y="Count", color_discrete_sequence=COLORS)
+        st.plotly_chart(sfig(fig, 260).update_layout(title="Shadow Outcome Mix"), use_container_width=True)
+    cs = [c for c in ["timestamp", "market_title", "meta_prob", "entry_slippage_bps", "expected_slip_bps", "ev_adj", "outcome", "realized_return", "trades_in_window"] if c in shadow_df.columns]
+    st.dataframe(shadow_df[cs].tail(100), use_container_width=True, hide_index=True)
+
+
+def render_quality(sdf, tdf, mdf, wdf, adf, msd, pdf, cdf, rpd, hdf):
+    st.markdown('<div class="sec-title">Data Quality and Pipeline Readiness</div>', unsafe_allow_html=True)
+    frames = {"signals": sdf, "execution": tdf, "markets": mdf, "whales": wdf, "alerts": adf, "positions": pdf, "closed": cdf, "model_status": msd, "health": hdf, "replay": rpd}
+    rows = []
+    for n, df in frames.items():
+        p = FILES.get(n)
+        lt = latest_ts(df)
+        rows.append({"file": n, "present": "Yes" if p and p.exists() else "No", "rows": len(df) if df is not None and not df.empty else 0, "latest": lt.strftime('%H:%M:%S') if lt else "N/A", "schema": "ok" if df is not None and not df.empty else "empty"})
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Training Ready", "Yes" if not cdf.empty and not msd.empty else "No")
+    c2.metric("Replay Ready", "Yes" if not rpd.empty else "No")
+    c3.metric("Targets", "Yes" if (LOGS / "contract_targets.csv").exists() else "No")
+
+
+def render_raw(sdf, tdf, edf, mdf, wdf, adf, msd, pdf, cdf):
+    tabs = st.tabs(["Signals", "Execution", "Episodes", "Markets", "Whales", "Alerts", "Learning", "Positions"])
+    with tabs[0]:
+        st.dataframe(ensure_safe(sdf), use_container_width=True)
+    with tabs[1]:
+        st.dataframe(ensure_safe(tdf), use_container_width=True)
+    with tabs[2]:
+        st.dataframe(edf, use_container_width=True)
+    with tabs[3]:
+        st.dataframe(mdf, use_container_width=True)
+    with tabs[4]:
+        st.dataframe(wdf, use_container_width=True)
+    with tabs[5]:
+        st.dataframe(adf, use_container_width=True)
+    with tabs[6]:
+        st.dataframe(msd, use_container_width=True)
+    with tabs[7]:
+        st.markdown("**Open**")
+        st.dataframe(ensure_safe(pdf), use_container_width=True)
+        st.markdown("**Closed**")
+        st.dataframe(ensure_safe(cdf), use_container_width=True)
+
+
+# ── FIX 2: Completely rewritten live sidebar using cached client ──
+def render_live_sidebar():
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Polymarket Live Truth**")
+
+    mode = get_trading_mode()
+    if mode != "live":
+        st.sidebar.caption(f"Mode: {mode}. Live sidebar requires TRADING_MODE=live.")
+        # ── FIX: Still show available info even in paper mode ──
+        addr = get_wallet_address()
+        if addr:
+            st.sidebar.markdown(f"**Address:** `{addr}`")
         return
 
-    ranked = signals_df.copy()
-    sort_cols = [c for c in ["edge_score", "p_tp_before_sl", "confidence"] if c in ranked.columns]
-    if sort_cols:
-        ranked = ranked.sort_values(by=sort_cols, ascending=[False] * len(sort_cols))
-    ranked = ranked.head(10).copy()
-
-    open_markets = set()
-    positions_lookup = {}
-    if not positions_df.empty and "market" in positions_df.columns:
-        open_markets = set(positions_df["market"].dropna().astype(str).tolist())
-        positions_lookup = positions_df.drop_duplicates(subset=["market"], keep="last").set_index("market").to_dict("index")
-
-    rows = []
-    for _, row in ranked.iterrows():
-        market = row.get("market_title", row.get("market", "Unknown Market"))
-        confidence = float(row.get("confidence", 0.0) or 0.0)
-        p_tp = float(row.get("p_tp_before_sl", 0.0) or 0.0)
-        expected_return = float(row.get("expected_return", 0.0) or 0.0)
-        edge = float(row.get("edge_score", 0.0) or 0.0)
-        entry_price_now = float(row.get("current_price", row.get("entry_price", 0.0)) or 0.0)
-        live_market_price = float(row.get("market_last_trade_price", row.get("current_price", 0.0)) or 0.0)
-        price_delta = live_market_price - entry_price_now
-        position_row = positions_lookup.get(market, {})
-        open_pnl = float(position_row.get("unrealized_pnl", 0.0) or 0.0) if position_row else 0.0
-        shares = float(position_row.get("shares", 0.0) or 0.0) if position_row else 0.0
-        cost_basis = shares * entry_price_now if shares else 0.0
-        market_value = shares * live_market_price if shares else 0.0
-        already_open = market in open_markets
-
-        if already_open and confidence < 0.50:
-            action = "LEAVE / EXIT PAPER POSITION"
-            alert = "🔴 Exit watch"
-        elif already_open:
-            action = "HOLD PAPER POSITION"
-            alert = "🟡 Hold / monitor"
-        elif p_tp >= 0.62 and edge > 0:
-            action = "ENTER PAPER POSITION"
-            alert = "🟢 Entry alert"
+    # ── FIX 2: Use cached client instead of creating new one each rerun ──
+    client = get_execution_client_cached()
+    if client is None:
+        st.sidebar.error("ExecutionClient not available. Check credentials.")
+        if is_interactive_mode():
+            st.sidebar.caption("Running in interactive mode — credentials should be in memory from start.py.")
         else:
-            action = "WATCH ONLY"
-            alert = "⚪ No entry yet"
+            st.sidebar.caption("Check .env file or run python start.py for interactive auth.")
+        return
 
-        rows.append(
-            {
-                "market": market,
-                "side": row.get("side"),
-                "signal": row.get("signal_label"),
-                "entry_price_now": round(entry_price_now, 4),
-                "live_market_price": round(live_market_price, 4),
-                "price_delta": round(price_delta, 4),
-                "shares": round(shares, 4),
-                "cost_basis_usdc": round(cost_basis, 4),
-                "market_value_usdc": round(market_value, 4),
-                "paper_profit_usdc": round(open_pnl, 4),
-                "p_tp_before_sl": round(p_tp, 3),
-                "expected_return": round(expected_return, 4),
-                "edge_score": round(edge, 4),
-                "confidence": round(confidence, 3),
-                "action": action,
-                "alert": alert,
-                "link": row.get("market_url"),
-            }
-        )
-
-    board_df = pd.DataFrame(rows)
-    st.dataframe(board_df, width="stretch")
-
-
-def render_model_status(model_status_df, supervised_eval_df, time_split_eval_df, path_replay_df, backtest_wallet_df, model_registry_df):
-    st.markdown('<div class="section-title">Model / Learning Status</div>', unsafe_allow_html=True)
-    st.caption("This tab shows whether the paper-trading system has enough historical rows to train/evaluate the newer supervised models.")
-    missing_outputs = []
-    for label, path in [
-        ("contract targets", LOGS_DIR / "contract_targets.csv"),
-        ("CLOB price history", LOGS_DIR / "clob_price_history.csv"),
-        ("replay backtest", PATH_REPLAY_FILE),
-        ("supervised eval", SUPERVISED_EVAL_FILE),
-        ("time-split eval", TIME_SPLIT_EVAL_FILE),
-    ]:
-        if not Path(path).exists():
-            missing_outputs.append(f"{label}: {path.name}")
-
-    if missing_outputs:
-        st.warning("Learning outputs still missing: " + "; ".join(missing_outputs))
-
-    weights_status = "🟢 current" if WEIGHTS_FILE.exists() else "🔴 missing"
-    st.write(f"**Weights file:** {weights_status}")
-
-    top1, top2, top3, top4 = st.columns(4)
-    with top1:
-        st.metric("Replay Trades", len(path_replay_df))
-    with top2:
-        acc = "-"
-        if not supervised_eval_df.empty and "accuracy" in supervised_eval_df.columns:
-            acc = f"{float(supervised_eval_df.iloc[-1]['accuracy']):.3f}"
-        st.metric("Supervised Accuracy", acc)
-    with top3:
-        test_acc = "-"
-        if not time_split_eval_df.empty and "test_accuracy" in time_split_eval_df.columns:
-            test_acc = f"{float(time_split_eval_df.iloc[-1]['test_accuracy']):.3f}"
-        st.metric("Time-Split Test Acc", test_acc)
-    with top4:
-        sharpe = "-"
-        if not supervised_eval_df.empty and "sharpe" in supervised_eval_df.columns:
-            sharpe = f"{float(supervised_eval_df.iloc[-1]['sharpe']):.3f}"
-        st.metric("Sharpe-like", sharpe)
-
-    if not model_status_df.empty:
-        latest = model_status_df.iloc[-1].to_dict()
-        dataset_rows = int(latest.get('dataset_rows', latest.get('closed_trade_rows', 0)) or 0)
-        retrain_threshold = int(latest.get('retrain_threshold', latest.get('closed_trade_threshold', 0)) or 0)
-        replay_rows = int(latest.get('replay_rows', 0) or 0)
-        replay_threshold = int(latest.get('replay_threshold', 0) or 0)
-        progress_ratio = float(latest.get('progress_ratio', 0) or 0)
-        last_action = latest.get('last_action', 'Unknown')
-
-        c1, c2 = st.columns(2)
-        with c1:
-            st.metric("Closed Trade Rows", dataset_rows)
-            st.metric("Closed Trade Threshold", retrain_threshold)
-            st.metric("Replay Rows", replay_rows)
-        with c2:
-            st.metric("Replay Threshold", replay_threshold)
-            st.metric("Progress Ratio", f"{progress_ratio:.2f}")
-
-        st.progress(max(0.0, min(1.0, progress_ratio)))
-        if retrain_threshold and dataset_rows < retrain_threshold and replay_threshold and replay_rows < replay_threshold:
-            st.warning(
-                f"Not enough real outcomes yet for stronger retraining: closed={dataset_rows}/{retrain_threshold}, replay={replay_rows}/{replay_threshold}."
-            )
+    try:
+        balance_info = get_balance_info()
+        if balance_info.get("error"):
+            st.sidebar.warning(f"Balance fetch: {balance_info['error']}")
         else:
-            st.success("Enough outcome history is available for stronger supervised/replay training passes.")
-        st.code(last_action, language="text")
-    else:
-        st.info("No model status rows yet. Run `python run_bot.py` for a while so the system can collect signals, markets, and replay data.")
+            st.sidebar.success(f"Live client connected (source: {balance_info['source']})")
 
-    if supervised_eval_df.empty and time_split_eval_df.empty and path_replay_df.empty:
-        st.info("Learning outputs are still empty because the newer supervised / replay pipeline does not have enough built history yet. This is expected on early runs.")
+        addr = get_wallet_address()
+        st.sidebar.metric("On-chain USDC", f"${balance_info['onchain_balance']:.2f}")
+        st.sidebar.metric("Available to Trade (CLOB/API)", f"${balance_info['clob_balance']:.2f}")
+        st.sidebar.markdown(f"**Address:** `{addr}`")
 
-    if not model_registry_df.empty:
-        latest_model = model_registry_df.iloc[-1].to_dict()
-        st.markdown("**Current Champion Model**")
-        st.code(str(latest_model), language="text")
+        if balance_info["onchain_balance"] > 0 and balance_info["clob_balance"] <= 0:
+            st.sidebar.warning("On-chain USDC is present, but CLOB/API balance is zero.")
 
-    if not path_replay_df.empty:
-        pnl_col = "net_pnl" if "net_pnl" in path_replay_df.columns else "gross_pnl" if "gross_pnl" in path_replay_df.columns else None
-        if pnl_col:
-            fig = px.histogram(path_replay_df, x=pnl_col, title="Replay PnL Distribution")
-            fig.update_layout(height=320)
-            st.plotly_chart(fig, width="stretch")
-
-            equity_df = path_replay_df.copy()
-            equity_df["equity_curve"] = equity_df[pnl_col].astype(float).cumsum()
-            equity_df["rolling_win_rate"] = (equity_df[pnl_col].astype(float) > 0).rolling(20, min_periods=1).mean()
-            equity_df["rolling_drawdown"] = equity_df["equity_curve"] - equity_df["equity_curve"].cummax()
-            c1, c2 = st.columns(2)
-            with c1:
-                st.plotly_chart(px.line(equity_df, y="equity_curve", title="Equity Curve"), width="stretch")
-            with c2:
-                st.plotly_chart(px.line(equity_df, y="rolling_win_rate", title="Rolling Win Rate"), width="stretch")
-            st.plotly_chart(px.line(equity_df, y="rolling_drawdown", title="Rolling Drawdown"), width="stretch")
-
-    if not backtest_wallet_df.empty:
-        st.markdown("**Wallet Alpha Evolution / Leaders**")
-        st.dataframe(backtest_wallet_df.head(15), width="stretch")
+    except Exception as e:
+        st.sidebar.error("Live client failed")
+        st.sidebar.caption(str(e))
 
 
-def render_raw_data(signals_df, trades_df, episode_log_df, markets_df, whales_df, alerts_df, model_status_df, positions_df, closed_positions_df):
-    st.caption("Raw data is split into sub-tabs for faster inspection and export-oriented review.")
-    raw_tabs = st.tabs(["Signals", "Execution", "Episodes", "Markets", "Whales", "Alerts", "Learning", "Positions"])
-
-    with raw_tabs[0]:
-        st.dataframe(signals_df, width="stretch")
-    with raw_tabs[1]:
-        st.dataframe(trades_df, width="stretch")
-    with raw_tabs[2]:
-        st.dataframe(episode_log_df, width="stretch")
-    with raw_tabs[3]:
-        st.dataframe(markets_df, width="stretch")
-    with raw_tabs[4]:
-        st.dataframe(whales_df, width="stretch")
-    with raw_tabs[5]:
-        st.dataframe(alerts_df, width="stretch")
-    with raw_tabs[6]:
-        st.dataframe(model_status_df, width="stretch")
-    with raw_tabs[7]:
-        st.markdown("**Open Positions**")
-        st.dataframe(positions_df, width="stretch")
-        st.markdown("**Closed Positions**")
-        st.dataframe(closed_positions_df, width="stretch")
-
-
+# ── Main ─────────────────────────────────────────────────────────────────────
 def main():
-    inject_styles()
-    render_header()
+    inject_theme()
+    sdf = load("signals")
+    tdf = load_trades()
+    edf = load("episode_log")
+    mdf = load("markets")
+    wdf = load("whales")
+    ddf = load("distribution")
+    adf = load("alerts")
+    msd = load("model_status")
+    hdf = load("health")
+    pdf = load("positions")
+    if is_live_mode():
+        live_pdf = load_live_positions_from_db()
+        if not live_pdf.empty:
+            pdf = live_pdf
+    cdf = load("closed")
+    sup = load("supervised_eval")
+    tsd = load("time_split")
+    rpd = load("replay")
+    wbt = load("wallet_backtest")
+    rgd = load("registry")
+    shd = load("shadow")
 
-    refresh_seconds = st.sidebar.slider("Auto-refresh hint (seconds)", min_value=5, max_value=120, value=15)
-    st.sidebar.caption("Tip: rerun/refresh after a supervisor cycle completes.")
-    st.sidebar.write(f"Suggested refresh interval: {refresh_seconds}s")
-    st.sidebar.caption(f"Signals file: {SIGNALS_FILE}")
-    st.sidebar.caption(f"Execution file: {EXECUTION_FILE}")
-    st.sidebar.caption(f"Markets file: {MARKETS_FILE}")
-    st.sidebar.caption(f"Whales file: {WHALES_FILE}")
-    st.sidebar.caption(f"Alerts file: {ALERTS_FILE}")
+    st.sidebar.markdown("**Dashboard Controls**")
+    ar = st.sidebar.checkbox("Auto-refresh", False)
+    rs = st.sidebar.selectbox("Interval (s)", [5, 10, 15, 30, 60, 120], index=2)
+    dbg = st.sidebar.checkbox("Show debug sections", True)
 
-    signals_df = load_csv(SIGNALS_FILE)
-    trades_df = load_execution_history()
-    episode_log_df = load_csv(EPISODE_LOG_FILE)
-    markets_df = load_csv(MARKETS_FILE)
-    whales_df = load_csv(WHALES_FILE)
-    distribution_df = load_csv(MARKET_DISTRIBUTION_FILE)
-    alerts_df = load_csv(ALERTS_FILE)
-    model_status_df = load_csv(MODEL_STATUS_FILE)
-    positions_df = load_csv(POSITIONS_FILE)
-    closed_positions_df = load_csv(CLOSED_POSITIONS_FILE)
-    supervised_eval_df = load_csv(SUPERVISED_EVAL_FILE)
-    time_split_eval_df = load_csv(TIME_SPLIT_EVAL_FILE)
-    path_replay_df = load_csv(PATH_REPLAY_FILE)
-    backtest_wallet_df = load_csv(BACKTEST_BY_WALLET_FILE)
-    model_registry_df = load_csv(MODEL_REGISTRY_FILE)
+    # ── FIX 10: Show warning when auto-refresh package is missing ──
+    if ar:
+        if st_autorefresh:
+            st_autorefresh(interval=rs * 1000, key="auto")
+        else:
+            st.sidebar.warning("Install streamlit-autorefresh for auto-refresh: pip install streamlit-autorefresh")
 
-    render_overview(signals_df, trades_df, markets_df, alerts_df)
+    # ── FIX: Show auth mode indicator ──
+    if is_interactive_mode():
+        st.sidebar.caption("Auth: interactive (from start.py)")
+    elif os.getenv("PRIVATE_KEY"):
+        st.sidebar.caption("Auth: .env file")
+    else:
+        st.sidebar.caption("Auth: paper mode (no credentials)")
 
-    st.caption("Quick guide: Overview = status, Opportunities = strongest paper signals, Markets = BTC tracker, Whales = public wallet summaries, Alerts = notable changes, Learning = model/retraining state.")
+    st.sidebar.markdown("**Global Filters**")
+    dr = st.sidebar.selectbox("Date range (days)", [1, 3, 7, 14, 30], index=2)
+    ms = st.sidebar.text_input("Market search", "")
+    ws = st.sidebar.text_input("Wallet search", "")
+    sf = st.sidebar.selectbox("Side", ["All", "YES", "NO"])
+    lf = st.sidebar.selectbox("Label", ["All", "IGNORE", "LOW-CONFIDENCE WATCH", "STRONG PAPER OPPORTUNITY", "HIGHEST-RANKED PAPER SIGNAL"])
+    mc = st.sidebar.slider("Min confidence", 0.0, 1.0, 0.0, 0.01)
+    me = st.sidebar.slider("Min edge", -1.0, 1.0, -1.0, 0.01)
+    oa = st.sidebar.checkbox("Actionable only", False)
+    th = dr * 24
+    fk = dict(market_search=ms, wallet_search=ws, min_confidence=mc, signal_label=lf, side_filter=sf, min_edge=me, only_actionable=oa, time_hours=th)
+    sdf = apply_filters(sdf, **fk)
+    tdf = apply_filters(tdf, **fk)
+    pdf = apply_filters(pdf, **fk)
+    cdf = apply_filters(cdf, **fk)
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Opportunities", "Markets & Whales", "Learning", "Raw Data"])
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Quick Status**")
+    sts = latest_ts(sdf)
+    nm = sum(1 for p in FILES.values() if not p.exists())
+    st.sidebar.write(f"Missing files: {nm}")
+    st.sidebar.write(f"Alerts: {len(adf)}")
+    st.sidebar.write(f"Last signal: {sts.strftime('%H:%M:%S') if sts else 'N/A'}")
+    render_live_sidebar()
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Export**")
+    if not sdf.empty:
+        st.sidebar.download_button("Signals", sdf.to_csv(index=False).encode(), "signals.csv", "text/csv")
+    if not pdf.empty:
+        st.sidebar.download_button("Positions", pdf.to_csv(index=False).encode(), "positions.csv", "text/csv")
+    if not adf.empty:
+        st.sidebar.download_button("Alerts", adf.to_csv(index=False).encode(), "alerts.csv", "text/csv")
 
-    with tab1:
-        top_left, top_right = st.columns([1.2, 1])
-        with top_left:
-            render_top_opportunities(signals_df)
-        with top_right:
-            render_factor_matrix(signals_df)
+    render_header(sdf, mdf)
+    render_metrics(sdf, pdf, cdf, adf, mdf)
+    st.caption("System Status = health + performance | Signals = ranked opportunities | Positions = paper trade state + PnL | Markets = market, whale, alert context | Models = learning outputs + data quality | Shadow Audit = slippage / DOA monitoring")
 
-        render_action_board(signals_df, positions_df)
-        render_simulated_decisions(positions_df, closed_positions_df)
-        render_positions(positions_df, closed_positions_df)
-        render_best_trades(closed_positions_df, path_replay_df)
-        if not episode_log_df.empty:
-            st.markdown('<div class="section-title">Episode Log</div>', unsafe_allow_html=True)
-            st.dataframe(episode_log_df.tail(20), width="stretch")
-        bottom_left, bottom_right = st.columns([1, 1])
-        with bottom_left:
-            render_paper_trades(trades_df)
-        with bottom_right:
-            render_trade_chart(trades_df)
+    t1, t2, t3, t4, t5, t6 = st.tabs(["System Status", "Signals and Opportunities", "Positions and PnL", "Markets Whales Alerts", "Models and Data Quality", "Shadow Audit"])
 
-    with tab2:
-        top_left, top_right = st.columns([1.1, 0.9])
-        with top_left:
-            render_market_tracker(markets_df)
-        with top_right:
-            render_alerts(alerts_df)
-        lower_left, lower_right = st.columns([1, 1])
-        with lower_left:
-            render_whale_tracker(whales_df)
-        with lower_right:
-            render_market_distribution(distribution_df)
+    with t1:
+        render_freshness([("signals.csv", FILES["signals"], sdf), ("execution_log.csv", FILES["execution"], tdf), ("markets.csv", FILES["markets"], mdf), ("whales.csv", FILES["whales"], wdf), ("alerts.csv", FILES["alerts"], adf), ("positions.csv", FILES["positions"], pdf), ("model_status.csv", FILES["model_status"], msd), ("system_health.csv", FILES["health"], hdf)])
+        render_health(sdf, mdf, pdf, msd, rpd, hdf)
+        render_attention(sdf, tdf, adf, pdf, msd, rpd, hdf)
+        render_perf_charts(tdf, cdf, adf, wbt, rgd, pdf)
 
-    with tab3:
-        render_model_status(model_status_df, supervised_eval_df, time_split_eval_df, path_replay_df, backtest_wallet_df, model_registry_df)
+    with t2:
+        l, r = st.columns([1.2, 1])
+        with l:
+            render_signal_cards(sdf)
+        with r:
+            render_factor_matrix(sdf)
+        render_opp_table(sdf)
+        render_action_board(sdf, pdf)
 
-    with tab4:
-        render_raw_data(signals_df, trades_df, episode_log_df, markets_df, whales_df, alerts_df, model_status_df, positions_df, closed_positions_df)
+    with t3:
+        render_pnl_summary(pdf, cdf)
+        render_positions(pdf, cdf)
+        render_best_trades(cdf, rpd)
+        if not edf.empty:
+            st.markdown('<div class="sec-title">Episode Log</div>', unsafe_allow_html=True)
+            st.dataframe(edf.tail(20), use_container_width=True)
+
+    with t4:
+        s1, s2, s3 = st.tabs(["Markets", "Whale Activity", "Alerts"])
+        with s1:
+            render_markets(mdf)
+            if not ddf.empty:
+                st.markdown('<div class="sec-title">Whale Market Distribution</div>', unsafe_allow_html=True)
+                st.dataframe(ddf.head(15), use_container_width=True)
+                if "unique_wallets" in ddf.columns and "market_title" in ddf.columns:
+                    fig = px.bar(ddf.head(10), x="unique_wallets", y="market_title", orientation="h", color_discrete_sequence=["#a855f7"])
+                    st.plotly_chart(sfig(fig, 320).update_layout(title="Wallet Clustering"), use_container_width=True)
+        with s2:
+            render_whales(wdf)
+        with s3:
+            render_alerts(adf)
+
+    with t5:
+        sm, sq = st.tabs(["Model Performance", "Data Quality and Readiness"])
+        with sm:
+            render_models(msd, rpd, rgd, sdf, sup, tsd, wbt)
+        with sq:
+            render_quality(sdf, tdf, mdf, wdf, adf, msd, pdf, cdf, rpd, hdf)
+            if dbg:
+                with st.expander("Debug / Raw Logs"):
+                    render_raw(sdf, tdf, edf, mdf, wdf, adf, msd, pdf, cdf)
+
+    with t6:
+        render_shadow(shd)
 
 
 if __name__ == "__main__":

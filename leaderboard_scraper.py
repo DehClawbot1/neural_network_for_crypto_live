@@ -1,5 +1,6 @@
 import time
 import logging
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -9,6 +10,34 @@ from urllib3.util.retry import Retry
 
 # Configure logging for zero-intervention monitoring
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+def _today_start_iso():
+    """Use a rolling UTC lookback window instead of a hard Europe/Lisbon day boundary."""
+    lookback_hours = int(os.getenv("SIGNAL_LOOKBACK_HOURS", "24"))
+    lookback_hours = max(1, lookback_hours)
+    return pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=lookback_hours)
+
+
+def _normalize_timestamp_value(value):
+    if value in [None, ""]:
+        return value
+    try:
+        numeric = float(value)
+        if numeric > 1e17:
+            return pd.to_datetime(numeric, utc=True, unit="ns").isoformat()
+        if numeric > 1e14:
+            return pd.to_datetime(numeric, utc=True, unit="us").isoformat()
+        if numeric > 1e11:
+            return pd.to_datetime(numeric, utc=True, unit="ms").isoformat()
+        if numeric > 1e9:
+            return pd.to_datetime(numeric, utc=True, unit="s").isoformat()
+    except Exception:
+        pass
+    try:
+        return pd.to_datetime(value, utc=True).isoformat()
+    except Exception:
+        return value
 
 
 def _build_session():
@@ -82,23 +111,31 @@ def get_recent_btc_trades(wallet_address, limit=50, market_universe=None):
         trades = response.json()
 
         market_universe = market_universe or {"condition_ids": set(), "token_ids": set(), "slugs": set()}
+        today_start_utc = _today_start_iso()
         signals = []
         for trade in trades:
-            condition_id = str(trade.get("conditionId", "") or "")
-            token_id = str(trade.get("tokenId", "") or "")
+            cond_id = trade.get("conditionId") or trade.get("condition_id")
+            token_id = trade.get("tokenId") or trade.get("token_id")
             slug = str(trade.get("slug", trade.get("marketSlug", "")) or "")
             title = str(trade.get("title", ""))
             title_l = title.lower()
+            condition_id = str(cond_id or "")
+            token_id_str = str(token_id or "")
 
             mapped_to_btc = (
                 condition_id in market_universe.get("condition_ids", set())
-                or token_id in market_universe.get("token_ids", set())
+                or token_id_str in market_universe.get("token_ids", set())
                 or slug in market_universe.get("slugs", set())
             )
             keyword_fallback = (
                 "bitcoin" in title_l or "btc" in title_l or "bitcoin para cima ou para baixo" in title_l or "para cima ou para baixo" in title_l
             )
             if not mapped_to_btc and not keyword_fallback:
+                continue
+
+            normalized_ts = _normalize_timestamp_value(trade.get("timestamp"))
+            trade_ts = pd.to_datetime(normalized_ts, utc=True, errors="coerce")
+            if pd.isna(trade_ts) or trade_ts < today_start_utc:
                 continue
 
             order_side = str(trade.get("side", "BUY") or "BUY").upper()
@@ -110,8 +147,8 @@ def get_recent_btc_trades(wallet_address, limit=50, market_universe=None):
                     "trader_wallet": wallet_address,
                     "market_title": title,
                     "market_slug": slug,
-                    "token_id": trade.get("tokenId"),
-                    "condition_id": trade.get("conditionId"),
+                    "token_id": token_id,
+                    "condition_id": cond_id,
                     "order_side": order_side,
                     "trade_side": order_side,
                     "outcome_side": trade.get("outcome"),
@@ -119,7 +156,7 @@ def get_recent_btc_trades(wallet_address, limit=50, market_universe=None):
                     "side": trade.get("outcome"),
                     "price": float(trade.get("price", 0)),
                     "size": float(trade.get("size", 0)),
-                    "timestamp": trade.get("timestamp"),
+                    "timestamp": normalized_ts,
                 }
             )
         return signals
@@ -156,3 +193,4 @@ if __name__ == "__main__":
     if not signals_df.empty:
         print("\n--- Latest Alpha Signals ---")
         print(signals_df[["trader_wallet", "side", "price", "size", "market_title"]].head())
+

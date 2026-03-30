@@ -6,3 +6,7 @@ __pycache__/
 weights/
 logs/
 .venv/
+logs_backup_20260330_015431/
+.audit_patch_backup/
+*.bak
+*.db
