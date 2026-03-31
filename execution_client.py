@@ -1,5 +1,6 @@
 import os
 import logging
+import re
 from pathlib import Path
 
 import requests
@@ -353,8 +354,11 @@ class ExecutionClient:
         """
         if raw_balance is None:
             return 0.0
+        raw_text = str(raw_balance).strip()
+        if not raw_text:
+            return 0.0
         try:
-            val = float(raw_balance) if str(raw_balance).strip() else 0.0 # BUG FIX 10: Handle empty string API drops safely
+            val = float(raw_text) # BUG FIX 10: Handle empty string API drops safely
         except (TypeError, ValueError):
             return 0.0
         # If balance looks like raw microdollars (>= 1,000,000 and is integer-like),
@@ -368,8 +372,18 @@ class ExecutionClient:
             is_micro = getattr(TradingConfig, 'BALANCE_IS_MICRODOLLARS', True)
         except ImportError:
             is_micro = True
-        if is_micro and val >=  100: # BUG FIX 1: Support balances under $1.00
-            return val / 1e6
+        if is_micro:
+            # Safer detection: only auto-scale clear integer-like raw-unit payloads.
+            # Examples:
+            #   "5000000" -> 5.0 USDC
+            #   "0.75"    -> already 0.75 USDC
+            if re.fullmatch(r"-?\d+", raw_text):
+                try:
+                    return int(raw_text) / 1e6
+                except Exception:
+                    return val
+            if abs(val - round(val)) < 1e-9 and abs(val) >= 1_000_000:
+                return val / 1e6
         return val
 
     def _rpc_call(self, rpc_url, method, params):

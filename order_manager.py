@@ -1,6 +1,7 @@
 import os
 import math
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 import time
@@ -52,8 +53,11 @@ class OrderManager:
     def _normalize_balance(self, raw_balance):
         if raw_balance is None:
             return 0.0
+        raw_text = str(raw_balance).strip()
+        if not raw_text:
+            return 0.0
         try:
-            val = float(raw_balance)
+            val = float(raw_text)
         except (TypeError, ValueError):
             return 0.0
 
@@ -68,7 +72,14 @@ class OrderManager:
         # Failing to do this causes fractional balances (e.g. 500,000) to evaluate 
         # as 500,000 full shares instead of 0.5 shares.
         if is_micro:
-            return (val / 1e6) if val > 100 else val # BUG 5 FIX: Protect conditional token sizes
+            # Safer scaling: convert only clearly integer-like raw units.
+            if re.fullmatch(r"-?\d+", raw_text):
+                try:
+                    return int(raw_text) / 1e6
+                except Exception:
+                    return val
+            if abs(val - round(val)) < 1e-9 and abs(val) >= 1_000_000:
+                return val / 1e6
             
         return val
 
