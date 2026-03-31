@@ -628,7 +628,7 @@ def main_loop():
 
     always_on_enabled = os.getenv("ALWAYS_ON_MARKET_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     always_on_slug = str(os.getenv("ALWAYS_ON_MARKET_SLUG", "btc-updown-5m-1774926600") or "").strip()
-    always_on_only = os.getenv("ALWAYS_ON_ONLY", "true").strip().lower() in {"1", "true", "yes", "on"}
+    always_on_only = os.getenv("ALWAYS_ON_ONLY", "false").strip().lower() in {"1", "true", "yes", "on"}
     always_on_force_entry = os.getenv("ALWAYS_ON_FORCE_ENTRY", "true").strip().lower() in {"1", "true", "yes", "on"}
     always_on_signal_size = float(os.getenv("ALWAYS_ON_SIGNAL_SIZE", "25") or 25)
 
