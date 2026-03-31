@@ -82,7 +82,16 @@ class ExecutionClient:
         self.host = host or os.getenv("POLYMARKET_HOST", "https://clob.polymarket.com")
         self.chain_id = int(chain_id or os.getenv("POLYMARKET_CHAIN_ID", "137"))
         self.private_key = private_key or os.getenv("PRIVATE_KEY")
-        self.funder = funder or os.getenv("POLYMARKET_FUNDER")
+        raw_funder = funder or os.getenv("POLYMARKET_FUNDER")
+        self.funder = str(raw_funder).strip() if raw_funder not in (None, "") else None
+        if self.funder:
+            sanitized_funder = self.funder.rstrip(".,;: ")
+            if sanitized_funder != self.funder:
+                logging.warning(
+                    "ExecutionClient: POLYMARKET_FUNDER had trailing punctuation; using sanitized address %s",
+                    sanitized_funder,
+                )
+                self.funder = sanitized_funder
         env_signature_type = os.getenv("POLYMARKET_SIGNATURE_TYPE", "").strip()
 
         # ── FIX: Signature type resolution with clear priority ──
