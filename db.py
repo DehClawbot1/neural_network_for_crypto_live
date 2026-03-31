@@ -19,6 +19,29 @@ class Database:
         self._ensure_column("model_decisions", "feature_snapshot", "TEXT")
         self._ensure_column("model_decisions", "model_artifact", "TEXT")
         self._ensure_column("model_decisions", "normalization_artifact", "TEXT")
+        self._ensure_column("candidate_decisions", "cycle_id", "TEXT")
+        self._ensure_column("candidate_decisions", "candidate_id", "TEXT")
+        self._ensure_column("candidate_decisions", "condition_id", "TEXT")
+        self._ensure_column("candidate_decisions", "outcome_side", "TEXT")
+        self._ensure_column("candidate_decisions", "market_slug", "TEXT")
+        self._ensure_column("candidate_decisions", "trader_wallet", "TEXT")
+        self._ensure_column("candidate_decisions", "entry_intent", "TEXT")
+        self._ensure_column("candidate_decisions", "model_action", "TEXT")
+        self._ensure_column("candidate_decisions", "final_decision", "TEXT")
+        self._ensure_column("candidate_decisions", "reject_reason", "TEXT")
+        self._ensure_column("candidate_decisions", "reject_category", "TEXT")
+        self._ensure_column("candidate_decisions", "gate", "TEXT")
+        self._ensure_column("candidate_decisions", "confidence", "REAL")
+        self._ensure_column("candidate_decisions", "p_tp_before_sl", "REAL")
+        self._ensure_column("candidate_decisions", "expected_return", "REAL")
+        self._ensure_column("candidate_decisions", "edge_score", "REAL")
+        self._ensure_column("candidate_decisions", "calibrated_edge", "REAL")
+        self._ensure_column("candidate_decisions", "calibrated_baseline", "REAL")
+        self._ensure_column("candidate_decisions", "proposed_size_usdc", "REAL")
+        self._ensure_column("candidate_decisions", "final_size_usdc", "REAL")
+        self._ensure_column("candidate_decisions", "available_balance", "REAL")
+        self._ensure_column("candidate_decisions", "order_id", "TEXT")
+        self._ensure_column("candidate_decisions", "details_json", "TEXT")
         self._ensure_column("fills", "condition_id", "TEXT")
         self._ensure_column("fills", "outcome_side", "TEXT")
         self._ensure_column("fills", "side", "TEXT")
@@ -95,6 +118,35 @@ class Database:
                 detail TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS candidate_decisions (
+                decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cycle_id TEXT,
+                candidate_id TEXT,
+                token_id TEXT,
+                condition_id TEXT,
+                outcome_side TEXT,
+                market TEXT,
+                market_slug TEXT,
+                trader_wallet TEXT,
+                entry_intent TEXT,
+                model_action TEXT,
+                final_decision TEXT,
+                reject_reason TEXT,
+                reject_category TEXT,
+                gate TEXT,
+                confidence REAL,
+                p_tp_before_sl REAL,
+                expected_return REAL,
+                edge_score REAL,
+                calibrated_edge REAL,
+                calibrated_baseline REAL,
+                proposed_size_usdc REAL,
+                final_size_usdc REAL,
+                available_balance REAL,
+                order_id TEXT,
+                details_json TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
             CREATE TABLE IF NOT EXISTS incidents (
                 incident_id TEXT PRIMARY KEY,
                 category TEXT,
@@ -147,6 +199,10 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_fills_filled_at ON fills(filled_at);
             CREATE INDEX IF NOT EXISTS idx_model_decisions_token_id ON model_decisions(token_id);
             CREATE INDEX IF NOT EXISTS idx_model_decisions_created_at ON model_decisions(created_at);
+            CREATE INDEX IF NOT EXISTS idx_candidate_decisions_created_at ON candidate_decisions(created_at);
+            CREATE INDEX IF NOT EXISTS idx_candidate_decisions_cycle_id ON candidate_decisions(cycle_id);
+            CREATE INDEX IF NOT EXISTS idx_candidate_decisions_final_decision ON candidate_decisions(final_decision);
+            CREATE INDEX IF NOT EXISTS idx_candidate_decisions_reject_reason ON candidate_decisions(reject_reason);
             CREATE INDEX IF NOT EXISTS idx_risk_events_token_id ON risk_events(token_id);
             CREATE INDEX IF NOT EXISTS idx_risk_events_created_at ON risk_events(created_at);
             CREATE INDEX IF NOT EXISTS idx_incidents_created_at ON incidents(created_at);
@@ -187,6 +243,7 @@ class Database:
             "fills",
             "live_positions",
             "model_decisions",
+            "candidate_decisions",
             "state_mismatches",
         ]
         try:
@@ -231,6 +288,8 @@ class Database:
             "signals.csv",
             "markets.csv",
             "alerts.csv",
+            "candidate_decisions.csv",
+            "candidate_cycle_stats.csv",
             "service_heartbeats.csv",
             "system_health.csv",
             "incidents.csv",
@@ -250,6 +309,29 @@ class Database:
         self._ensure_column("model_decisions", "feature_snapshot", "TEXT")
         self._ensure_column("model_decisions", "model_artifact", "TEXT")
         self._ensure_column("model_decisions", "normalization_artifact", "TEXT")
+        self._ensure_column("candidate_decisions", "cycle_id", "TEXT")
+        self._ensure_column("candidate_decisions", "candidate_id", "TEXT")
+        self._ensure_column("candidate_decisions", "condition_id", "TEXT")
+        self._ensure_column("candidate_decisions", "outcome_side", "TEXT")
+        self._ensure_column("candidate_decisions", "market_slug", "TEXT")
+        self._ensure_column("candidate_decisions", "trader_wallet", "TEXT")
+        self._ensure_column("candidate_decisions", "entry_intent", "TEXT")
+        self._ensure_column("candidate_decisions", "model_action", "TEXT")
+        self._ensure_column("candidate_decisions", "final_decision", "TEXT")
+        self._ensure_column("candidate_decisions", "reject_reason", "TEXT")
+        self._ensure_column("candidate_decisions", "reject_category", "TEXT")
+        self._ensure_column("candidate_decisions", "gate", "TEXT")
+        self._ensure_column("candidate_decisions", "confidence", "REAL")
+        self._ensure_column("candidate_decisions", "p_tp_before_sl", "REAL")
+        self._ensure_column("candidate_decisions", "expected_return", "REAL")
+        self._ensure_column("candidate_decisions", "edge_score", "REAL")
+        self._ensure_column("candidate_decisions", "calibrated_edge", "REAL")
+        self._ensure_column("candidate_decisions", "calibrated_baseline", "REAL")
+        self._ensure_column("candidate_decisions", "proposed_size_usdc", "REAL")
+        self._ensure_column("candidate_decisions", "final_size_usdc", "REAL")
+        self._ensure_column("candidate_decisions", "available_balance", "REAL")
+        self._ensure_column("candidate_decisions", "order_id", "TEXT")
+        self._ensure_column("candidate_decisions", "details_json", "TEXT")
         self._ensure_column("fills", "condition_id", "TEXT")
         self._ensure_column("fills", "outcome_side", "TEXT")
         self._ensure_column("fills", "side", "TEXT")

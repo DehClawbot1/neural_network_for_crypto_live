@@ -2,6 +2,7 @@ import logging
 import random
 import threading
 import time
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -55,6 +56,11 @@ class ShadowPurgatory:
         bundle = joblib.load(bundle_path)
         self.model = bundle["model"]
         self.feature_cols = bundle["features"]
+        self.autofill_missing_lags = str(os.getenv("SHADOW_AUTOFILL_MISSING_LAGS", "true")).strip().lower() in {"1", "true", "yes", "on"}
+        self.disable_when_missing = str(os.getenv("SHADOW_DISABLE_ON_MISSING_FEATURES", "true")).strip().lower() in {"1", "true", "yes", "on"}
+        self.missing_warning_cooldown_sec = int(os.getenv("SHADOW_MISSING_WARNING_COOLDOWN_SEC", "300") or 300)
+        self._last_missing_warning_ts = 0.0
+        self._last_missing_signature = None
 
     @staticmethod
     def _resolve_bundle_path(model_bundle_path=None):
@@ -82,15 +88,66 @@ class ShadowPurgatory:
         except Exception:
             return 20.0
 
+    def _warn_missing_features(self, missing):
+        missing_sig = tuple(sorted(str(m) for m in missing))
+        now_ts = time.time()
+        if (
+            self._last_missing_signature == missing_sig
+            and (now_ts - self._last_missing_warning_ts) < self.missing_warning_cooldown_sec
+        ):
+            return
+        self._last_missing_signature = missing_sig
+        self._last_missing_warning_ts = now_ts
+        logging.warning("Missing features for shadow intent: %s", list(missing_sig)[:10])
+
+    def _autofill_lag_feature(self, frame: pd.DataFrame, feature_name: str):
+        if "_lag_" not in feature_name:
+            return False
+        base_name = feature_name.split("_lag_")[0]
+        if base_name in frame.columns:
+            frame[feature_name] = frame[base_name]
+            return True
+        if base_name == "entry_price":
+            for fallback in ("price", "current_price", "market_last_trade_price", "best_ask", "best_bid"):
+                if fallback in frame.columns:
+                    frame[feature_name] = frame[fallback]
+                    return True
+        if base_name == "spread":
+            if "spread" in frame.columns:
+                frame[feature_name] = frame["spread"]
+                return True
+            if "best_ask" in frame.columns and "best_bid" in frame.columns:
+                ask = pd.to_numeric(frame["best_ask"], errors="coerce").fillna(0.0)
+                bid = pd.to_numeric(frame["best_bid"], errors="coerce").fillna(0.0)
+                frame[feature_name] = (ask - bid).clip(lower=0.0)
+                return True
+            frame[feature_name] = 0.0
+            return True
+        frame[feature_name] = 0.0
+        return True
+
+    def _prepare_features_for_model(self, features_df: pd.DataFrame):
+        prepared = features_df.copy()
+        if self.autofill_missing_lags:
+            for feature_name in self.feature_cols:
+                if feature_name in prepared.columns:
+                    continue
+                self._autofill_lag_feature(prepared, feature_name)
+        missing = [f for f in self.feature_cols if f not in prepared.columns]
+        return prepared, missing
+
     def log_intent(self, signal, features_df):
         try:
             if features_df is None or features_df.empty:
                 return 0.0
-            missing = [f for f in self.feature_cols if f not in features_df.columns]
+            prepared_df, missing = self._prepare_features_for_model(features_df)
             if missing:
-                logging.warning("Missing features for shadow intent: %s", missing[:10])
-                return 0.0
-            X = features_df[self.feature_cols].copy()
+                self._warn_missing_features(missing)
+                if self.disable_when_missing:
+                    return 0.0
+                for feature_name in missing:
+                    prepared_df[feature_name] = 0.0
+            X = prepared_df[self.feature_cols].copy()
             meta_prob = float(self.model.predict_proba(X)[:, 1][0])
             expected_slip_bps = self._get_bucket_slippage(meta_prob)
             expected_slip_pct = expected_slip_bps / 10000.0

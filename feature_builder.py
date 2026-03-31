@@ -191,11 +191,14 @@ class FeatureBuilder:
         wallet_info = self.wallet_stats.get(wallet, {})
         feature_row = {
             "timestamp": signal.get("timestamp"),
+            "last_trade_timestamp": signal.get("last_trade_timestamp", signal.get("timestamp")),
+            "signal_observed_at": signal.get("signal_observed_at"),
+            "market_data_timestamp": signal.get("market_data_timestamp", market_row.get("timestamp")),
             "trader_wallet": wallet,
             "market_title": signal.get("market_title", signal.get("market")),
             "condition_id": condition_id,
             "token_id": token_id,
-            "market_slug": market_row.get("slug"),
+            "market_slug": market_row.get("slug", signal.get("market_slug")),
             "order_side": signal.get("order_side", signal.get("trade_side")),
             "trade_side": signal.get("trade_side", signal.get("order_side")),
             "outcome_side": signal.get("outcome_side", signal.get("side")),
@@ -224,6 +227,7 @@ class FeatureBuilder:
             "liquidity_score": liquidity_score,
             "volume_score": volume_score,
             "market_last_trade_price": last_trade_price,
+            "market_timestamp": market_row.get("timestamp"),
             "probability_momentum": probability_momentum,
             "volatility_score": volatility_score,
             "whale_consensus_score": whale_consensus_score,

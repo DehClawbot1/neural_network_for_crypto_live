@@ -33,6 +33,11 @@ class TradeManager:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.positions_file = self.logs_dir / "positions.csv"
         self.closed_file = self.logs_dir / "closed_positions.csv"
+        self._empty_reconciled_streak = 0
+        self._max_empty_reconciled_streak = max(
+            1,
+            int(os.getenv("MAX_EMPTY_RECONCILED_STREAK", "3") or 3),
+        )
         logger.info("[+] Initialized TradeManager.")
 
     def _compose_trade_key(self, token_id=None, condition_id=None, outcome_side=None, market=None) -> Optional[str]:
@@ -282,13 +287,26 @@ class TradeManager:
             return
 
         if reconciled_positions_df is None or reconciled_positions_df.empty:
+            self._empty_reconciled_streak += 1
             if self.active_trades:
                 removed = self._prune_local_dust_trades(min_notional=0.01)
                 if removed > 0:
                     logger.info("Pruned %s local dust trades while reconciled positions were empty.", removed)
                 if self.active_trades:
-                    logger.warning("Reconciled positions empty. Keeping %s active_trades in memory to prevent amnesia.", len(self.active_trades))
+                    if self._empty_reconciled_streak >= self._max_empty_reconciled_streak:
+                        logger.error(
+                            "Reconciled positions empty for %s consecutive checks. Closing %s stale local trades to prevent ghost loops.",
+                            self._empty_reconciled_streak,
+                            len(self.active_trades),
+                        )
+                        for trade_key, trade in list(self.active_trades.items()):
+                            trade.state = TradeState.CLOSED
+                            trade.close_reason = trade.close_reason or "exchange_reconciliation_empty_streak"
+                            self.active_trades.pop(trade_key, None)
+                    else:
+                        logger.warning("Reconciled positions empty. Keeping %s active_trades in memory to prevent amnesia.", len(self.active_trades))
             return
+        self._empty_reconciled_streak = 0
 
         reconciled_count = len(reconciled_positions_df.index)
         current_open_count = sum(

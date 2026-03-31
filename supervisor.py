@@ -6,6 +6,7 @@ import logging
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
+from pathlib import Path
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
@@ -79,6 +80,9 @@ EXECUTION_FILE = "logs/execution_log.csv"
 SIGNALS_FILE = "logs/signals.csv"
 RAW_CANDIDATES_FILE = "logs/raw_candidates.csv"
 MARKETS_FILE = "logs/markets.csv"
+CANDIDATE_DECISIONS_FILE = "logs/candidate_decisions.csv"
+CANDIDATE_CYCLE_STATS_FILE = "logs/candidate_cycle_stats.csv"
+ALWAYS_ON_STATE_FILE = Path("logs/always_on_slug_state.json")
 
 
 class StatefulRecurrentBrain:
@@ -174,6 +178,88 @@ def append_csv_frame(path, df):
     if df is None or df.empty:
         return
     df.to_csv(path, mode="a", header=not os.path.exists(path), index=False)
+
+
+def _is_truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return float(value) != 0.0
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _parse_timestamp_utc(value):
+    if value in (None, "", "nan", "None"):
+        return None
+    try:
+        numeric = pd.to_numeric(value, errors="coerce")
+        if pd.notna(numeric):
+            numeric = float(numeric)
+            if numeric > 1e17:
+                ts = pd.to_datetime(numeric, utc=True, errors="coerce", unit="ns")
+            elif numeric > 1e14:
+                ts = pd.to_datetime(numeric, utc=True, errors="coerce", unit="us")
+            elif numeric > 1e11:
+                ts = pd.to_datetime(numeric, utc=True, errors="coerce", unit="ms")
+            elif numeric > 1e9:
+                ts = pd.to_datetime(numeric, utc=True, errors="coerce", unit="s")
+            else:
+                ts = pd.to_datetime(value, utc=True, errors="coerce")
+        else:
+            ts = pd.to_datetime(value, utc=True, errors="coerce")
+        if pd.isna(ts):
+            return None
+        return ts
+    except Exception:
+        return None
+
+
+def _signal_age_seconds(signal_row: dict):
+    if not isinstance(signal_row, dict):
+        return None
+    ts_cols = (
+        "signal_observed_at",
+        "market_data_timestamp",
+        "timestamp",
+        "updated_at",
+        "market_timestamp",
+        "market_quote_timestamp",
+        "market_snapshot_timestamp",
+        "market_updated_at",
+        "market_last_trade_ts",
+        "last_trade_timestamp",
+    )
+    for col in ts_cols:
+        ts = _parse_timestamp_utc(signal_row.get(col))
+        if ts is not None:
+            return max(0.0, (pd.Timestamp.now(tz="UTC") - ts).total_seconds())
+    return None
+
+
+def _reject_category(reason: str):
+    text = str(reason or "").strip().lower()
+    if text in {"rule_veto"}:
+        return "rule_veto"
+    if "size" in text or "min" in text:
+        return "min_size"
+    if "freeze" in text or "kill_switch" in text or "kill-switch" in text:
+        return "freeze"
+    if "orderbook" in text or "liquidity" in text or "spread" in text:
+        return "no_liquidity"
+    if "stale" in text or "freshness" in text:
+        return "stale_market_data"
+    if "duplicate" in text:
+        return "duplicate"
+    if "model" in text:
+        return "model_gate"
+    return "other"
 
 
 def log_raw_candidates(candidates_df):
@@ -552,6 +638,31 @@ def main_loop():
             work = work.drop_duplicates(subset=dedupe_cols, keep="first")
         return work.reset_index(drop=True)
 
+    def _annotate_signal_freshness(signals_df: pd.DataFrame, observed_ts):
+        if signals_df is None or signals_df.empty:
+            return signals_df
+        work = signals_df.copy()
+        observed_iso = str(observed_ts)
+        if "last_trade_timestamp" not in work.columns:
+            work["last_trade_timestamp"] = work.get("timestamp")
+        else:
+            work["last_trade_timestamp"] = work["last_trade_timestamp"].where(
+                work["last_trade_timestamp"].notna(), work.get("timestamp")
+            )
+        if "signal_observed_at" not in work.columns:
+            work["signal_observed_at"] = observed_iso
+        else:
+            work["signal_observed_at"] = work["signal_observed_at"].where(
+                work["signal_observed_at"].notna(), observed_iso
+            )
+        if "market_data_timestamp" not in work.columns:
+            work["market_data_timestamp"] = observed_iso
+        else:
+            work["market_data_timestamp"] = work["market_data_timestamp"].where(
+                work["market_data_timestamp"].notna(), observed_iso
+            )
+        return work
+
     def _coerce_confidence(value, default=0.5):
         try:
             conf = float(value)
@@ -627,12 +738,115 @@ def main_loop():
         return targets
 
     always_on_enabled = os.getenv("ALWAYS_ON_MARKET_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
-    always_on_slug = str(os.getenv("ALWAYS_ON_MARKET_SLUG", "btc-updown-5m-1774926600") or "").strip()
+    configured_always_on_slug = str(os.getenv("ALWAYS_ON_MARKET_SLUG", "btc-updown-5m-1774926600") or "").strip()
+    always_on_slug = configured_always_on_slug
     always_on_only = os.getenv("ALWAYS_ON_ONLY", "false").strip().lower() in {"1", "true", "yes", "on"}
     always_on_force_entry = os.getenv("ALWAYS_ON_FORCE_ENTRY", "true").strip().lower() in {"1", "true", "yes", "on"}
     always_on_signal_size = float(os.getenv("ALWAYS_ON_SIGNAL_SIZE", "25") or 25)
+    always_on_rotate_prefix = "btc-updown-5m-"
+    if ALWAYS_ON_STATE_FILE.exists():
+        try:
+            persisted_state = json.loads(ALWAYS_ON_STATE_FILE.read_text(encoding="utf-8"))
+            persisted_slug = str(persisted_state.get("resolved_slug") or "").strip()
+            if (
+                persisted_slug
+                and configured_always_on_slug.lower().startswith(always_on_rotate_prefix)
+                and persisted_slug.lower().startswith(always_on_rotate_prefix)
+            ):
+                always_on_slug = persisted_slug
+                logging.info(
+                    "Loaded persisted rotating always-on slug: configured=%s persisted=%s",
+                    configured_always_on_slug,
+                    always_on_slug,
+                )
+        except Exception as exc:
+            logging.warning("Failed to load persisted always-on slug state: %s", exc)
+
+    def _persist_always_on_slug(resolved_slug: str):
+        try:
+            ALWAYS_ON_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            ALWAYS_ON_STATE_FILE.write_text(
+                json.dumps(
+                    {
+                        "configured_slug": configured_always_on_slug,
+                        "resolved_slug": str(resolved_slug or ""),
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                    default=str,
+                ),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logging.warning("Failed to persist always-on slug state (%s): %s", resolved_slug, exc)
+
+    entry_max_market_staleness_sec = float(os.getenv("ENTRY_MAX_MARKET_STALENESS_SEC", "90") or 90)
+    entry_require_market_timestamp = _is_truthy(os.getenv("ENTRY_REQUIRE_MARKET_TIMESTAMP", "false"))
+    enable_calibration_gate = _is_truthy(os.getenv("ENABLE_CALIBRATION_GATE", "true"))
+    calibration_lookback_rows = max(50, int(os.getenv("CALIBRATION_LOOKBACK_ROWS", "500") or 500))
+    calibration_edge_margin = float(os.getenv("CALIBRATION_EDGE_MARGIN", "0.0015") or 0.0015)
+    calibration_min_edge = float(os.getenv("CALIBRATION_MIN_EDGE", "0.0005") or 0.0005)
+
+    max_session_drawdown_usdc = float(os.getenv("SESSION_MAX_DRAWDOWN_USDC", "8.0") or 8.0)
+    max_session_failed_entries = max(1, int(os.getenv("SESSION_MAX_FAILED_ENTRIES", "8") or 8))
+    max_session_reconciliation_mismatches = max(1, int(os.getenv("SESSION_MAX_RECON_MISMATCHES", "4") or 4))
+    session_start_balance = None
+    session_peak_balance = None
+    session_failed_entries = 0
+    session_reconciliation_mismatch_count = 0
+    session_kill_switch_active = False
+    session_kill_switch_reason = None
+
+    def _compute_calibrated_edge(signal_row: dict):
+        p_tp = _safe_float(signal_row.get("p_tp_before_sl", signal_row.get("confidence", 0.0)), default=0.0)
+        expected_return = _safe_float(signal_row.get("expected_return", 0.0), default=0.0)
+        calibrated_prob_edge = max(0.0, p_tp - 0.5)
+        return calibrated_prob_edge * expected_return
+
+    def _load_calibration_baseline():
+        default_baseline = calibration_min_edge
+        try:
+            rows = db.query_all(
+                """
+                SELECT calibrated_edge
+                FROM candidate_decisions
+                WHERE calibrated_edge IS NOT NULL
+                  AND calibrated_edge > 0
+                ORDER BY decision_id DESC
+                LIMIT ?
+                """,
+                (calibration_lookback_rows,),
+            )
+            values = []
+            for r in rows:
+                v = _safe_float(r.get("calibrated_edge"), default=float("nan"))
+                if np.isnan(v) or v <= 0:
+                    continue
+                values.append(v)
+            if len(values) < 20:
+                return default_baseline
+            return max(default_baseline, float(np.quantile(values, 0.60)))
+        except Exception:
+            return default_baseline
+
+    def _update_session_drawdown(balance_now):
+        nonlocal session_start_balance, session_peak_balance, session_kill_switch_active, session_kill_switch_reason
+        if balance_now is None:
+            return
+        balance_now = _safe_float(balance_now, default=0.0)
+        if balance_now <= 0:
+            return
+        if session_start_balance is None:
+            session_start_balance = balance_now
+        if session_peak_balance is None:
+            session_peak_balance = balance_now
+        session_peak_balance = max(session_peak_balance, balance_now)
+        drawdown = session_peak_balance - balance_now
+        if drawdown >= max_session_drawdown_usdc and not session_kill_switch_active:
+            session_kill_switch_active = True
+            session_kill_switch_reason = f"session_drawdown_limit_hit ({drawdown:.4f} >= {max_session_drawdown_usdc:.4f})"
 
     def _inject_always_on_signal(signals_df: pd.DataFrame, markets_df: pd.DataFrame):
+        nonlocal always_on_slug
         if not always_on_enabled or not always_on_slug:
             return signals_df, markets_df
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -695,6 +909,9 @@ def main_loop():
                             always_on_slug,
                             resolved_slug,
                         )
+                        if resolved_slug and resolved_slug != always_on_slug:
+                            always_on_slug = resolved_slug
+                            _persist_always_on_slug(resolved_slug)
         if target_rows.empty:
             logging.warning("Always-on market slug not found this cycle: %s", always_on_slug)
             return out_signals, out_markets
@@ -750,17 +967,57 @@ def main_loop():
             str(token_id)[:16],
             signal_price,
         )
+        if resolved_slug and resolved_slug.lower().startswith(always_on_rotate_prefix):
+            _persist_always_on_slug(resolved_slug)
         return out_signals, out_markets
 
 
     while True:
         try:
+            cycle_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
             pre_cycle_entry_freeze = False
             pre_cycle_freeze_reason = None
             pre_cycle_freeze_detail = {}
             _reset_inference_runtime_guard()
-            if trading_mode == "live" and order_manager is not None and hasattr(order_manager, "risk") and hasattr(order_manager.risk, "reset_failed_orders"):
+            reset_failed_each_cycle = _is_truthy(os.getenv("RESET_FAILED_ORDERS_EACH_CYCLE", "false"))
+            if (
+                reset_failed_each_cycle
+                and trading_mode == "live"
+                and order_manager is not None
+                and hasattr(order_manager, "risk")
+                and hasattr(order_manager.risk, "reset_failed_orders")
+            ):
                 order_manager.risk.reset_failed_orders()
+
+            if trading_mode == "live" and order_manager is not None:
+                try:
+                    bal_now, _ = order_manager._get_available_balance(
+                        asset_type="COLLATERAL",
+                        use_onchain_fallback=False,
+                    )
+                    _update_session_drawdown(bal_now)
+                except Exception:
+                    pass
+
+            if session_kill_switch_active:
+                pre_cycle_entry_freeze = True
+                pre_cycle_freeze_reason = "session_kill_switch"
+                pre_cycle_freeze_detail = {
+                    "reason": session_kill_switch_reason or "session_limit_hit",
+                    "failed_entries": session_failed_entries,
+                    "reconciliation_mismatches": session_reconciliation_mismatch_count,
+                    "max_failed_entries": max_session_failed_entries,
+                    "max_reconciliation_mismatches": max_session_reconciliation_mismatches,
+                    "max_drawdown_usdc": max_session_drawdown_usdc,
+                    "session_start_balance": session_start_balance,
+                    "session_peak_balance": session_peak_balance,
+                }
+                autonomous_monitor.write_heartbeat(
+                    "risk",
+                    status="error",
+                    message="session_kill_switch_active",
+                    extra=pre_cycle_freeze_detail,
+                )
             if trading_mode == "live" and reconciliation_service is not None:
                 try:
                     sync_summary = reconciliation_service.sync_orders_and_fills()
@@ -784,6 +1041,16 @@ def main_loop():
                         + len(recon_report.get("order_mismatches", []))
                     )
                     if mismatch_count > 0:
+                        session_reconciliation_mismatch_count += 1
+                        if (
+                            session_reconciliation_mismatch_count >= max_session_reconciliation_mismatches
+                            and not session_kill_switch_active
+                        ):
+                            session_kill_switch_active = True
+                            session_kill_switch_reason = (
+                                "session_reconciliation_mismatch_limit_hit "
+                                f"({session_reconciliation_mismatch_count} >= {max_session_reconciliation_mismatches})"
+                            )
                         pre_cycle_entry_freeze = True
                         pre_cycle_freeze_reason = "precycle_reconciliation_mismatch"
                         pre_cycle_freeze_detail = {
@@ -804,6 +1071,7 @@ def main_loop():
                             extra=pre_cycle_freeze_detail,
                         )
                     else:
+                        session_reconciliation_mismatch_count = 0
                         autonomous_monitor.write_heartbeat(
                             "reconciliation",
                             status="ok",
@@ -835,6 +1103,8 @@ def main_loop():
                 signals_df = _dedupe_signals_df(signals_df)
             signals_df, markets_df = _inject_always_on_signal(signals_df, markets_df)
             signals_df = _dedupe_signals_df(signals_df)
+            cycle_observed_iso = datetime.now(timezone.utc).isoformat()
+            signals_df = _annotate_signal_freshness(signals_df, cycle_observed_iso)
             if always_on_enabled and always_on_only and signals_df is not None and not signals_df.empty:
                 # Keep ALWAYS_ON_ONLY robust when rotating BTC 5m slugs change every round.
                 # Prefer synthetic pinned signals; fall back to slug filtering only if needed.
@@ -994,6 +1264,7 @@ def main_loop():
                 logging.info("No scored signals generated. Checking active positions...")
             sort_cols = [c for c in ["risk_adjusted_ev", "entry_ev", "execution_quality_score", "edge_score", "p_tp_before_sl", "confidence", "normalized_trade_size"] if c in scored_df.columns]
             scored_df = scored_df.sort_values(by=sort_cols, ascending=[False] * len(sort_cols))
+            calibration_baseline = _load_calibration_baseline() if enable_calibration_gate else calibration_min_edge
 
             # Suppress duplicate entries / repeated token spam
             if "token_id" in scored_df.columns:
@@ -1037,6 +1308,16 @@ def main_loop():
                 if mismatch_detector is not None:
                     mismatch_summary = mismatch_detector.detect(current_active_trades, reconciled_positions_df)
                     if mismatch_summary.get("freeze_entries"):
+                        session_reconciliation_mismatch_count += 1
+                        if (
+                            session_reconciliation_mismatch_count >= max_session_reconciliation_mismatches
+                            and not session_kill_switch_active
+                        ):
+                            session_kill_switch_active = True
+                            session_kill_switch_reason = (
+                                "session_reconciliation_mismatch_limit_hit "
+                                f"({session_reconciliation_mismatch_count} >= {max_session_reconciliation_mismatches})"
+                            )
                         live_entry_freeze = True
                         freeze_reason = mismatch_summary.get("source") or "state_mismatch"
                         freeze_detail = mismatch_summary.get("detail", {}) or {}
@@ -1051,6 +1332,7 @@ def main_loop():
                         )
                         autonomous_monitor.write_heartbeat("reconciliation", status="error", message="entry_freeze_state_mismatch", extra=freeze_detail)
                     elif previous_entry_freeze_active:
+                        session_reconciliation_mismatch_count = 0
                         logging.info("Entry freeze cleared (previous_reason=%s)", previous_entry_freeze_reason or "state_mismatch")
 
             previous_entry_freeze_active = live_entry_freeze
@@ -1059,24 +1341,156 @@ def main_loop():
             _max_pos = getattr(TradingConfig, 'MAX_CONCURRENT_POSITIONS', 5)
             _candidate_skip_logging = os.getenv("ENABLE_CANDIDATE_SKIP_LOGGING", "true").strip().lower() in {"1", "true", "yes", "on"}
             _candidate_skip_counts = {}
+            _candidate_stats = {
+                "candidates_seen": 0,
+                "candidates_tradable": 0,
+                "candidates_rejected": 0,
+                "entries_sent": 0,
+                "fills_received": 0,
+            }
+            _candidate_decision_rows = []
 
-            def _log_candidate_skip(signal_row: dict, reason: str, **extra):
-                _candidate_skip_counts[reason] = _candidate_skip_counts.get(reason, 0) + 1
-                if not _candidate_skip_logging:
-                    return
+            def _record_candidate_decision(
+                signal_row: dict,
+                *,
+                final_decision: str,
+                reject_reason: str | None = None,
+                gate: str | None = None,
+                model_action: str | None = None,
+                proposed_size_usdc: float | None = None,
+                final_size_usdc: float | None = None,
+                available_balance: float | None = None,
+                order_id: str | None = None,
+                **extra,
+            ):
+                nonlocal session_failed_entries, session_kill_switch_active, session_kill_switch_reason
+
+                reject_reason_norm = str(reject_reason or "").strip().lower() or None
+                reject_category = _reject_category(reject_reason_norm) if reject_reason_norm else None
+                calibrated_edge = _compute_calibrated_edge(signal_row)
                 payload = {
-                    "reason": reason,
+                    "cycle_id": cycle_id,
+                    "candidate_id": f"{cycle_id}:{len(_candidate_decision_rows) + 1}",
                     "token_id": normalize_token_id(signal_row.get("token_id")),
                     "condition_id": signal_row.get("condition_id"),
-                    "market": signal_row.get("market_title", signal_row.get("market")),
                     "outcome_side": signal_row.get("outcome_side", signal_row.get("side")),
+                    "market": signal_row.get("market_title", signal_row.get("market")),
+                    "market_slug": signal_row.get("market_slug"),
+                    "trader_wallet": signal_row.get("trader_wallet", signal_row.get("wallet_copied")),
                     "entry_intent": signal_row.get("entry_intent"),
-                    "confidence": float(signal_row.get("confidence", 0.0) or 0.0),
-                    "signal_label": signal_row.get("signal_label"),
+                    "model_action": model_action,
+                    "final_decision": str(final_decision or "SKIPPED"),
+                    "reject_reason": reject_reason_norm,
+                    "reject_category": reject_category,
+                    "gate": gate,
+                    "confidence": _safe_float(signal_row.get("confidence", 0.0), default=0.0),
+                    "p_tp_before_sl": _safe_float(signal_row.get("p_tp_before_sl", 0.0), default=0.0),
+                    "expected_return": _safe_float(signal_row.get("expected_return", 0.0), default=0.0),
+                    "edge_score": _safe_float(signal_row.get("edge_score", 0.0), default=0.0),
+                    "calibrated_edge": calibrated_edge,
+                    "calibrated_baseline": calibration_baseline,
+                    "proposed_size_usdc": _safe_float(proposed_size_usdc, default=0.0) if proposed_size_usdc is not None else None,
+                    "final_size_usdc": _safe_float(final_size_usdc, default=0.0) if final_size_usdc is not None else None,
+                    "available_balance": _safe_float(available_balance, default=0.0) if available_balance is not None else None,
+                    "order_id": str(order_id) if order_id is not None else None,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
                 }
-                for key, value in extra.items():
-                    if value is not None:
-                        payload[key] = value
+                details_json = json.dumps(extra or {}, default=str, separators=(",", ":"))
+                try:
+                    db.execute(
+                        """
+                        INSERT INTO candidate_decisions (
+                            cycle_id, candidate_id, token_id, condition_id, outcome_side, market,
+                            market_slug, trader_wallet, entry_intent, model_action, final_decision,
+                            reject_reason, reject_category, gate, confidence, p_tp_before_sl,
+                            expected_return, edge_score, calibrated_edge, calibrated_baseline,
+                            proposed_size_usdc, final_size_usdc, available_balance, order_id, details_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            payload["cycle_id"],
+                            payload["candidate_id"],
+                            payload["token_id"],
+                            payload["condition_id"],
+                            payload["outcome_side"],
+                            payload["market"],
+                            payload["market_slug"],
+                            payload["trader_wallet"],
+                            payload["entry_intent"],
+                            payload["model_action"],
+                            payload["final_decision"],
+                            payload["reject_reason"],
+                            payload["reject_category"],
+                            payload["gate"],
+                            payload["confidence"],
+                            payload["p_tp_before_sl"],
+                            payload["expected_return"],
+                            payload["edge_score"],
+                            payload["calibrated_edge"],
+                            payload["calibrated_baseline"],
+                            payload["proposed_size_usdc"],
+                            payload["final_size_usdc"],
+                            payload["available_balance"],
+                            payload["order_id"],
+                            details_json,
+                            payload["created_at"],
+                        ),
+                    )
+                except Exception as exc:
+                    logging.warning("Candidate decision DB logging failed: %s", exc)
+
+                csv_payload = dict(payload)
+                csv_payload["details_json"] = details_json
+                _candidate_decision_rows.append(csv_payload)
+
+                if reject_reason_norm:
+                    _candidate_skip_counts[reject_reason_norm] = _candidate_skip_counts.get(reject_reason_norm, 0) + 1
+                    _candidate_stats["candidates_rejected"] += 1
+                    if reject_category == "no_liquidity":
+                        _candidate_stats.setdefault("rejected_no_liquidity", 0)
+                        _candidate_stats["rejected_no_liquidity"] += 1
+                if payload["order_id"]:
+                    _candidate_stats["entries_sent"] += 1
+                if payload["final_decision"] == "ENTRY_FILLED":
+                    _candidate_stats["fills_received"] += 1
+
+                if reject_reason_norm in {
+                    "live_entry_rejected_or_missing_order_id",
+                    "live_entry_unfilled_after_cancel",
+                    "live_entry_submit_exception",
+                    "live_wait_for_fill_exception",
+                }:
+                    session_failed_entries += 1
+                    if session_failed_entries >= max_session_failed_entries and not session_kill_switch_active:
+                        session_kill_switch_active = True
+                        session_kill_switch_reason = (
+                            "session_failed_entry_limit_hit "
+                            f"({session_failed_entries} >= {max_session_failed_entries})"
+                        )
+
+                if _candidate_skip_logging and payload["final_decision"] == "REJECTED":
+                    try:
+                        logging.info("CANDIDATE_REJECT %s", json.dumps(payload, default=str, separators=(",", ":")))
+                    except Exception:
+                        logging.info(
+                            "CANDIDATE_REJECT reason=%s token=%s market=%s",
+                            reject_reason_norm,
+                            payload.get("token_id"),
+                            payload.get("market"),
+                        )
+
+                return payload
+
+            def _log_candidate_skip(signal_row: dict, reason: str, gate: str | None = None, **extra):
+                payload = _record_candidate_decision(
+                    signal_row,
+                    final_decision="SKIPPED",
+                    reject_reason=reason,
+                    gate=gate or "entry_gate",
+                    **extra,
+                )
+                if not _candidate_skip_logging:
+                    return
                 try:
                     logging.info("CANDIDATE_SKIP %s", json.dumps(payload, default=str, separators=(",", ":")))
                 except Exception:
@@ -1100,15 +1514,31 @@ def main_loop():
             # FIX 1B: Normal entry loop
             for _, row in scored_df.iterrows():
                 signal_row = row.to_dict()
+                _candidate_stats["candidates_seen"] += 1
                 token_id_norm = normalize_token_id(signal_row.get("token_id"))
                 token_id = str(token_id_norm or "")
                 entry_intent = str(signal_row.get("entry_intent", "OPEN_LONG") or "OPEN_LONG").upper()
                 market_key = _trade_key_from_signal(signal_row)
 
+                market_age_sec = _signal_age_seconds(signal_row)
+                if market_age_sec is None and entry_require_market_timestamp:
+                    _log_candidate_skip(signal_row, "missing_market_timestamp", gate="freshness")
+                    continue
+                if market_age_sec is not None and market_age_sec > entry_max_market_staleness_sec:
+                    _log_candidate_skip(
+                        signal_row,
+                        "stale_market_data",
+                        gate="freshness",
+                        market_age_seconds=round(market_age_sec, 3),
+                        max_age_seconds=entry_max_market_staleness_sec,
+                    )
+                    continue
+
                 if len(trade_manager.active_trades) >= _max_pos:
                     _log_candidate_skip(
                         signal_row,
                         "max_concurrent_positions_reached",
+                        gate="capacity",
                         active_positions=len(trade_manager.active_trades),
                         max_positions=_max_pos,
                     )
@@ -1118,6 +1548,7 @@ def main_loop():
                     _log_candidate_skip(
                         signal_row,
                         "invalid_candidate_identity_or_intent",
+                        gate="identity",
                         has_market_key=bool(market_key),
                         has_token_id=bool(token_id),
                         entry_intent=entry_intent,
@@ -1127,7 +1558,7 @@ def main_loop():
                 # FIX: Check dynamic active_trades to prevent Triple-Buy duplicates in the same loop
                 if market_key in active_trade_keys or market_key in trade_manager.active_trades:
                     logging.info("Prevented duplicate entry: Trade already open for %s.", market_key)
-                    _log_candidate_skip(signal_row, "duplicate_active_trade", market_key=market_key)
+                    _log_candidate_skip(signal_row, "duplicate_active_trade", gate="dedupe", market_key=market_key)
                     continue
                 if trading_mode == "live" and live_entry_freeze:
                     logging.warning(
@@ -1139,13 +1570,23 @@ def main_loop():
                     )
                     _log_candidate_skip(
                         signal_row,
-                        "live_entry_freeze",
+                        "freeze",
+                        gate="freeze",
                         freeze_reason=freeze_reason or "state_mismatch",
                         local_count=freeze_detail.get("local_count"),
                         live_count=freeze_detail.get("live_count"),
                     )
                     continue
+                if session_kill_switch_active:
+                    _log_candidate_skip(
+                        signal_row,
+                        "freeze",
+                        gate="kill_switch",
+                        freeze_reason=session_kill_switch_reason or "session_limit_hit",
+                    )
+                    continue
 
+                rule_allows_entry = entry_rule.should_enter(signal_row)
                 action_val = choose_action(
                     signal_row,
                     entry_rule,
@@ -1175,7 +1616,19 @@ def main_loop():
                     logging.warning("Model decision logging failed for %s: %s", token_id, exc)
 
                 if action_val != 0:
-                    # ── BUGFIX: Define confidence BEFORE using it ──
+                    calibrated_edge = _compute_calibrated_edge(signal_row)
+                    calibrated_required = max(calibration_min_edge, calibration_baseline + calibration_edge_margin)
+                    if enable_calibration_gate and calibrated_edge < calibrated_required:
+                        _log_candidate_skip(
+                            signal_row,
+                            "calibration_edge_below_baseline",
+                            gate="calibration",
+                            model_action=action_map.get(action_val, "UNKNOWN"),
+                            calibrated_edge=round(calibrated_edge, 8),
+                            calibrated_baseline=round(calibration_baseline, 8),
+                            calibrated_required=round(calibrated_required, 8),
+                        )
+                        continue
                     confidence = float(signal_row.get("confidence", 0.0) or 0.0)
 
                     # ── Get balance (with paper mode fallback) ──
@@ -1216,7 +1669,9 @@ def main_loop():
                         )
                         _log_candidate_skip(
                             signal_row,
-                            "money_manager_rejected_size",
+                            "min_size",
+                            gate="sizing",
+                            model_action=action_map.get(action_val, "UNKNOWN"),
                             available_balance=round(_available_bal, 6),
                             current_exposure=round(_current_exposure, 6),
                         )
@@ -1230,7 +1685,9 @@ def main_loop():
                             logging.info("OrderBookGuard BLOCKED %s: %s", token_id[:16], ob_check["reason"])
                             _log_candidate_skip(
                                 signal_row,
-                                "orderbook_guard_blocked",
+                                "no_liquidity",
+                                gate="liquidity",
+                                model_action=action_map.get(action_val, "UNKNOWN"),
                                 ob_reason=ob_check.get("reason"),
                             )
                             continue
@@ -1243,44 +1700,84 @@ def main_loop():
                     
                     if fill_price is None or pd.isna(fill_price):
                         logging.warning("Skipping signal with missing fill price for token_id=%s", token_id)
-                        _log_candidate_skip(signal_row, "missing_fill_price")
+                        _log_candidate_skip(
+                            signal_row,
+                            "missing_fill_price",
+                            gate="pricing",
+                            model_action=action_map.get(action_val, "UNKNOWN"),
+                        )
                         continue
+
+                    _candidate_stats["candidates_tradable"] += 1
 
 
                     if trading_mode == "live" and order_manager is not None:
                         # For live mode: submit order first, register trade only on fill
                         from pnl_engine import PNLEngine as _PNLEngine
                         _order_shares = _PNLEngine.shares_from_capital(size_usdc, fill_price)
-                        if getattr(TradingConfig, "USE_MARKET_ORDERS", False):
-                            entry_row, entry_response = order_manager.submit_market_entry(
-                                token_id=token_id,
-                                amount=size_usdc,
-                                side=signal_row.get("order_side", "BUY"),
-                                condition_id=signal_row.get("condition_id"),
-                                outcome_side=signal_row.get("outcome_side", signal_row.get("side")),
+                        try:
+                            if getattr(TradingConfig, "USE_MARKET_ORDERS", False):
+                                entry_row, entry_response = order_manager.submit_market_entry(
+                                    token_id=token_id,
+                                    amount=size_usdc,
+                                    side=signal_row.get("order_side", "BUY"),
+                                    condition_id=signal_row.get("condition_id"),
+                                    outcome_side=signal_row.get("outcome_side", signal_row.get("side")),
+                                )
+                            else:
+                                entry_row, entry_response = order_manager.submit_entry(
+                                    token_id=token_id,
+                                    price=fill_price,
+                                    size=size_usdc,
+                                    side=signal_row.get("order_side", "BUY"),
+                                    condition_id=signal_row.get("condition_id"),
+                                    outcome_side=signal_row.get("outcome_side", signal_row.get("side")),
+                                )
+                        except Exception as exc:
+                            logging.warning("Live entry submit exception for token_id=%s: %s", token_id, exc)
+                            _record_candidate_decision(
+                                signal_row,
+                                final_decision="REJECTED",
+                                reject_reason="live_entry_submit_exception",
+                                gate="execution",
+                                model_action=action_map.get(action_val, "UNKNOWN"),
+                                proposed_size_usdc=size_usdc,
+                                available_balance=_available_bal,
+                                submit_error=str(exc),
                             )
-                        else:
-                            entry_row, entry_response = order_manager.submit_entry(
-                                token_id=token_id,
-                                price=fill_price,
-                                size=size_usdc,
-                                side=signal_row.get("order_side", "BUY"),
-                                condition_id=signal_row.get("condition_id"),
-                                outcome_side=signal_row.get("outcome_side", signal_row.get("side")),
-                            )
+                            continue
                         entry_order_id = (entry_row or {}).get("order_id") or (entry_response or {}).get("orderID") or (entry_response or {}).get("order_id") or (entry_response or {}).get("id")
                         if not entry_order_id:
                             logging.info("Live entry rejected/skipped for token_id=%s reason=%s", token_id, (entry_row or {}).get("reason"))
                             # If order is rejected/skipped, we should potentially revert trade creation in TradeManager
                             # For simplicity, we'll let process_exits handle cleanup later if trade is not filled
-                            _log_candidate_skip(
+                            _record_candidate_decision(
                                 signal_row,
-                                "live_entry_rejected_or_missing_order_id",
+                                final_decision="REJECTED",
+                                reject_reason="live_entry_rejected_or_missing_order_id",
+                                gate="execution",
+                                model_action=action_map.get(action_val, "UNKNOWN"),
+                                proposed_size_usdc=size_usdc,
+                                available_balance=_available_bal,
                                 exchange_reason=(entry_row or {}).get("reason"),
                             )
                             continue
                         
-                        fill_result = order_manager.wait_for_fill(entry_order_id)
+                        try:
+                            fill_result = order_manager.wait_for_fill(entry_order_id)
+                        except Exception as exc:
+                            _record_candidate_decision(
+                                signal_row,
+                                final_decision="REJECTED",
+                                reject_reason="live_wait_for_fill_exception",
+                                gate="execution",
+                                model_action=action_map.get(action_val, "UNKNOWN"),
+                                proposed_size_usdc=size_usdc,
+                                available_balance=_available_bal,
+                                order_id=entry_order_id,
+                                wait_error=str(exc),
+                            )
+                            continue
                         if not fill_result.get("filled"):
                             logging.info("Live entry not filled for token_id=%s; attempting cancel for order_id=%s", token_id, entry_order_id)
                             try:
@@ -1294,9 +1791,14 @@ def main_loop():
                             
                             # If it STILL isn't filled after the race-condition check, safely skip
                             if not fill_result.get("filled"):
-                                _log_candidate_skip(
+                                _record_candidate_decision(
                                     signal_row,
-                                    "live_entry_unfilled_after_cancel",
+                                    final_decision="REJECTED",
+                                    reject_reason="live_entry_unfilled_after_cancel",
+                                    gate="execution",
+                                    model_action=action_map.get(action_val, "UNKNOWN"),
+                                    proposed_size_usdc=size_usdc,
+                                    available_balance=_available_bal,
                                     order_id=entry_order_id,
                                 )
                                 continue
@@ -1320,6 +1822,18 @@ def main_loop():
                         trade.shares = actual_fill_size
                         trade_manager.active_trades[market_key] = trade
                         logging.info("Live trade filled for %s at %s. Shares: %s", token_id, actual_fill_price, actual_fill_size)
+                        _record_candidate_decision(
+                            signal_row,
+                            final_decision="ENTRY_FILLED",
+                            gate="execution",
+                            model_action=action_map.get(action_val, "UNKNOWN"),
+                            proposed_size_usdc=size_usdc,
+                            final_size_usdc=actual_fill_size * actual_fill_price,
+                            available_balance=_available_bal,
+                            order_id=entry_order_id,
+                            fill_price=actual_fill_price,
+                            fill_shares=actual_fill_size,
+                        )
                     else:
                         # Paper trade: register in TradeManager (which logs to execution_log.csv)
                         # FIX C7: Don't also call execute_paper_trade — it creates duplicate log entries
@@ -1334,13 +1848,54 @@ def main_loop():
                                 signal_row.get("signal_label", "UNKNOWN"),
                                 confidence,
                             )
+                            _record_candidate_decision(
+                                signal_row,
+                                final_decision="PAPER_OPENED",
+                                gate="paper_execution",
+                                model_action=action_map.get(action_val, "UNKNOWN"),
+                                proposed_size_usdc=size_usdc,
+                                final_size_usdc=size_usdc,
+                                available_balance=_available_bal,
+                                paper_fill_price=fill_price,
+                            )
                         else:
-                            _log_candidate_skip(signal_row, "paper_trade_manager_rejected")
+                            _record_candidate_decision(
+                                signal_row,
+                                final_decision="REJECTED",
+                                reject_reason="paper_trade_manager_rejected",
+                                gate="paper_execution",
+                                model_action=action_map.get(action_val, "UNKNOWN"),
+                                proposed_size_usdc=size_usdc,
+                                available_balance=_available_bal,
+                            )
                 else:
-                    _log_candidate_skip(signal_row, "model_action_ignore", model_action=action_map.get(action_val, "UNKNOWN"))
+                    ignore_reason = "rule_veto" if not rule_allows_entry else "model_action_ignore"
+                    _log_candidate_skip(
+                        signal_row,
+                        ignore_reason,
+                        gate="model_policy",
+                        model_action=action_map.get(action_val, "UNKNOWN"),
+                    )
 
             if _candidate_skip_counts:
                 logging.info("CANDIDATE_SKIP_SUMMARY %s", json.dumps(_candidate_skip_counts, sort_keys=True))
+            if _candidate_decision_rows:
+                try:
+                    append_csv_frame(CANDIDATE_DECISIONS_FILE, pd.DataFrame(_candidate_decision_rows))
+                except Exception as exc:
+                    logging.warning("Failed to append candidate decision CSV: %s", exc)
+            cycle_stats_row = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "cycle_id": cycle_id,
+                "candidates_seen": _candidate_stats.get("candidates_seen", 0),
+                "candidates_tradable": _candidate_stats.get("candidates_tradable", 0),
+                "candidates_rejected": _candidate_stats.get("candidates_rejected", 0),
+                "entries_sent": _candidate_stats.get("entries_sent", 0),
+                "fills_received": _candidate_stats.get("fills_received", 0),
+                "reject_breakdown": json.dumps(_candidate_skip_counts, sort_keys=True),
+            }
+            append_csv_record(CANDIDATE_CYCLE_STATS_FILE, cycle_stats_row)
+            logging.info("CANDIDATE_CYCLE_SUMMARY %s", json.dumps(cycle_stats_row, separators=(",", ":")))
 
             # 4B. Open-position management path for hold / reduce / exit
             # FIX H3: Build price map by token_id for reliable matching

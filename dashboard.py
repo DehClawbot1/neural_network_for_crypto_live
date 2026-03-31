@@ -68,6 +68,8 @@ FILES = {
     "registry": WEIGHTS / "model_registry.csv",
     "shadow": LOGS / "shadow_results.csv",
     "distribution": LOGS / "market_distribution.csv",
+    "candidate_decisions": LOGS / "candidate_decisions.csv",
+    "candidate_cycle_stats": LOGS / "candidate_cycle_stats.csv",
 }
 
 st.set_page_config(page_title="NNC Trading Terminal", page_icon="N", layout="wide", initial_sidebar_state="expanded")
@@ -186,6 +188,38 @@ def load_live_positions_from_db():
                     pd.to_numeric(df["current_price"], errors="coerce").fillna(0) - pd.to_numeric(df["entry_price"], errors="coerce").fillna(0)
                 )
         return df
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(show_spinner=False, ttl=20)
+def load_candidate_decisions_from_db(hours=6):
+    db_path = LOGS / "trading.db"
+    if not db_path.exists():
+        return pd.DataFrame()
+    try:
+        cutoff = (pd.Timestamp.utcnow() - pd.Timedelta(hours=max(1, int(hours)))).isoformat()
+        with sqlite3.connect(str(db_path)) as conn:
+            df = pd.read_sql_query(
+                """
+                SELECT
+                    created_at,
+                    cycle_id,
+                    token_id,
+                    market,
+                    final_decision,
+                    reject_reason,
+                    reject_category,
+                    gate,
+                    order_id
+                FROM candidate_decisions
+                WHERE created_at >= ?
+                ORDER BY decision_id DESC
+                """,
+                conn,
+                params=(cutoff,),
+            )
+        return normalize_dataframe_columns(df)
     except Exception:
         return pd.DataFrame()
 
@@ -386,6 +420,27 @@ def render_metrics(signals_df, positions_df, closed_df, alerts_df, markets_df):
         if sc:
             nc = int(alerts_df[sc].astype(str).str.contains("critical", case=False, na=False).sum())
     nm = int(markets_df["market_id"].nunique()) if not markets_df.empty and "market_id" in markets_df.columns else len(markets_df)
+    cand_df = load_candidate_decisions_from_db(hours=1)
+    cand_seen = int(len(cand_df)) if not cand_df.empty else 0
+    cand_tradable = 0
+    cand_rejected = 0
+    cand_entries_sent = 0
+    cand_fills = 0
+    reject_by_gate = {}
+    if not cand_df.empty:
+        final_col = cand_df["final_decision"].astype(str) if "final_decision" in cand_df.columns else pd.Series(dtype=str)
+        gate_col = cand_df["gate"].astype(str) if "gate" in cand_df.columns else pd.Series(dtype=str)
+        if "gate" in cand_df.columns:
+            cand_tradable = int(cand_df[gate_col.isin(["execution", "paper_execution"])].shape[0])
+        if "final_decision" in cand_df.columns:
+            cand_rejected = int(cand_df[final_col.isin(["SKIPPED", "REJECTED"])].shape[0])
+            cand_fills = int(cand_df[final_col == "ENTRY_FILLED"].shape[0])
+        if "order_id" in cand_df.columns:
+            order_col = cand_df["order_id"].astype(str)
+            cand_entries_sent = int(((~cand_df["order_id"].isna()) & (~order_col.isin(["", "None", "nan"]))).sum())
+        if "gate" in cand_df.columns and "final_decision" in cand_df.columns:
+            rej_df = cand_df[final_col.isin(["SKIPPED", "REJECTED"])]
+            reject_by_gate = rej_df["gate"].fillna("unknown").astype(str).value_counts().head(4).to_dict()
     fa = {k: age_seconds(v) for k, v in [("signals", signals_df), ("markets", markets_df), ("alerts", alerts_df), ("positions", positions_df)]}
     av = [a for a in fa.values() if a is not None]
     ns = sum(1 for a in av if a > st_th)
@@ -402,6 +457,10 @@ def render_metrics(signals_df, positions_df, closed_df, alerts_df, markets_df):
         ("MARKETS WATCHED", str(nm), "clr-default", ""),
         ("CLOSED POSITIONS", str(n_closed), "clr-default", ""),
         ("MAX FRESHNESS AGE", fmt_age(max(av)) if av else "N/A", "clr-amber" if av and max(av) > st_th else "clr-green", ""),
+        ("CANDIDATES 1H", str(cand_seen), "clr-blue", "coverage"),
+        ("TRADABLE 1H", str(cand_tradable), "clr-green" if cand_tradable else "clr-amber", "post-gate"),
+        ("REJECTED 1H", str(cand_rejected), "clr-red" if cand_rejected else "clr-green", "gated out"),
+        ("ENTRIES/FILLS 1H", f"{cand_entries_sent}/{cand_fills}", "clr-cyan", "execution quality"),
     ]
     h = '<div class="metric-strip">'
     for l, v, c, s in cards:
@@ -411,6 +470,8 @@ def render_metrics(signals_df, positions_df, closed_df, alerts_df, markets_df):
         h += '</div>'
     h += '</div>'
     st.markdown(h, unsafe_allow_html=True)
+    if reject_by_gate:
+        st.caption("Rejected by gate (1h): " + " | ".join(f"{k}={v}" for k, v in reject_by_gate.items()))
     st.caption(f"Feed freshness — {' | '.join(f'{k}: {fmt_age(v)}' for k, v in fa.items())} | stale threshold: {st_th}s")
 
 

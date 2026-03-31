@@ -157,14 +157,24 @@ class ReconciliationService:
 
         try:
             trades_payload = self.execution_client.get_trades()
+            sync_all_recent = str(os.getenv("SYNC_ALL_RECENT_REMOTE_TRADES", "true")).strip().lower() in {"1", "true", "yes", "on"}
+            lookback_hours = max(1, int(os.getenv("SYNC_RECENT_TRADES_LOOKBACK_HOURS", "72") or 72))
+            cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=lookback_hours)
             for raw_trade in self._extract_items(trades_payload):
                 trade = self._normalize_trade(raw_trade)
                 if trade is None:
                     continue
-                # Ignore unrelated historical/manual trades that are not connected to
-                # this bot's known orders or currently tracked open position tokens.
-                if trade.get("order_id") not in known_order_ids and trade.get("token_id") not in tracked_tokens:
-                    continue
+                ts = self._parse_timestamp(trade.get("filled_at"))
+                is_recent = bool(ts is not None and not pd.isna(ts) and ts >= cutoff)
+                # Exchange trades are the source of truth for position reconstruction.
+                # Keep all recent trades by default, while still keeping old unrelated
+                # history out of local state.
+                if sync_all_recent:
+                    if not is_recent and trade.get("order_id") not in known_order_ids and trade.get("token_id") not in tracked_tokens:
+                        continue
+                else:
+                    if trade.get("order_id") not in known_order_ids and trade.get("token_id") not in tracked_tokens:
+                        continue
                 self.db.execute(
                     "INSERT OR REPLACE INTO fills (fill_id, order_id, token_id, condition_id, outcome_side, side, price, size, filled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (

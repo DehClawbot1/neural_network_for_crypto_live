@@ -1,5 +1,6 @@
 import logging
 import uuid
+import os
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -19,7 +20,17 @@ class AlertsEngine:
         self.logs_dir = Path(logs_dir)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.alerts_file = self.logs_dir / "alerts.csv"
-        self.probability_move_threshold = probability_move_threshold
+        self.probability_move_threshold = float(
+            os.getenv("PROBABILITY_MOVE_THRESHOLD", str(probability_move_threshold)) or probability_move_threshold
+        )
+        self.whale_min_wallets = int(os.getenv("WHALE_CLUSTER_MIN_WALLETS", "4") or 4)
+        self.whale_min_signals = int(os.getenv("WHALE_CLUSTER_MIN_SIGNALS", "10") or 10)
+        self.whale_critical_wallets = int(
+            os.getenv("WHALE_CLUSTER_CRITICAL_WALLETS", str(max(self.whale_min_wallets + 1, 6))) or max(self.whale_min_wallets + 1, 6)
+        )
+        self.whale_critical_signals = int(
+            os.getenv("WHALE_CLUSTER_CRITICAL_SIGNALS", str(max(self.whale_min_signals * 2, 20))) or max(self.whale_min_signals * 2, 20)
+        )
         self.incident_manager = IncidentManager(self.logs_dir)
 
     def _normalize_alert(self, record: dict):
@@ -121,11 +132,15 @@ class AlertsEngine:
         for market_title, group in grouped:
             unique_wallets = group["trader_wallet"].nunique() if "trader_wallet" in group.columns else 0
             total_signals = len(group)
-            if unique_wallets >= 2:
+            if unique_wallets >= self.whale_min_wallets and total_signals >= self.whale_min_signals:
+                is_critical = (
+                    unique_wallets >= self.whale_critical_wallets
+                    or total_signals >= self.whale_critical_signals
+                )
                 alerts.append(
                     {
                         "alert_type": "WHALE_CLUSTER",
-                        "severity": "warning" if unique_wallets < 4 else "critical",
+                        "severity": "critical" if is_critical else "warning",
                         "status": "open",
                         "source_module": "alerts_engine.whale_cluster",
                         "market": market_title,

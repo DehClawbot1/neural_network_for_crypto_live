@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 import uuid
@@ -263,6 +264,12 @@ class LivePositionBook:
         return verified_rows
 
     def get_open_positions(self):
+        rebuild_on_read = str(os.getenv("LIVE_POSITION_REBUILD_ON_READ", "true")).strip().lower() in {"1", "true", "yes", "on"}
+        if rebuild_on_read:
+            try:
+                self.rebuild_from_db()
+            except Exception as exc:
+                logger.debug("LivePositionBook rebuild_on_read failed: %s", exc)
         rows = self.db.query_all(
             """
             SELECT position_key, token_id, condition_id, outcome_side, shares, avg_entry_price, realized_pnl, last_fill_at, source, status, updated_at
