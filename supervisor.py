@@ -1310,7 +1310,6 @@ def main_loop():
                             trade_manager.active_trades.pop(_make_position_key(token_id=trade.token_id, condition_id=trade.condition_id, outcome_side=trade.outcome_side, market=trade.market), None) # Remove from active trades
 
             # Process any pending exits (e.g., from CLOSE_LONG signals or internal rules)
-            from datetime import timezone
             predictive_exit_targets = _build_predictive_exit_targets(
                 scored_df,
                 trade_manager.get_open_positions(),
