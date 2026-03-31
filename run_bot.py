@@ -1,9 +1,9 @@
-import os
+﻿import os
 import sys
 import logging
 from pathlib import Path
 
-# ── Only load .env if NOT in interactive mode ──
+# â”€â”€ Only load .env if NOT in interactive mode â”€â”€
 if not os.environ.get("_INTERACTIVE_MODE"):
     from dotenv import load_dotenv
     load_dotenv()
@@ -13,7 +13,7 @@ else:
 
 from api_setup import validate_environment
 
-# ── BUG FIX I: Set CPU threading env vars BEFORE any numpy/sklearn import ──
+# â”€â”€ BUG FIX I: Set CPU threading env vars BEFORE any numpy/sklearn import â”€â”€
 try:
     from hardware_config import get_parallel_env_vars, get_sklearn_jobs, get_torch_device, PHYSICAL_CORES, LOGICAL_CORES
     get_parallel_env_vars()
@@ -50,6 +50,13 @@ def is_interactive():
     return os.environ.get("_INTERACTIVE_MODE") == "1"
 
 
+def _supports_unicode_stdout() -> bool:
+    """
+    Return True when stdout encoding can reliably print Unicode box-drawing chars.
+    """
+    encoding = (getattr(sys.stdout, "encoding", "") or "").lower()
+    return "utf" in encoding
+
 def print_banner():
     print("\n=== NEURAL NETWORK FOR CRYPTO ===")
     print("Mode: LIVE-TEST / REAL-TIME DATA")
@@ -69,11 +76,11 @@ def ensure_environment():
         return False
 
     if is_interactive():
-        # In interactive mode, skip .env file validation — creds are in memory
+        # In interactive mode, skip .env file validation â€” creds are in memory
         private_key = os.getenv("PRIVATE_KEY")
         funder = os.getenv("POLYMARKET_FUNDER")
         if private_key and funder:
-            print("[+] Environment OK (interactive mode — credentials in memory)\n")
+            print("[+] Environment OK (interactive mode â€” credentials in memory)\n")
             return True
         else:
             print("[!] Missing PRIVATE_KEY or POLYMARKET_FUNDER.\n")
@@ -101,11 +108,11 @@ def ensure_live_client_ready():
             print("[!] Live client failed: collateral balance payload missing or invalid.\n")
             return False
 
-        # ── BUG FIX B: Extract and display actual balance clearly ──
+        # BUG FIX B: Extract and display actual balance clearly
         clob_balance = 0.0
         for key in ["balance", "available", "available_balance", "amount"]:
             if collateral.get(key) is not None:
-                # FIX C1: Normalize microdollars → dollars
+                # FIX C1: Normalize microdollars -> dollars
                 clob_balance = client._normalize_usdc_balance(collateral[key])
                 break
 
@@ -117,22 +124,31 @@ def ensure_live_client_ready():
             pass
 
         available = clob_balance
-        source = getattr(client, 'credential_source', 'unknown')
-        signature_type = str(getattr(client, 'signature_type', os.getenv("POLYMARKET_SIGNATURE_TYPE", "")))
+        source = getattr(client, "credential_source", "unknown")
+        signature_type = str(getattr(client, "signature_type", os.getenv("POLYMARKET_SIGNATURE_TYPE", "")))
 
         if source not in {"stored_env", "derived_refreshed_env"}:
             print(f"[!] Live client connected through unsupported credential source: {source}\n")
             return False
 
-        print(f"[+] Live client connected successfully!")
+        print("[+] Live client connected successfully!")
         print(f"    Credential source: {source}")
         print(f"    Signature type:    {signature_type}")
-        print(f"    ┌─────────────────────────────────────────┐")
-        print(f"    │  CLOB/API Balance:    ${clob_balance:>12,.2f}   │")
-        print(f"    │  On-chain USDC:       ${onchain_balance:>12,.2f}   │")
-        print(f"    │  ─────────────────────────────────────  │")
-        print(f"    │  SPENDABLE NOW:       ${available:>12,.2f}   │")
-        print(f"    └─────────────────────────────────────────┘")
+
+        if _supports_unicode_stdout():
+            print("    ┌─────────────────────────────────────────┐")
+            print(f"    │  CLOB/API Balance:    ${clob_balance:>12,.2f}   │")
+            print(f"    │  On-chain USDC:       ${onchain_balance:>12,.2f}   │")
+            print("    │  ─────────────────────────────────────  │")
+            print(f"    │  SPENDABLE NOW:       ${available:>12,.2f}   │")
+            print("    └─────────────────────────────────────────┘")
+        else:
+            print("    +-----------------------------------------+")
+            print(f"    |  CLOB/API Balance:    ${clob_balance:>12,.2f}   |")
+            print(f"    |  On-chain USDC:       ${onchain_balance:>12,.2f}   |")
+            print("    |  -------------------------------------  |")
+            print(f"    |  SPENDABLE NOW:       ${available:>12,.2f}   |")
+            print("    +-----------------------------------------+")
         print()
 
         if available <= 0:
@@ -179,7 +195,7 @@ def ensure_optional_rl_model():
         print(f"    (Will resume training from these weights on retrain)\n")
         return True
 
-    # ── BUG FIX A: Bootstrap initial RL weights so they persist ──
+    # â”€â”€ BUG FIX A: Bootstrap initial RL weights so they persist â”€â”€
     print("[!] No RL weights found. Training initial bootstrap weights (1000 steps)...")
     print("    This is a one-time operation. Future runs will resume from saved weights.")
     try:
@@ -324,3 +340,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
