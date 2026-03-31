@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -39,10 +40,21 @@ class StateMismatchDetector:
     def detect(self, active_trades, live_positions_df):
         local_keys = {self._trade_key(trade) for trade in (active_trades or []) if _safe_str(getattr(trade, "token_id", ""))}
         live_keys = set()
+        min_notional = float(os.getenv("MIN_RECONCILED_POSITION_NOTIONAL_USDC", "0.01") or 0.01)
         if live_positions_df is not None and not live_positions_df.empty:
             for _, row in live_positions_df.iterrows():
                 token_id = _safe_str(row.get("token_id", ""))
                 if not token_id:
+                    continue
+                try:
+                    shares = float(row.get("shares", 0.0) or 0.0)
+                    px = float(
+                        row.get("mark_price", row.get("current_price", row.get("avg_entry_price", row.get("entry_price", 0.0))))
+                        or 0.0
+                    )
+                    if shares <= 0 or (shares * max(px, 0.0)) < min_notional:
+                        continue
+                except Exception:
                     continue
                 live_keys.add(
                     (

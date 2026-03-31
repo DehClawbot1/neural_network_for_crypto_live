@@ -143,6 +143,61 @@ def fetch_markets_by_slugs(slugs):
     return df
 
 
+def fetch_markets_by_slug_prefix(prefix: str, limit: int = 500, max_offset: int = 2000, closed: bool = False):
+    """
+    Fetch markets whose slug starts with the provided prefix by scanning paginated gamma markets.
+    Useful for rotating markets like btc-updown-5m-<timestamp>.
+    """
+    slug_prefix = str(prefix or "").strip().lower()
+    if not slug_prefix:
+        return pd.DataFrame()
+
+    session = requests.Session()
+    rows = []
+    seen = set()
+    page_size = max(50, min(int(limit), 500))
+    offsets = list(range(0, int(max_offset) + 1, page_size))
+
+    for offset in offsets:
+        try:
+            markets = _fetch_page(session, closed=closed, limit=page_size, offset=offset)
+        except Exception as exc:
+            logging.warning(
+                "Failed prefix fetch for slug_prefix=%s closed=%s offset=%s: %s",
+                slug_prefix,
+                closed,
+                offset,
+                exc,
+            )
+            break
+        if not markets:
+            break
+        for market in markets:
+            slug = str(market.get("slug") or "").strip().lower()
+            if not slug.startswith(slug_prefix):
+                continue
+            row = _market_to_row(market)
+            dedupe_key = str(row.get("market_id") or row.get("slug") or "")
+            if dedupe_key and dedupe_key in seen:
+                continue
+            if dedupe_key:
+                seen.add(dedupe_key)
+            rows.append(row)
+        if len(markets) < page_size:
+            break
+
+    df = pd.DataFrame(rows)
+    if not df.empty and "slug" in df.columns:
+        df = df.drop_duplicates(subset=["slug"], keep="last")
+    logging.info(
+        "Fetched %s markets by slug prefix '%s' (closed=%s).",
+        len(df),
+        slug_prefix,
+        closed,
+    )
+    return df
+
+
 def save_market_snapshot(markets_df, logs_dir="logs"):
     if markets_df is None or markets_df.empty:
         return

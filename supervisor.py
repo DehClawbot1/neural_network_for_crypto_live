@@ -15,7 +15,12 @@ except Exception:
     RecurrentPPO = None
 
 from leaderboard_scraper import run_scraper_cycle
-from market_monitor import fetch_btc_markets, save_market_snapshot, fetch_markets_by_slugs
+from market_monitor import (
+    fetch_btc_markets,
+    save_market_snapshot,
+    fetch_markets_by_slugs,
+    fetch_markets_by_slug_prefix,
+)
 from feature_builder import FeatureBuilder
 from signal_engine import SignalEngine
 from whale_tracker import WhaleTracker
@@ -643,6 +648,19 @@ def main_loop():
             requested_slug = str(always_on_slug or "").strip().lower()
             if requested_slug.startswith(rotating_prefix):
                 prefix_rows = out_markets[out_markets["slug"].astype(str).str.lower().str.startswith(rotating_prefix)]
+                if prefix_rows is None or prefix_rows.empty:
+                    fetched_prefix = fetch_markets_by_slug_prefix(
+                        rotating_prefix,
+                        limit=500,
+                        max_offset=2000,
+                        closed=False,
+                    )
+                    if fetched_prefix is not None and not fetched_prefix.empty:
+                        out_markets = pd.concat([out_markets, fetched_prefix], ignore_index=True)
+                        if "slug" in out_markets.columns:
+                            out_markets = out_markets.drop_duplicates(subset=["slug"], keep="last")
+                        out_markets = out_markets.loc[:, ~out_markets.columns.duplicated()]
+                        prefix_rows = out_markets[out_markets["slug"].astype(str).str.lower().str.startswith(rotating_prefix)]
                 if prefix_rows is not None and not prefix_rows.empty:
                     if "closed" in prefix_rows.columns:
                         open_mask = ~prefix_rows["closed"].astype(str).str.lower().isin({"1", "true", "yes"})
