@@ -463,6 +463,57 @@ def main_loop():
             return f"{token_id}|{condition_id}|{outcome_side}"
         return f"{market}|{outcome_side}" if market and outcome_side else None
 
+    def _build_predictive_exit_targets(scored_frame, open_trades):
+        """
+        Build per-position model-based TP targets from current scored signals.
+        Uses expected_return + p_tp gate and enforces a minimum profitable step.
+        """
+        targets = {}
+        if scored_frame is None or scored_frame.empty or not open_trades:
+            return targets
+
+        signal_lookup = {}
+        for _, row in scored_frame.iterrows():
+            row_dict = row.to_dict()
+            key = _trade_key_from_signal(row_dict)
+            if key:
+                signal_lookup[key] = row_dict
+
+        min_profit_step = max(0.01, float(getattr(TradingConfig, "SHADOW_TP_DELTA", 0.04)) * 0.5)
+        for trade in open_trades:
+            trade_key = _make_position_key(
+                token_id=trade.token_id,
+                condition_id=trade.condition_id,
+                outcome_side=trade.outcome_side,
+                market=trade.market,
+            )
+            if not trade_key:
+                continue
+            signal = signal_lookup.get(trade_key)
+            if not signal:
+                continue
+
+            try:
+                p_tp = float(signal.get("p_tp_before_sl", 0.0) or 0.0)
+                expected_return = float(signal.get("expected_return", 0.0) or 0.0)
+                entry_price = float(getattr(trade, "entry_price", 0.0) or 0.0)
+                if entry_price <= 0:
+                    continue
+            except Exception:
+                continue
+
+            if p_tp < 0.55 or expected_return <= 0:
+                continue
+
+            # Treat expected_return as ROI-style signal, clipped to avoid unrealistic exits.
+            expected_return = min(expected_return, 0.25)
+            target_price = entry_price * (1.0 + expected_return)
+            target_price = max(target_price, entry_price + min_profit_step)
+            target_price = min(0.99, target_price)
+            if target_price > entry_price:
+                targets[trade_key] = target_price
+        return targets
+
 
     while True:
         try:
@@ -1009,9 +1060,14 @@ def main_loop():
 
             # Process any pending exits (e.g., from CLOSE_LONG signals or internal rules)
             from datetime import timezone
+            predictive_exit_targets = _build_predictive_exit_targets(
+                scored_df,
+                trade_manager.get_open_positions(),
+            )
             closed_trades = trade_manager.process_exits(
                 datetime.now(timezone.utc),
                 persist_closed=(trading_mode != "live"),
+                predictive_exit_targets=predictive_exit_targets,
             )
             if closed_trades:
                 logging.info("[%s] Processed %s closed trades.", trading_mode.upper(), len(closed_trades))

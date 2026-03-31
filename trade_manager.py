@@ -114,7 +114,14 @@ class TradeManager:
                 live_price = market_prices[trade.market]
                 trade.update_market(live_price)
 
-    def process_exits(self, current_timestamp: datetime, alerts_df: pd.DataFrame = None, execution_client=None, persist_closed: bool = True):
+    def process_exits(
+        self,
+        current_timestamp: datetime,
+        alerts_df: pd.DataFrame = None,
+        execution_client=None,
+        persist_closed: bool = True,
+        predictive_exit_targets: Dict[str, float] | None = None,
+    ):
         closed_trades: List[TradeLifecycle] = []
         close_reasons: Dict[str, str] = {}
 
@@ -157,6 +164,17 @@ class TradeManager:
 
             close_reason = None
 
+            # Model-driven take-profit target (if provided by supervisor).
+            # Key format matches _compose_trade_key.
+            predicted_target_price = None
+            if predictive_exit_targets:
+                predicted_target_price = predictive_exit_targets.get(trade_key)
+                if predicted_target_price is not None:
+                    try:
+                        predicted_target_price = float(predicted_target_price)
+                    except Exception:
+                        predicted_target_price = None
+
             # --- STRICT SYNC: Verify external Polymarket balance ---
             # If you manually closed this trade on the Polymarket website, 
             # this will detect the missing shares and force the bot to close it locally.
@@ -185,6 +203,8 @@ class TradeManager:
                 close_reason = "take_profit_roi"
             elif (current_price - entry_price) >= TradingConfig.SHADOW_TP_DELTA:
                 close_reason = "take_profit_price_move"
+            elif predicted_target_price is not None and current_price >= predicted_target_price:
+                close_reason = "take_profit_model_target"
             elif (entry_price - current_price) >= TradingConfig.SHADOW_SL_DELTA:
                 close_reason = "stop_loss"
             elif minutes_open >= getattr(TradingConfig, 'TIME_STOP_MINUTES', 120):
