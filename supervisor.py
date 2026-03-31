@@ -910,6 +910,30 @@ def main_loop():
             previous_entry_freeze_reason = freeze_reason
 
             _max_pos = getattr(TradingConfig, 'MAX_CONCURRENT_POSITIONS', 5)
+            _candidate_skip_logging = os.getenv("ENABLE_CANDIDATE_SKIP_LOGGING", "true").strip().lower() in {"1", "true", "yes", "on"}
+            _candidate_skip_counts = {}
+
+            def _log_candidate_skip(signal_row: dict, reason: str, **extra):
+                _candidate_skip_counts[reason] = _candidate_skip_counts.get(reason, 0) + 1
+                if not _candidate_skip_logging:
+                    return
+                payload = {
+                    "reason": reason,
+                    "token_id": normalize_token_id(signal_row.get("token_id")),
+                    "condition_id": signal_row.get("condition_id"),
+                    "market": signal_row.get("market_title", signal_row.get("market")),
+                    "outcome_side": signal_row.get("outcome_side", signal_row.get("side")),
+                    "entry_intent": signal_row.get("entry_intent"),
+                    "confidence": float(signal_row.get("confidence", 0.0) or 0.0),
+                    "signal_label": signal_row.get("signal_label"),
+                }
+                for key, value in extra.items():
+                    if value is not None:
+                        payload[key] = value
+                try:
+                    logging.info("CANDIDATE_SKIP %s", json.dumps(payload, default=str, separators=(",", ":")))
+                except Exception:
+                    logging.info("CANDIDATE_SKIP reason=%s token=%s market=%s", reason, payload.get("token_id"), payload.get("market"))
             
             # FIX 1A: Process all AI exits FIRST, ignoring max_pos restrictions
             for _, row in scored_df.iterrows():
@@ -928,23 +952,35 @@ def main_loop():
 
             # FIX 1B: Normal entry loop
             for _, row in scored_df.iterrows():
-                if len(trade_manager.active_trades) >= _max_pos:
-                    logging.info("Max concurrent positions reached (%d/%d). Skipping remaining entries.",
-                                 len(trade_manager.active_trades), _max_pos)
-                    break
-                    
                 signal_row = row.to_dict()
                 token_id_norm = normalize_token_id(signal_row.get("token_id"))
                 token_id = str(token_id_norm or "")
                 entry_intent = str(signal_row.get("entry_intent", "OPEN_LONG") or "OPEN_LONG").upper()
                 market_key = _trade_key_from_signal(signal_row)
+
+                if len(trade_manager.active_trades) >= _max_pos:
+                    _log_candidate_skip(
+                        signal_row,
+                        "max_concurrent_positions_reached",
+                        active_positions=len(trade_manager.active_trades),
+                        max_positions=_max_pos,
+                    )
+                    continue
                 
                 if not market_key or not token_id or entry_intent == "CLOSE_LONG":
+                    _log_candidate_skip(
+                        signal_row,
+                        "invalid_candidate_identity_or_intent",
+                        has_market_key=bool(market_key),
+                        has_token_id=bool(token_id),
+                        entry_intent=entry_intent,
+                    )
                     continue
 
                 # FIX: Check dynamic active_trades to prevent Triple-Buy duplicates in the same loop
                 if market_key in active_trade_keys or market_key in trade_manager.active_trades:
                     logging.info("Prevented duplicate entry: Trade already open for %s.", market_key)
+                    _log_candidate_skip(signal_row, "duplicate_active_trade", market_key=market_key)
                     continue
                 if trading_mode == "live" and live_entry_freeze:
                     logging.warning(
@@ -953,6 +989,13 @@ def main_loop():
                         freeze_reason or "state_mismatch",
                         freeze_detail.get("local_count"),
                         freeze_detail.get("live_count"),
+                    )
+                    _log_candidate_skip(
+                        signal_row,
+                        "live_entry_freeze",
+                        freeze_reason=freeze_reason or "state_mismatch",
+                        local_count=freeze_detail.get("local_count"),
+                        live_count=freeze_detail.get("live_count"),
                     )
                     continue
 
@@ -1024,6 +1067,12 @@ def main_loop():
                             "MoneyManager: skip trade (balance=$%.2f, conf=%.2f, exposure=$%.2f)",
                             _available_bal, confidence, _current_exposure,
                         )
+                        _log_candidate_skip(
+                            signal_row,
+                            "money_manager_rejected_size",
+                            available_balance=round(_available_bal, 6),
+                            current_exposure=round(_current_exposure, 6),
+                        )
                         continue
                     # ── Order book guard: check spread/depth before entry ──
                     try:
@@ -1032,6 +1081,11 @@ def main_loop():
                         )
                         if not ob_check["tradable"]:
                             logging.info("OrderBookGuard BLOCKED %s: %s", token_id[:16], ob_check["reason"])
+                            _log_candidate_skip(
+                                signal_row,
+                                "orderbook_guard_blocked",
+                                ob_reason=ob_check.get("reason"),
+                            )
                             continue
                         fill_price = ob_check.get("recommended_entry_price") or quote_entry_price(signal_row)
                         for _w in ob_check.get("warnings", []):
@@ -1042,6 +1096,7 @@ def main_loop():
                     
                     if fill_price is None or pd.isna(fill_price):
                         logging.warning("Skipping signal with missing fill price for token_id=%s", token_id)
+                        _log_candidate_skip(signal_row, "missing_fill_price")
                         continue
 
 
@@ -1071,6 +1126,11 @@ def main_loop():
                             logging.info("Live entry rejected/skipped for token_id=%s reason=%s", token_id, (entry_row or {}).get("reason"))
                             # If order is rejected/skipped, we should potentially revert trade creation in TradeManager
                             # For simplicity, we'll let process_exits handle cleanup later if trade is not filled
+                            _log_candidate_skip(
+                                signal_row,
+                                "live_entry_rejected_or_missing_order_id",
+                                exchange_reason=(entry_row or {}).get("reason"),
+                            )
                             continue
                         
                         fill_result = order_manager.wait_for_fill(entry_order_id)
@@ -1087,6 +1147,11 @@ def main_loop():
                             
                             # If it STILL isn't filled after the race-condition check, safely skip
                             if not fill_result.get("filled"):
+                                _log_candidate_skip(
+                                    signal_row,
+                                    "live_entry_unfilled_after_cancel",
+                                    order_id=entry_order_id,
+                                )
                                 continue
                         
                         fill_payload = fill_result.get("response") or {}
@@ -1122,6 +1187,13 @@ def main_loop():
                                 signal_row.get("signal_label", "UNKNOWN"),
                                 confidence,
                             )
+                        else:
+                            _log_candidate_skip(signal_row, "paper_trade_manager_rejected")
+                else:
+                    _log_candidate_skip(signal_row, "model_action_ignore", model_action=action_map.get(action_val, "UNKNOWN"))
+
+            if _candidate_skip_counts:
+                logging.info("CANDIDATE_SKIP_SUMMARY %s", json.dumps(_candidate_skip_counts, sort_keys=True))
 
             # 4B. Open-position management path for hold / reduce / exit
             # FIX H3: Build price map by token_id for reliable matching
