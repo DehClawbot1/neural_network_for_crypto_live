@@ -68,6 +68,7 @@ class HistoricalDatasetBuilder:
             trade_view = trades_df[trade_cols].copy()
             if "timestamp" in trade_view.columns:
                 trade_view["timestamp"] = pd.to_datetime(trade_view["timestamp"], utc=True, errors="coerce")
+                trade_view = trade_view[trade_view["timestamp"].notna()].copy()
             if "market_title" in dataset.columns and "market" in trade_view.columns:
                 dataset = dataset.merge(
                     trade_view,

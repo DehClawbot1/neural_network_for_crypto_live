@@ -114,7 +114,7 @@ class TradeManager:
                 live_price = market_prices[trade.market]
                 trade.update_market(live_price)
 
-    def process_exits(self, current_timestamp: datetime, alerts_df: pd.DataFrame = None, execution_client=None):
+    def process_exits(self, current_timestamp: datetime, alerts_df: pd.DataFrame = None, execution_client=None, persist_closed: bool = True):
         closed_trades: List[TradeLifecycle] = []
         close_reasons: Dict[str, str] = {}
 
@@ -204,10 +204,13 @@ class TradeManager:
             if key:
                 self.active_trades.pop(key, None)
 
-        if closed_trades:
+        if closed_trades and persist_closed:
             self._append_closed_trades(closed_trades)
 
         return closed_trades
+
+    def persist_closed_trades(self, closed_trades: List[TradeLifecycle]):
+        self._append_closed_trades(closed_trades)
 
     def _maybe_load_reconciled_positions(self):
         try:

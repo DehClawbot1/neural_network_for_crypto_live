@@ -41,8 +41,10 @@ class TradeLifecycle:
     def _write_execution_event(self, payload: dict):
         logs_path = Path(self.logs_dir)
         logs_path.mkdir(parents=True, exist_ok=True)
-        execution_file = logs_path / "execution_log.csv"
-        pd.DataFrame([payload]).to_csv(execution_file, mode="a", header=not execution_file.exists(), index=False)
+        # Keep lifecycle events isolated from execution_log.csv so fill/trade logs
+        # keep a stable schema for dashboards, dataset builders, and reconciliations.
+        events_file = logs_path / "trade_events.csv"
+        pd.DataFrame([payload]).to_csv(events_file, mode="a", header=not events_file.exists(), index=False)
 
     def on_signal(self, signal_row: dict):
         payload = {

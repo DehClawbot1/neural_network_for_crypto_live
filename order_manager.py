@@ -36,6 +36,19 @@ class OrderManager:
     def _append(self, path: Path, row: dict):
         pd.DataFrame([row]).to_csv(path, mode="a", header=not path.exists(), index=False)
 
+    def _extract_order_id(self, payload):
+        if not isinstance(payload, dict):
+            return None
+        for key in ("orderID", "order_id", "id"):
+            value = payload.get(key)
+            if value not in (None, ""):
+                return str(value)
+        return None
+
+    def _is_terminal_status(self, status):
+        status = str(status or "").upper()
+        return status in {"FILLED", "EXECUTED", "MATCHED", "CANCELED", "CANCELLED", "FAILED", "REJECTED"}
+
     def _normalize_balance(self, raw_balance):
         if raw_balance is None:
             return 0.0
@@ -266,7 +279,24 @@ class OrderManager:
             logging.error("Market order failed: %s", exc)
             return row, None
 
-        order_id = (response or {}).get("orderID") # BUG 10 FIX or response.get("order_id") or response.get("id")
+        order_id = self._extract_order_id(response)
+        if not order_id:
+            self.risk.record_failed_order()
+            row = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "order_id": None,
+                "token_id": token_id,
+                "condition_id": condition_id,
+                "outcome_side": outcome_side,
+                "order_side": side,
+                "amount": amount,
+                "order_type": "FOK",
+                "execution_style": "market",
+                "status": "FAILED",
+                "reason": f"missing_order_id_in_response:{response}",
+            }
+            self._append(self.orders_file, row)
+            return row, response
         row = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "order_id": order_id,
@@ -324,8 +354,17 @@ class OrderManager:
         decision = self.risk.pre_trade_check(token_id=token_id, price=price, size=notional_usdc, spread=spread, open_orders=open_orders, daily_pnl=daily_pnl)
         idempotency_key = f"{token_id}|{condition_id}|{side}|{size}|{round(float(price), 4)}"
         existing = self.list_orders()
-        if not existing.empty and "idempotency_key" in existing.columns and (existing["idempotency_key"].astype(str) == idempotency_key).any():
-            return {"status": "REJECTED", "reason": "duplicate_idempotency_key", "idempotency_key": idempotency_key}, None
+        if not existing.empty and "idempotency_key" in existing.columns:
+            candidates = existing[existing["idempotency_key"].astype(str) == idempotency_key].copy()
+            if not candidates.empty:
+                if "status" in candidates.columns:
+                    candidates = candidates[~candidates["status"].astype(str).apply(self._is_terminal_status)]
+                if "timestamp" in candidates.columns:
+                    ts = pd.to_datetime(candidates["timestamp"], errors="coerce", utc=True)
+                    cutoff = datetime.now(timezone.utc) - pd.Timedelta(minutes=2)
+                    candidates = candidates[ts >= cutoff]
+                if not candidates.empty:
+                    return {"status": "REJECTED", "reason": "duplicate_idempotency_key_active", "idempotency_key": idempotency_key}, None
         if not decision.allowed:
             row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": decision.reason}
             self._append(self.orders_file, row)
@@ -444,6 +483,9 @@ class OrderManager:
                 "trade_id": "fill_" + dummy_response["orderID"],
                 "order_id": dummy_response["orderID"],
                 "token_id": token_id,
+                "condition_id": condition_id,
+                "outcome_side": outcome_side,
+                "side": side,
                 "price": float(price),
                 "size": float(order_size_shares),
                 "filled_at": row["timestamp"]
@@ -468,7 +510,30 @@ class OrderManager:
             self._append(self.orders_file, row)
             return row, None
 
-        order_id = (response or {}).get("orderID") # BUG 10 FIX or response.get("order_id") or response.get("id")
+        order_id = self._extract_order_id(response)
+        if not order_id:
+            self.risk.record_failed_order()
+            row = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "order_id": None,
+                "idempotency_key": idempotency_key,
+                "token_id": token_id,
+                "condition_id": condition_id,
+                "outcome_side": outcome_side,
+                "order_side": side,
+                "price": price,
+                "size": size,
+                "size_usdc": notional_usdc,
+                "order_size_shares": order_size_shares,
+                "order_type": order_type,
+                "post_only": post_only,
+                "execution_style": execution_style,
+                "status": "FAILED",
+                "reason": f"missing_order_id_in_response:{response}",
+                **market_context,
+            }
+            self._append(self.orders_file, row)
+            return row, response
         row = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "order_id": order_id,
@@ -490,7 +555,7 @@ class OrderManager:
         self._append(self.orders_file, row)
         self.db.execute(
             "INSERT OR REPLACE INTO orders (order_id, token_id, condition_id, outcome_side, order_side, price, size, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (row.get("order_id"), row.get("token_id"), row.get("condition_id"), row.get("outcome_side"), row.get("order_side"), row.get("price"), row.get("size"), row.get("status"), row.get("timestamp")),
+            (row.get("order_id"), row.get("token_id"), row.get("condition_id"), row.get("outcome_side"), row.get("order_side"), row.get("price"), row.get("order_size_shares"), row.get("status"), row.get("timestamp")),
         )
         return row, response
 
@@ -583,6 +648,23 @@ class OrderManager:
                         break
                 if size_value in [None, ""]:
                     size_value = db_row.get("size", 0.0)
+                try:
+                    size_value = float(size_value or 0.0)
+                except Exception:
+                    size_value = 0.0
+
+                # Backward compatibility: legacy BUY orders may have persisted
+                # notional USDC in `orders.size`. Convert probable notionals to shares.
+                try:
+                    if (
+                        size_value > 0
+                        and str(db_row.get("order_side", "")).upper() == "BUY"
+                        and float(db_row.get("price", 0.0) or 0.0) > 0
+                        and size_value <= 50.0
+                    ):
+                        size_value = size_value / max(float(db_row.get("price") or 1e-9), 1e-9)
+                except Exception:
+                    pass
 
                 fill_payload = {
                     "trade_id": ((trade_fill or {}).get("id") if isinstance(trade_fill, dict) else None) or (last_response or {}).get("id") or f"{order_id}:{fill_event_time}",
@@ -678,7 +760,17 @@ class OrderManager:
         row["fill_id"] = fill_id
         self._append(self.fills_file, row)
         self.db.execute(
-            "INSERT OR REPLACE INTO fills (fill_id, order_id, token_id, price, size, filled_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (fill_id, row.get("order_id"), row.get("token_id"), row.get("price"), row.get("size"), row.get("filled_at") or row.get("timestamp")),
+            "INSERT OR REPLACE INTO fills (fill_id, order_id, token_id, condition_id, outcome_side, side, price, size, filled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                fill_id,
+                row.get("order_id"),
+                row.get("token_id"),
+                row.get("condition_id"),
+                row.get("outcome_side"),
+                row.get("side"),
+                row.get("price"),
+                row.get("size"),
+                row.get("filled_at") or row.get("timestamp"),
+            ),
         )
         return fill_payload

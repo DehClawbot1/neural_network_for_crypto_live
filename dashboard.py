@@ -42,6 +42,7 @@ except Exception:
 
 from schema import normalize_dataframe_columns
 from log_loader import load_execution_history as shared_load_execution_history
+from strategy_layers import EntryRuleLayer
 
 BASE = Path(__file__).resolve().parent
 LOGS = BASE / "logs"
@@ -574,6 +575,7 @@ def render_action_board(signals_df, positions_df):
         st.info("No signals yet.")
         return
     rk = signals_df.copy()
+    entry_rule = EntryRuleLayer()
     sc = [c for c in ["edge_score", "p_tp_before_sl", "confidence"] if c in rk.columns]
     if sc:
         rk = rk.sort_values(by=sc, ascending=[False] * len(sc))
@@ -590,7 +592,7 @@ def render_action_board(signals_df, positions_df):
             g = "Exit / Leave"
         elif ao:
             g = "Hold"
-        elif pd.notna(pt) and pd.notna(ed) and pt >= 0.62 and ed > 0:
+        elif entry_rule.should_enter(r.to_dict()):
             g = "Enter"
         else:
             g = "Watch"

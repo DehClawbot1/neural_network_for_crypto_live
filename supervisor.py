@@ -427,6 +427,19 @@ def main_loop():
         shadow_purgatory = None
         logging.warning("ShadowPurgatory unavailable at startup: %s", exc)
     db = Database()
+    try:
+        db_report = db.integrity_report()
+        if not db_report.get("ok", True):
+            logging.error("SQLite integrity check failed: %s", db_report)
+            auto_reset = os.getenv("RESET_RUNTIME_STATE_ON_DB_CORRUPTION", "false").strip().lower() in {"1", "true", "yes", "on"}
+            if auto_reset:
+                backup_dir = db.backup_and_reset_runtime_state("logs")
+                logging.warning(
+                    "Runtime state reset completed (backup=%s). Model weights were preserved in weights/.",
+                    backup_dir,
+                )
+    except Exception as exc:
+        logging.warning("DB integrity preflight failed: %s", exc)
 
 
     def _make_position_key(token_id=None, condition_id=None, outcome_side=None, market=None):
@@ -978,7 +991,8 @@ def main_loop():
                                         sz = fill_payload.get("size", exit_shares)
                                         actual_fill_size = float(sz) if (sz is not None and str(sz).strip() and float(sz) > 0) else exit_shares # BUG 8 FIX
                                         log_live_fill_event(pos_dict, actual_fill_price, actual_fill_size, action_type="LIVE_EXIT")
-                                        trade.close(exit_price=actual_fill_price) # Update TradeLifecycle
+                                        trade.close(exit_price=actual_fill_price, reason="rl_exit") # Update TradeLifecycle
+                                        trade_manager.persist_closed_trades([trade])
                                         trade_manager.active_trades.pop(_make_position_key(token_id=trade.token_id, condition_id=trade.condition_id, outcome_side=trade.outcome_side, market=trade.market), None) # Remove from active trades
                                     else:
                                         logging.warning("Live EXIT not filled for %s; attempting cancel for order_id=%s", token_id, exit_order_id)
@@ -995,7 +1009,10 @@ def main_loop():
 
             # Process any pending exits (e.g., from CLOSE_LONG signals or internal rules)
             from datetime import timezone
-            closed_trades = trade_manager.process_exits(datetime.now(timezone.utc))
+            closed_trades = trade_manager.process_exits(
+                datetime.now(timezone.utc),
+                persist_closed=(trading_mode != "live"),
+            )
             if closed_trades:
                 logging.info("[%s] Processed %s closed trades.", trading_mode.upper(), len(closed_trades))
 
@@ -1027,6 +1044,7 @@ def main_loop():
                                     log_live_fill_event(
                                         {"token_id": _ct_token, "market_title": ct.market, "outcome_side": ct.outcome_side, "current_price": _exit_p},
                                         _exit_p, ct.shares, action_type=f"LIVE_EXIT_{ct.close_reason}")
+                                    trade_manager.persist_closed_trades([ct])
                                 else:
                                     try: order_manager.cancel_stale_order(_exit_oid)
                                     except Exception: pass

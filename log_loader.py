@@ -20,6 +20,9 @@ def load_execution_history(logs_dir="logs"):
 
     if current_df.empty:
         return legacy_df if not legacy_df.empty else pd.DataFrame()
+    if "timestamp" in current_df.columns:
+        ts = pd.to_datetime(current_df["timestamp"], errors="coerce", utc=True)
+        current_df = current_df[ts.notna()].copy()
 
     # Prefer the canonical execution log. Only merge legacy rows if they actually look compatible.
     if legacy_df.empty:
@@ -34,4 +37,3 @@ def load_execution_history(logs_dir="logs"):
     if dedupe_cols:
         combined = combined.drop_duplicates(subset=dedupe_cols, keep="last")
     return combined
-

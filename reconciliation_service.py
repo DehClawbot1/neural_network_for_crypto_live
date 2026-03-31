@@ -82,6 +82,23 @@ class ReconciliationService:
         """Sync exchange orders and fills into the local SQLite database."""
         synced_orders = 0
         synced_fills = 0
+        known_order_ids = set()
+        tracked_tokens = set()
+
+        try:
+            for row in self.db.query_all("SELECT order_id FROM orders WHERE order_id IS NOT NULL"):
+                oid = str(row.get("order_id") or "").strip()
+                if oid:
+                    known_order_ids.add(oid)
+        except Exception:
+            known_order_ids = set()
+        try:
+            for row in self.db.query_all("SELECT token_id FROM live_positions WHERE status = 'OPEN' AND token_id IS NOT NULL"):
+                token = str(row.get("token_id") or "").strip()
+                if token:
+                    tracked_tokens.add(token)
+        except Exception:
+            tracked_tokens = set()
 
         try:
             orders_payload = self.execution_client.get_open_orders()
@@ -104,6 +121,7 @@ class ReconciliationService:
                     ),
                 )
                 synced_orders += 1
+                known_order_ids.add(order["order_id"])
         except Exception:
             pass
         
@@ -125,6 +143,10 @@ class ReconciliationService:
             for raw_trade in self._extract_items(trades_payload):
                 trade = self._normalize_trade(raw_trade)
                 if trade is None:
+                    continue
+                # Ignore unrelated historical/manual trades that are not connected to
+                # this bot's known orders or currently tracked open position tokens.
+                if trade.get("order_id") not in known_order_ids and trade.get("token_id") not in tracked_tokens:
                     continue
                 self.db.execute(
                     "INSERT OR REPLACE INTO fills (fill_id, order_id, token_id, condition_id, outcome_side, side, price, size, filled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",

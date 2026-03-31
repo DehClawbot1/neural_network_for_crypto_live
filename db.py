@@ -1,4 +1,6 @@
 import sqlite3
+import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -168,3 +170,87 @@ class Database:
         cur.execute(query, params)
         return [dict(row) for row in cur.fetchall()]
 
+    def integrity_report(self):
+        report = {"ok": True, "checks": {}, "errors": []}
+        try:
+            quick = self.conn.execute("PRAGMA quick_check;").fetchone()
+            quick_val = quick[0] if quick else "unknown"
+            report["checks"]["quick_check"] = quick_val
+            if str(quick_val).lower() != "ok":
+                report["ok"] = False
+        except Exception as exc:
+            report["ok"] = False
+            report["errors"].append(f"quick_check_failed:{exc}")
+
+        required_tables = [
+            "orders",
+            "fills",
+            "live_positions",
+            "model_decisions",
+            "state_mismatches",
+        ]
+        try:
+            existing = {
+                row["name"] if isinstance(row, sqlite3.Row) else row[0]
+                for row in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            missing = [t for t in required_tables if t not in existing]
+            report["checks"]["missing_tables"] = missing
+            if missing:
+                report["ok"] = False
+        except Exception as exc:
+            report["ok"] = False
+            report["errors"].append(f"table_scan_failed:{exc}")
+        return report
+
+    def backup_and_reset_runtime_state(self, logs_dir="logs"):
+        """
+        Archive potentially-corrupted runtime state (DB + log CSVs) and rebuild a clean DB.
+        Model artifacts in `weights/` are intentionally untouched.
+        """
+        logs_path = Path(logs_dir)
+        logs_path.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        backup_dir = logs_path / f"runtime_reset_{stamp}"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+
+        self.conn.close()
+
+        db_file = logs_path / "trading.db"
+        if db_file.exists():
+            shutil.copy2(db_file, backup_dir / "trading.db.bak")
+            db_file.unlink()
+
+        for csv_name in [
+            "positions.csv",
+            "closed_positions.csv",
+            "live_orders.csv",
+            "live_fills.csv",
+            "execution_log.csv",
+            "trade_events.csv",
+            "signals.csv",
+            "markets.csv",
+            "alerts.csv",
+            "service_heartbeats.csv",
+            "system_health.csv",
+            "incidents.csv",
+        ]:
+            src = logs_path / csv_name
+            if src.exists():
+                shutil.copy2(src, backup_dir / f"{csv_name}.bak")
+
+        self.conn = sqlite3.connect(self.db_path, timeout=30)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode=WAL;")
+        self.conn.execute("PRAGMA busy_timeout=30000;")
+        self.conn.execute("PRAGMA synchronous=NORMAL;")
+        self._init_schema()
+        self._ensure_column("model_decisions", "condition_id", "TEXT")
+        self._ensure_column("model_decisions", "outcome_side", "TEXT")
+        self._ensure_column("model_decisions", "feature_snapshot", "TEXT")
+        self._ensure_column("model_decisions", "model_artifact", "TEXT")
+        self._ensure_column("model_decisions", "normalization_artifact", "TEXT")
+        self._ensure_column("fills", "condition_id", "TEXT")
+        self._ensure_column("fills", "outcome_side", "TEXT")
+        self._ensure_column("fills", "side", "TEXT")
+        return str(backup_dir)
