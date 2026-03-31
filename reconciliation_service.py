@@ -19,7 +19,6 @@ class ReconciliationService:
         if payload is None:
             return []
         if isinstance(payload, str): return [] # BUG FIX 9
-        if isinstance(payload, str): return [] # BUG FIX 9
         if isinstance(payload, list):
             return payload
         if isinstance(payload, dict):
@@ -29,6 +28,15 @@ class ReconciliationService:
                     return value
             return [payload]
         return []
+
+    def _is_synthetic_fill_id(self, fill_id):
+        fid = str(fill_id or "").strip().lower()
+        return (
+            fid.startswith("fill_dust_clear_")
+            or fid.startswith("fill_ext_sync_")
+            or fid.startswith("ext_sync_")
+            or "dust_clear" in fid
+        )
 
     def _normalize_order(self, order):
         if not isinstance(order, dict):
@@ -204,6 +212,28 @@ class ReconciliationService:
         remote_orders_df = pd.DataFrame(remote_orders)
         remote_trades_df = pd.DataFrame(remote_trades)
 
+        known_order_ids = set()
+        tracked_tokens = set()
+        try:
+            if not local_orders.empty and "order_id" in local_orders.columns:
+                known_order_ids = set(local_orders["order_id"].dropna().astype(str).tolist())
+        except Exception:
+            known_order_ids = set()
+        try:
+            rows = self.db.query_all("SELECT token_id FROM live_positions WHERE status = 'OPEN' AND token_id IS NOT NULL")
+            tracked_tokens = {str(r.get("token_id") or "").strip() for r in rows if str(r.get("token_id") or "").strip()}
+        except Exception:
+            tracked_tokens = set()
+
+        filtered_remote_trades = []
+        for trade in remote_trades:
+            oid = str(trade.get("order_id") or "").strip()
+            tid = str(trade.get("token_id") or "").strip()
+            if oid in known_order_ids or tid in tracked_tokens:
+                filtered_remote_trades.append(trade)
+        remote_trades = filtered_remote_trades
+        remote_trades_df = pd.DataFrame(remote_trades)
+
         remote_order_ids = set(o["order_id"] for o in remote_orders)
         remote_trade_ids = set(t["fill_id"] for t in remote_trades)
 
@@ -221,7 +251,16 @@ class ReconciliationService:
         if not local_fills.empty:
             id_col = "trade_id" if "trade_id" in local_fills.columns else "fill_id" if "fill_id" in local_fills.columns else None
             if id_col:
-                local_trade_ids = set(local_fills[id_col].dropna().astype(str).tolist())
+                for _, row in local_fills.iterrows():
+                    fill_id = str(row.get(id_col) or "").strip()
+                    if not fill_id or fill_id.lower() in {"nan", "none"}:
+                        continue
+                    if self._is_synthetic_fill_id(fill_id):
+                        continue
+                    oid = str(row.get("order_id") or "").strip()
+                    tid = str(row.get("token_id") or "").strip()
+                    if (oid and oid in known_order_ids) or (tid and tid in tracked_tokens):
+                        local_trade_ids.add(fill_id)
 
         missing_remote_orders = sorted(local_open_order_ids - remote_order_ids)
         missing_local_orders = sorted(remote_order_ids - local_open_order_ids)

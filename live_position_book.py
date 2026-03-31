@@ -79,12 +79,16 @@ class LivePositionBook:
                     book["avg_entry_price"] = 0.0
 
         now = datetime.now(timezone.utc).isoformat()
+        dust_notional_threshold = 0.01
         cursor = self.db.conn.cursor()
         try:
             cursor.execute("BEGIN IMMEDIATE")
             cursor.execute("DELETE FROM live_positions")
             for row in books.values():
-                row["status"] = "OPEN" if float(row["shares"]) > 1e-5 else "CLOSED" # BUG FIX 6: Prevent dust re-opening
+                remaining_shares = float(row.get("shares") or 0.0)
+                avg_entry_price = float(row.get("avg_entry_price") or 0.0)
+                remaining_notional = remaining_shares * avg_entry_price
+                row["status"] = "OPEN" if (remaining_shares > 1e-5 and remaining_notional >= dust_notional_threshold) else "CLOSED"
                 cursor.execute(
                     """
                     INSERT OR REPLACE INTO live_positions
@@ -146,6 +150,16 @@ class LivePositionBook:
             token_id = str(row.get("token_id") or "")
             if not token_id:
                 continue
+            local_shares = float(row.get("shares") or 0.0)
+            local_avg_entry = float(row.get("avg_entry_price") or 0.0)
+            local_notional = local_shares * local_avg_entry
+            if local_shares > 0 and local_notional < 0.01:
+                mutated = True
+                cursor.execute(
+                    "UPDATE live_positions SET status = 'CLOSED', updated_at = ? WHERE position_key = ?",
+                    (now, row.get("position_key")),
+                )
+                continue
             try:
                 payload = execution_client.get_balance_allowance(asset_type="CONDITIONAL", token_id=token_id)
                 available_shares = self._extract_available_balance(payload, execution_client)
@@ -188,7 +202,6 @@ class LivePositionBook:
                 )
                 continue
 
-            local_shares = float(row.get("shares") or 0.0)
             if available_shares < local_shares - 1e-5: # BUG FIX 5: Permanently save partial external sells to DB
                 row["shares"] = available_shares
                 cursor.execute("UPDATE live_positions SET shares = ?, updated_at = ? WHERE position_key = ?", (available_shares, now, row.get("position_key")))

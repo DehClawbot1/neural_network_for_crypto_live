@@ -1258,7 +1258,15 @@ def main_loop():
             # 5. Phase 2 analytics outputs
             trades_df = safe_read_csv(EXECUTION_FILE)
             if scored_df is not None: scored_df = scored_df.loc[:, ~scored_df.columns.duplicated()].copy()
-            trader_signals_df = scored_df.rename(columns={"trader_wallet": "wallet_copied", "market_title": "market"})
+            trader_signals_df = scored_df.copy()
+            if "wallet_copied" not in trader_signals_df.columns and "trader_wallet" in trader_signals_df.columns:
+                trader_signals_df = trader_signals_df.rename(columns={"trader_wallet": "wallet_copied"})
+            if "market" in trader_signals_df.columns and "market_title" in trader_signals_df.columns:
+                trader_signals_df["market"] = trader_signals_df["market"].fillna(trader_signals_df["market_title"])
+                trader_signals_df = trader_signals_df.drop(columns=["market_title"])
+            elif "market" not in trader_signals_df.columns and "market_title" in trader_signals_df.columns:
+                trader_signals_df = trader_signals_df.rename(columns={"market_title": "market"})
+            trader_signals_df = trader_signals_df.loc[:, ~trader_signals_df.columns.duplicated()].copy()
             trader_analytics.write(trader_signals_df, trades_df)
             backtester.write(trader_signals_df)
             dataset_builder.write()

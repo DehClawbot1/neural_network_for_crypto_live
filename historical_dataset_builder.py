@@ -37,6 +37,22 @@ class HistoricalDatasetBuilder:
         work_right = right.copy().sort_values(on)
         return pd.merge_asof(work_left, work_right, on=on, by=by, direction="backward")
 
+    def _dedupe_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+        return df.loc[:, ~df.columns.duplicated()].copy()
+
+    def _coalesce_market_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+        out = self._dedupe_columns(df)
+        if "market_title" in out.columns and "market" in out.columns:
+            out["market_title"] = out["market_title"].fillna(out["market"])
+            out = out.drop(columns=["market"])
+        elif "market" in out.columns and "market_title" not in out.columns:
+            out = out.rename(columns={"market": "market_title"})
+        return self._dedupe_columns(out)
+
     def build(self):
         signals_df = self._safe_read("signals.csv")
         trades_df = self._safe_read("execution_log.csv")
@@ -59,6 +75,8 @@ class HistoricalDatasetBuilder:
             "side": "outcome_side",
         }
         dataset = dataset.rename(columns={k: v for k, v in rename_map.items() if k in dataset.columns})
+        dataset = self._coalesce_market_columns(dataset)
+        dataset = self._dedupe_columns(dataset)
         if "timestamp" not in dataset.columns:
             dataset["timestamp"] = pd.NaT
         dataset["timestamp"] = pd.to_datetime(dataset["timestamp"], utc=True, errors="coerce")
@@ -69,33 +87,40 @@ class HistoricalDatasetBuilder:
             if "timestamp" in trade_view.columns:
                 trade_view["timestamp"] = pd.to_datetime(trade_view["timestamp"], utc=True, errors="coerce")
                 trade_view = trade_view[trade_view["timestamp"].notna()].copy()
-            if "market_title" in dataset.columns and "market" in trade_view.columns:
-                dataset = dataset.merge(
-                    trade_view,
-                    left_on=[c for c in ["market_title", "trader_wallet"] if c in dataset.columns],
-                    right_on=[c for c in ["market", "wallet_copied"] if c in trade_view.columns],
-                    how="left",
-                )
+            if "market" in trade_view.columns and "market_title" not in trade_view.columns:
+                trade_view = trade_view.rename(columns={"market": "market_title"})
+            if "wallet_copied" in trade_view.columns and "trader_wallet" not in trade_view.columns:
+                trade_view = trade_view.rename(columns={"wallet_copied": "trader_wallet"})
+            merge_keys = [c for c in ["market_title", "trader_wallet"] if c in dataset.columns and c in trade_view.columns]
+            if merge_keys:
+                dataset = dataset.merge(trade_view, on=merge_keys, how="left", suffixes=("", "_trade"))
+                dataset = self._dedupe_columns(dataset)
 
         if not markets_df.empty:
+            markets_df = self._coalesce_market_columns(markets_df)
             market_name_col = "question" if "question" in markets_df.columns else "market_title" if "market_title" in markets_df.columns else None
             if market_name_col and "market_title" in dataset.columns:
                 if "timestamp" in markets_df.columns:
                     markets_df = markets_df.copy()
                     markets_df["timestamp"] = pd.to_datetime(markets_df["timestamp"], utc=True, errors="coerce")
+                    markets_df = markets_df[markets_df["timestamp"].notna()].copy()
                     merged_parts = []
                     for market_title, group in dataset.groupby("market_title", dropna=False):
-                        market_history = markets_df[markets_df[market_name_col] == market_title]
+                        market_history = markets_df[markets_df[market_name_col] == market_title].copy()
+                        market_history = market_history[market_history["timestamp"].notna()].copy()
                         if market_history.empty:
                             merged_parts.append(group)
                             continue
                         cols = [c for c in ["timestamp", market_name_col, "liquidity", "volume", "last_trade_price", "url", "best_bid", "best_ask", "slug", "condition_id", "end_date"] if c in market_history.columns]
-                        merged_parts.append(pd.merge_asof(group.sort_values("timestamp"), market_history[cols].sort_values("timestamp"), on="timestamp", direction="backward"))
+                        merged = pd.merge_asof(group.sort_values("timestamp"), market_history[cols].sort_values("timestamp"), on="timestamp", direction="backward")
+                        merged_parts.append(self._dedupe_columns(merged))
                     dataset = pd.concat(merged_parts, ignore_index=True) if merged_parts else dataset
+                    dataset = self._dedupe_columns(dataset)
                 else:
                     latest_markets = markets_df.drop_duplicates(subset=[market_name_col], keep="last")
                     cols = [c for c in [market_name_col, "liquidity", "volume", "last_trade_price", "url", "best_bid", "best_ask", "slug", "condition_id", "end_date"] if c in latest_markets.columns]
                     dataset = dataset.merge(latest_markets[cols], left_on="market_title", right_on=market_name_col, how="left")
+                    dataset = self._dedupe_columns(dataset)
 
         if not alerts_df.empty and "market_title" in dataset.columns:
             alert_market_col = "market" if "market" in alerts_df.columns else "market_title" if "market_title" in alerts_df.columns else None
@@ -103,31 +128,37 @@ class HistoricalDatasetBuilder:
                 alert_counts = alerts_df.groupby(alert_market_col).size().reset_index(name="alert_count")
                 dataset = dataset.merge(alert_counts, left_on="market_title", right_on=alert_market_col, how="left")
                 dataset["alert_count"] = dataset["alert_count"].fillna(0).astype(int)
+                dataset = self._dedupe_columns(dataset)
 
         if not wallet_alpha_df.empty and "trader_wallet" in dataset.columns:
             wallet_key = "wallet_copied" if "wallet_copied" in wallet_alpha_df.columns else "trader_wallet" if "trader_wallet" in wallet_alpha_df.columns else None
             if wallet_key:
                 dataset = dataset.merge(wallet_alpha_df, left_on="trader_wallet", right_on=wallet_key, how="left")
+                dataset = self._dedupe_columns(dataset)
 
         if not wallet_alpha_history_df.empty and "trader_wallet" in dataset.columns and "timestamp" in dataset.columns:
             history_key = "wallet_copied" if "wallet_copied" in wallet_alpha_history_df.columns else "trader_wallet" if "trader_wallet" in wallet_alpha_history_df.columns else None
             if history_key and "timestamp" in wallet_alpha_history_df.columns:
                 wallet_alpha_history_df = wallet_alpha_history_df.copy()
                 wallet_alpha_history_df["timestamp"] = pd.to_datetime(wallet_alpha_history_df["timestamp"], utc=True, errors="coerce")
+                wallet_alpha_history_df = wallet_alpha_history_df[wallet_alpha_history_df["timestamp"].notna()].copy()
                 merged_parts = []
                 for wallet, group in dataset.groupby("trader_wallet", dropna=False):
                     history = wallet_alpha_history_df[wallet_alpha_history_df[history_key] == wallet]
                     if history.empty:
                         merged_parts.append(group)
                         continue
-                    merged_parts.append(pd.merge_asof(group.sort_values("timestamp"), history.sort_values("timestamp"), on="timestamp", direction="backward"))
+                    merged_parts.append(self._dedupe_columns(pd.merge_asof(group.sort_values("timestamp"), history.sort_values("timestamp"), on="timestamp", direction="backward")))
                 dataset = pd.concat(merged_parts, ignore_index=True) if merged_parts else dataset
+                dataset = self._dedupe_columns(dataset)
 
         if not btc_targets_df.empty and "timestamp" in dataset.columns and "timestamp" in btc_targets_df.columns:
             btc_targets_df = btc_targets_df.copy()
             btc_targets_df["timestamp"] = pd.to_datetime(btc_targets_df["timestamp"], utc=True, errors="coerce")
+            btc_targets_df = btc_targets_df[btc_targets_df["timestamp"].notna()].copy()
             cols = [c for c in ["timestamp", "btc_price", "btc_spot_return_5m", "btc_spot_return_15m", "btc_realized_vol_15m", "btc_volume_proxy"] if c in btc_targets_df.columns]
             dataset = pd.merge_asof(dataset.sort_values("timestamp"), btc_targets_df[cols].sort_values("timestamp"), on="timestamp", direction="backward")
+            dataset = self._dedupe_columns(dataset)
 
         if "best_ask" in dataset.columns and "best_bid" in dataset.columns:
             dataset["spread"] = (pd.to_numeric(dataset["best_ask"], errors="coerce").fillna(0) - pd.to_numeric(dataset["best_bid"], errors="coerce").fillna(0)).abs()
