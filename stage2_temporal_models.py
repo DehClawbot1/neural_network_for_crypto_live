@@ -64,6 +64,12 @@ class Stage2TemporalModels:
                 out[col] = (series - series.mean()) / (series.std(ddof=0) + 1e-9)
         return out
 
+    def _pick_first_existing(self, df, candidates):
+        for col in candidates:
+            if col in df.columns:
+                return col
+        return None
+
     def train(self):
         df = self._safe_read()
         if df.empty:
@@ -75,17 +81,17 @@ class Stage2TemporalModels:
 
         target_cls = "tp_before_sl_60m" if "tp_before_sl_60m" in df.columns else None
         target_reg = "forward_return_15m" if "forward_return_15m" in df.columns else None
-        base_features = [
-            c for c in [
-                "entry_price",
-                "spread",
-                "normalized_trade_size",
-                "wallet_trade_count_30d",
-                "wallet_alpha_30d_y",
-                "wallet_signal_precision_tp_y",
-                "wallet_avg_forward_return_15m_y",
-            ] if c in df.columns
+        base_features = []
+        base_features.extend([c for c in ["entry_price", "spread", "normalized_trade_size", "wallet_trade_count_30d"] if c in df.columns])
+        alias_groups = [
+            ["wallet_alpha_30d_y", "wallet_alpha_30d"],
+            ["wallet_signal_precision_tp_y", "wallet_signal_precision_tp"],
+            ["wallet_avg_forward_return_15m_y", "wallet_avg_forward_return_15m"],
         ]
+        for group in alias_groups:
+            picked = self._pick_first_existing(df, group)
+            if picked:
+                base_features.append(picked)
         lag_features = [c for c in df.columns if "_lag_" in c]
         context_features = [c for c in ["recent_token_activity_5", "recent_yes_ratio_5"] if c in df.columns]
         feature_cols = base_features + lag_features + context_features

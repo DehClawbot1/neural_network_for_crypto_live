@@ -180,6 +180,28 @@ def run_scraper_cycle():
 
     if all_signals:
         df = pd.DataFrame(all_signals)
+        dedupe_cols = [
+            c
+            for c in [
+                "trade_id",
+                "tx_hash",
+                "trader_wallet",
+                "token_id",
+                "condition_id",
+                "order_side",
+                "outcome_side",
+                "price",
+                "size",
+                "timestamp",
+            ]
+            if c in df.columns
+        ]
+        if dedupe_cols:
+            before = len(df)
+            df = df.drop_duplicates(subset=dedupe_cols, keep="first")
+            removed = before - len(df)
+            if removed > 0:
+                logging.info("Removed %s duplicate raw wallet trades in scraper cycle.", removed)
         df = df.sort_values(by="timestamp", ascending=False).reset_index(drop=True)
         logging.info(f"Extracted {len(df)} relevant BTC trade signals.")
         return df

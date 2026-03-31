@@ -1,4 +1,5 @@
 import logging
+from collections import deque
 from datetime import datetime, timezone
 
 import numpy as np
@@ -27,6 +28,22 @@ class FeatureBuilder:
     def __init__(self):
         self.wallet_stats = {}
         self._seen_signal_keys = set()
+        self._seen_signal_queue = deque()
+        self._max_seen_signal_keys = 50000
+
+    def _remember_signal_key(self, event_key: str) -> bool:
+        """
+        Remember an event key with bounded memory.
+        Returns False when key is already known (duplicate), True otherwise.
+        """
+        if event_key in self._seen_signal_keys:
+            return False
+        self._seen_signal_keys.add(event_key)
+        self._seen_signal_queue.append(event_key)
+        while len(self._seen_signal_queue) > self._max_seen_signal_keys:
+            old_key = self._seen_signal_queue.popleft()
+            self._seen_signal_keys.discard(old_key)
+        return True
 
     def update_wallet_history(self, trade_row: dict):
         wallet_col = "trader_wallet" if "trader_wallet" in trade_row else "wallet_copied" if "wallet_copied" in trade_row else None
@@ -53,9 +70,8 @@ class FeatureBuilder:
             "" if value is None or (isinstance(value, float) and pd.isna(value)) else str(value)
             for value in event_key_parts
         )
-        if event_key in self._seen_signal_keys:
+        if not self._remember_signal_key(event_key):
             return
-        self._seen_signal_keys.add(event_key)
 
         prior = self.wallet_stats.get(wallet, {"sizes": [], "forward_returns": [], "tp_labels": [], "market_counts": {}})
         sizes = prior.get("sizes", [])

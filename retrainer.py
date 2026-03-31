@@ -1,3 +1,4 @@
+import json
 import logging
 from pathlib import Path
 
@@ -15,8 +16,7 @@ class Retrainer:
     Outcome-driven retraining trigger for paper/research mode.
     Prefers closed trades and replay episodes over raw dataset size.
 
-    FIX: Thresholds lowered from 100/200 to 5/10 so the model
-    actually retrains from early trade outcomes instead of waiting forever.
+    Thresholds are intentionally low (5/10) so early outcomes can retrain quickly.
     """
 
     def __init__(self, logs_dir="logs", closed_trade_threshold=5, replay_threshold=10, weights_dir="weights"):
@@ -31,10 +31,10 @@ class Retrainer:
         self.status_file = self.logs_dir / "retrainer_status.txt"
         self.status_csv = self.logs_dir / "model_status.csv"
         self.registry_file = self.weights_dir / "model_registry.csv"
+        self.state_file = self.logs_dir / "retrainer_state.json"
         self.closed_trade_threshold = closed_trade_threshold
         self.replay_threshold = replay_threshold
-        # ── FIX: Track last retrained count to only retrain on NEW trades
-        self._last_retrained_closed_count = 0
+        self._last_retrained_closed_count = self._load_last_retrained_closed_count()
 
     def _safe_read(self, path):
         if not path.exists():
@@ -52,6 +52,22 @@ class Retrainer:
             return float(coerced)
         except Exception:
             return float(default)
+
+    def _load_last_retrained_closed_count(self):
+        if not self.state_file.exists():
+            return 0
+        try:
+            payload = json.loads(self.state_file.read_text(encoding="utf-8"))
+            return int(payload.get("last_retrained_closed_count", 0) or 0)
+        except Exception:
+            return 0
+
+    def _persist_last_retrained_closed_count(self):
+        payload = {"last_retrained_closed_count": int(self._last_retrained_closed_count)}
+        try:
+            self.state_file.write_text(json.dumps(payload), encoding="utf-8")
+        except Exception:
+            pass
 
     def _write_status(self, closed_rows: int, replay_rows: int, action: str):
         self.status_file.write_text(action + "\n", encoding="utf-8")
@@ -126,8 +142,6 @@ class Retrainer:
 
         closed_rows = len(closed_df)
         replay_rows = len(replay_df)
-
-        # ── FIX: Only retrain when we have NEW closed trades since last retrain
         new_closed = closed_rows - self._last_retrained_closed_count
         pnl_degraded = False
         if not backtest_df.empty and "average_pnl" in backtest_df.columns:
@@ -151,16 +165,15 @@ class Retrainer:
 
         logging.info(
             "Retraining triggered: %d new closed trades (threshold=%d). Refreshing models...",
-            new_closed, self.closed_trade_threshold,
+            new_closed,
+            self.closed_trade_threshold,
         )
         Stage1Models(logs_dir=self.logs_dir).train()
         Stage2TemporalModels(logs_dir=self.logs_dir).train()
         train_model(timesteps=5000)
         promoted, message = self._promote_if_better(closed_rows, replay_rows)
 
-        # ── FIX: Update the last-retrained count so we don't retrain again
-        #    until the NEXT batch of 5 trades closes
         self._last_retrained_closed_count = closed_rows
-
+        self._persist_last_retrained_closed_count()
         self._write_status(closed_rows, replay_rows, message)
         return promoted

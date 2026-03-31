@@ -463,6 +463,56 @@ def main_loop():
             return f"{token_id}|{condition_id}|{outcome_side}"
         return f"{market}|{outcome_side}" if market and outcome_side else None
 
+    def _dedupe_signals_df(signals_df: pd.DataFrame):
+        if signals_df is None or signals_df.empty:
+            return signals_df
+        work = signals_df.copy()
+        if "timestamp" in work.columns:
+            work["timestamp"] = pd.to_datetime(work["timestamp"], utc=True, errors="coerce")
+            max_age_hours = max(1, int(os.getenv("SIGNAL_MAX_AGE_HOURS", os.getenv("SIGNAL_LOOKBACK_HOURS", "24"))))
+            cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=max_age_hours)
+            work = work[work["timestamp"].notna() & (work["timestamp"] >= cutoff)]
+        dedupe_cols = [
+            c for c in [
+                "trade_id",
+                "tx_hash",
+                "trader_wallet",
+                "token_id",
+                "condition_id",
+                "order_side",
+                "outcome_side",
+                "price",
+                "size",
+                "timestamp",
+            ] if c in work.columns
+        ]
+        if dedupe_cols:
+            work = work.drop_duplicates(subset=dedupe_cols, keep="first")
+        return work.reset_index(drop=True)
+
+    def _coerce_confidence(value, default=0.5):
+        try:
+            conf = float(value)
+            return float(np.clip(conf, 0.0, 1.0))
+        except Exception:
+            return float(default)
+
+    def _normalize_position_action(action_val):
+        """
+        Normalize position-policy actions for open-position management.
+        Supports both 3-action heads (0/1/2 = hold/reduce/exit) and
+        shared 6-action heads (3/4/5 = hold/reduce/exit).
+        """
+        try:
+            action_val = int(action_val)
+        except Exception:
+            return 3
+        if action_val in (3, 4, 5):
+            return action_val
+        if action_val in (0, 1, 2):
+            return action_val + 3
+        return 3
+
     def _build_predictive_exit_targets(scored_frame, open_trades):
         """
         Build per-position model-based TP targets from current scored signals.
@@ -586,6 +636,7 @@ def main_loop():
             if markets_df is not None and not markets_df.empty: markets_df = markets_df.loc[:, ~markets_df.columns.duplicated()]
             save_market_snapshot(markets_df)
             signals_df = run_scraper_cycle()
+            signals_df = _dedupe_signals_df(signals_df)
             autonomous_monitor.write_heartbeat("signal_engine", status="ok", message="signals_scraped", extra={"rows": len(signals_df) if signals_df is not None else 0})
 
             if signals_df is not None and not signals_df.empty and "market_slug" in signals_df.columns:
@@ -621,7 +672,12 @@ def main_loop():
             inferred_df = stage1_inference.run(inferred_df)
             inferred_df = stage2_inference.run(inferred_df)
             if "temporal_p_tp_before_sl" in inferred_df.columns:
-                inferred_df["p_tp_before_sl"] = inferred_df[["p_tp_before_sl", "temporal_p_tp_before_sl"]].max(axis=1)
+                w_stage1 = float(np.clip(getattr(TradingConfig, "STAGE1_BLEND_WEIGHT", 0.65), 0.0, 1.0))
+                w_stage2 = 1.0 - w_stage1
+                inferred_df["p_tp_before_sl"] = (
+                    inferred_df["p_tp_before_sl"].astype(float).fillna(0.0) * w_stage1
+                    + inferred_df["temporal_p_tp_before_sl"].astype(float).fillna(0.0) * w_stage2
+                ).clip(0.0, 1.0)
             if "temporal_expected_return" in inferred_df.columns:
                 inferred_df["expected_return"] = inferred_df[["expected_return", "temporal_expected_return"]].mean(axis=1)
                 inferred_df["edge_score"] = inferred_df["p_tp_before_sl"].astype(float) * inferred_df["expected_return"].astype(float)
@@ -973,17 +1029,41 @@ def main_loop():
                     logging.warning("Live trade reconciliation failed before management decisions: %s", exc)
             current_open_trades = trade_manager.get_open_positions()
             if current_open_trades and (position_brain is not None or legacy_brain is not None):
+                scored_lookup = {}
+                if scored_df is not None and not scored_df.empty:
+                    for _, sr in scored_df.iterrows():
+                        sr_dict = sr.to_dict()
+                        sr_key = _trade_key_from_signal(sr_dict)
+                        if sr_key:
+                            scored_lookup[sr_key] = sr_dict
                 for trade in current_open_trades:
+                    trade_key = _make_position_key(
+                        token_id=trade.token_id,
+                        condition_id=trade.condition_id,
+                        outcome_side=trade.outcome_side,
+                        market=trade.market,
+                    )
+                    signal_match = scored_lookup.get(trade_key, {}) if trade_key else {}
+                    current_price = float(getattr(trade, "current_price", 0.0) or 0.0)
+                    entry_price = float(getattr(trade, "entry_price", 0.0) or 0.0)
+                    shares = float(getattr(trade, "shares", 0.0) or 0.0)
+                    unrealized_pnl = float(getattr(trade, "unrealized_pnl", 0.0) or 0.0)
+                    market_value = float(shares * current_price)
+                    model_confidence = _coerce_confidence(
+                        signal_match.get("confidence", getattr(trade, "confidence_at_entry", 0.5))
+                    )
                     pos_dict = {
                         "token_id": trade.token_id,
                         "condition_id": trade.condition_id,
                         "outcome_side": trade.outcome_side,
-                        "entry_price": trade.entry_price,
-                        "current_price": trade.current_price,
-                        "size_usdc": trade.size_usdc,
-                        "shares": trade.shares,
+                        "entry_price": entry_price,
+                        "current_price": current_price,
+                        "size_usdc": float(getattr(trade, "size_usdc", 0.0) or 0.0),
+                        "shares": shares,
+                        "market_value": market_value,
+                        "unrealized_pnl": unrealized_pnl,
                         "market_title": trade.market,
-                        "confidence": 0.5 # Placeholder or fetch from signal
+                        "confidence": model_confidence,
                     }
                     token_id = str(trade.token_id or "")
                     try:
@@ -996,6 +1076,8 @@ def main_loop():
                     except Exception as e:
                         logging.warning("Position brain prediction failed for %s: %s. Defaulting to HOLD.", token_id, e)
                         pos_action_val = 3 # HOLD
+
+                    pos_action_val = _normalize_position_action(pos_action_val)
 
                     pos_action_map = {3: "HOLD", 4: "REDUCE", 5: "EXIT"}
                     action_str = pos_action_map.get(pos_action_val, "HOLD")
