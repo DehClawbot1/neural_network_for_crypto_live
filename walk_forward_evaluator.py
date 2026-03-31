@@ -2,6 +2,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from model_feature_safety import drop_all_nan_features
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import accuracy_score
@@ -45,8 +46,8 @@ class WalkForwardEvaluator:
         if df.empty or "target_up" not in df.columns:
             return pd.DataFrame()
 
-        usable = [col for col in self.FEATURE_COLUMNS if col in df.columns]
-        if not usable:
+        candidates = [col for col in self.FEATURE_COLUMNS if col in df.columns]
+        if not candidates:
             return pd.DataFrame()
 
         if "timestamp" in df.columns:
@@ -57,6 +58,9 @@ class WalkForwardEvaluator:
         train_df = df.iloc[:split_idx]
         test_df = df.iloc[split_idx:]
         if train_df.empty or test_df.empty:
+            return pd.DataFrame()
+        usable, _ = drop_all_nan_features(train_df, candidates, context="walk_forward_evaluator")
+        if not usable:
             return pd.DataFrame()
 
         model = Pipeline(

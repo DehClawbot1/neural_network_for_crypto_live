@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pandas as pd
+from model_feature_safety import drop_all_nan_features
 from schema import ALIASES
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.impute import SimpleImputer
@@ -49,8 +50,8 @@ class TimeSplitTrainer:
         if df.empty or "target_up" not in df.columns:
             return pd.DataFrame()
 
-        usable = [col for col in self.FEATURE_COLUMNS if col in df.columns]
-        if not usable:
+        candidates = [col for col in self.FEATURE_COLUMNS if col in df.columns]
+        if not candidates:
             return pd.DataFrame()
 
         if "timestamp" in df.columns:
@@ -64,6 +65,9 @@ class TimeSplitTrainer:
         val_df = df.iloc[train_end:val_end]
         test_df = df.iloc[val_end:]
         if train_df.empty or val_df.empty or test_df.empty:
+            return pd.DataFrame()
+        usable, _ = drop_all_nan_features(train_df, candidates, context="time_split_trainer")
+        if not usable:
             return pd.DataFrame()
 
         clf = Pipeline([

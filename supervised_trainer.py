@@ -2,6 +2,7 @@ from pathlib import Path
 
 import joblib
 import pandas as pd
+from model_feature_safety import drop_all_nan_features
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
@@ -45,7 +46,8 @@ class SupervisedTrainer:
         if df.empty:
             return None, None
 
-        usable_features = [col for col in self.FEATURE_COLUMNS if col in df.columns]
+        candidates = [col for col in self.FEATURE_COLUMNS if col in df.columns]
+        usable_features, _ = drop_all_nan_features(df, candidates, context="supervised_trainer")
         if not usable_features or "target_up" not in df.columns:
             return None, None
 

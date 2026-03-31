@@ -1,7 +1,9 @@
 from pathlib import Path
+import warnings
 
 import joblib
 import pandas as pd
+from model_feature_safety import drop_all_nan_features
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
 from sklearn.impute import SimpleImputer
@@ -75,7 +77,9 @@ class Stage1Models:
             return pd.DataFrame()
 
     def _usable_features(self, df):
-        return [c for c in self.FEATURE_COLUMNS if c in df.columns]
+        candidates = [c for c in self.FEATURE_COLUMNS if c in df.columns]
+        usable, _ = drop_all_nan_features(df, candidates, context="stage1_models")
+        return usable
 
     def _build_classifier(self):
         if LGBMClassifier is not None:
@@ -160,7 +164,13 @@ class Stage1Models:
 
         if "tp_before_sl_60m" in df.columns:
             clf = self._build_classifier()
-            clf.fit(X, df["tp_before_sl_60m"].fillna(0).astype(int))
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="X does not have valid feature names, but LGBMClassifier was fitted with feature names",
+                    category=UserWarning,
+                )
+                clf.fit(X, df["tp_before_sl_60m"].fillna(0).astype(int))
             joblib.dump({"model": clf, "features": usable}, self.classifier_file)
             self._write_feature_importance(usable, clf)
 

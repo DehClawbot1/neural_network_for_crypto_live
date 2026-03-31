@@ -2,6 +2,7 @@ from pathlib import Path
 
 import joblib
 import pandas as pd
+from model_feature_safety import drop_all_nan_features
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
@@ -61,7 +62,8 @@ class SupervisedModels:
         if train_df.empty:
             return None
 
-        usable = [c for c in self.FEATURE_COLUMNS if c in train_df.columns]
+        candidates = [c for c in self.FEATURE_COLUMNS if c in train_df.columns]
+        usable, _ = drop_all_nan_features(train_df, candidates, context="supervised_models")
         if not usable:
             return None
 

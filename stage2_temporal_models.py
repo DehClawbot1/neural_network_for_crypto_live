@@ -3,6 +3,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+from model_feature_safety import drop_all_nan_features
 from sklearn.impute import SimpleImputer
 from sklearn.utils import resample
 from sklearn.metrics import accuracy_score, mean_squared_error, precision_score, recall_score
@@ -97,6 +98,9 @@ class Stage2TemporalModels:
         feature_cols = base_features + lag_features + context_features
         if not feature_cols:
             return pd.DataFrame()
+        feature_cols, _ = drop_all_nan_features(df, feature_cols, context="stage2_temporal_models")
+        if not feature_cols:
+            return pd.DataFrame()
 
         df = self._stationarize_features(df, feature_cols)
         if len(df) < 6:
@@ -122,7 +126,7 @@ class Stage2TemporalModels:
                 clf = Pipeline([
                     ("imputer", SimpleImputer(strategy="constant", fill_value=0)),
                     ("scaler", StandardScaler()),
-                    ("model", MLPClassifier(hidden_layer_sizes=(64, 32), random_state=42, max_iter=300, learning_rate_init=1e-3, alpha=1e-4, early_stopping=True, validation_fraction=0.15, n_iter_no_change=15)),
+                    ("model", MLPClassifier(hidden_layer_sizes=(48, 24), random_state=42, max_iter=600, learning_rate_init=1e-3, alpha=1e-4, early_stopping=True, validation_fraction=0.15, n_iter_no_change=20, tol=1e-3)),
                 ])
                 clf.fit(balanced_train_df[feature_cols], balanced_train_df[target_cls].fillna(0).astype(int))
                 y_test = test_df[target_cls].fillna(0).astype(int)
@@ -156,7 +160,7 @@ class Stage2TemporalModels:
                 reg = Pipeline([
                     ("imputer", SimpleImputer(strategy="constant", fill_value=0)),
                     ("scaler", StandardScaler()),
-                    ("model", MLPRegressor(hidden_layer_sizes=(64, 32), random_state=42, max_iter=300, learning_rate_init=1e-3, alpha=1e-4, early_stopping=True, validation_fraction=0.15, n_iter_no_change=15)),
+                    ("model", MLPRegressor(hidden_layer_sizes=(48, 24), random_state=42, max_iter=600, learning_rate_init=1e-3, alpha=1e-4, early_stopping=True, validation_fraction=0.15, n_iter_no_change=20, tol=1e-3)),
                 ])
                 reg.fit(train_df[feature_cols], train_df[target_reg].fillna(0.0))
                 preds = reg.predict(test_df[feature_cols])

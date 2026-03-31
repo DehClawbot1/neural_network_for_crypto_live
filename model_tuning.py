@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pandas as pd
+from model_feature_safety import drop_all_nan_features
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.neural_network import MLPClassifier
@@ -39,6 +40,9 @@ class Stage2TemporalTuner:
         feature_cols = [c for c in df.columns if "_lag_" in c or c in ["recent_wallet_activity_5", "recent_yes_ratio_5"]]
         if not feature_cols:
             return None
+        feature_cols, _ = drop_all_nan_features(df, feature_cols, context="stage2_temporal_tuner")
+        if not feature_cols:
+            return None
 
         X = df[feature_cols]
         y = df["tp_before_sl_60m"].fillna(0).astype(int)
@@ -55,12 +59,13 @@ class Stage2TemporalTuner:
                 ("model", MLPClassifier(
                     hidden_layer_sizes=(hidden1, hidden2),
                     random_state=42,
-                    max_iter=300,
+                    max_iter=600,
                     learning_rate_init=lr,
                     alpha=alpha,
                     early_stopping=True,
                     validation_fraction=0.15,
-                    n_iter_no_change=15,
+                    n_iter_no_change=20,
+                    tol=1e-3,
                 )),
             ])
             scores = cross_val_score(pipe, X, y, cv=tscv, scoring="accuracy")
