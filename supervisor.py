@@ -337,31 +337,42 @@ def log_live_fill_event(signal_row, fill_price, size_usdc, action_type="LIVE_TRA
 # Prevents Polymarket IP Bans during 5-second fast-polling
 _orig_run_scraper_cycle = run_scraper_cycle
 _orig_fetch_btc_markets = fetch_btc_markets
-_last_research_time = 0
+_last_market_fetch_time = 0
+_last_scraper_time = 0
 _cached_open_markets = pd.DataFrame()
 
 def safe_run_scraper_cycle(*args, **kwargs):
-    global _last_research_time
+    global _last_scraper_time
     import time
     import pandas as pd
-    if time.time() - _last_research_time < 55:
+    min_interval = max(0, int(os.getenv("SCRAPER_MIN_INTERVAL_SECONDS", "55")))
+    now = time.time()
+    if min_interval and (now - _last_scraper_time) < min_interval:
+        logging.info(
+            "Scraper throttle active: skipping wallet scrape for %.1fs (min_interval=%ss).",
+            float(min_interval - (now - _last_scraper_time)),
+            min_interval,
+        )
         return pd.DataFrame()
-    return _orig_run_scraper_cycle(*args, **kwargs)
+    out = _orig_run_scraper_cycle(*args, **kwargs)
+    _last_scraper_time = now
+    return out
 
 def safe_fetch_btc_markets(limit=1000, closed=False, max_offset=0):
-    global _last_research_time, _cached_open_markets
+    global _last_market_fetch_time, _cached_open_markets
     import time
     import pandas as pd
+    cache_ttl = max(1, int(os.getenv("MARKET_CACHE_TTL_SECONDS", "55")))
     
-    # Only use cache if asking for open markets and within 55s
-    if not closed and time.time() - _last_research_time < 55:
+    # Cache only open-markets snapshots, independent of scraper throttling.
+    if not closed and time.time() - _last_market_fetch_time < cache_ttl:
         if not _cached_open_markets.empty:
             return _cached_open_markets
             
     res = _orig_fetch_btc_markets(limit=limit, closed=closed, max_offset=max_offset)
     if not closed and not res.empty:
         _cached_open_markets = res
-        _last_research_time = time.time()
+        _last_market_fetch_time = time.time()
     return res
 
 run_scraper_cycle = safe_run_scraper_cycle
