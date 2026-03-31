@@ -24,7 +24,15 @@ class TradingConfig:
     # Risk sizing
     MAX_RISK_PER_TRADE_PCT = 0.15
     MIN_BET_USDC = 1.00
+    # Legacy cap retained for compatibility; dynamic sizing uses HARD_MAX_BET_USDC.
     MAX_BET_USDC = 25.0
+    # Hard per-trade fail-safe cap (absolute USD) to prevent runaway bet sizes.
+    HARD_MAX_BET_USDC = 250.0
+    # Keep part of wallet untouched so bot cannot deploy 100% capital.
+    CAPITAL_RESERVE_PCT = 0.20
+    # Minimum dynamic sizing component (as % of tradable balance), capped below.
+    MIN_BET_DYNAMIC_PCT = 0.002
+    MAX_DYNAMIC_MIN_BET_USDC = 5.0
     HIGH_CONFIDENCE_BET_PCT = 0.08
     MEDIUM_CONFIDENCE_BET_PCT = 0.05
     LOW_CONFIDENCE_BET_PCT = 0.04
