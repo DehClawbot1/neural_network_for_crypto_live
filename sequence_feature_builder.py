@@ -79,7 +79,9 @@ class SequenceFeatureBuilder:
 
     def write(self):
         df = self.build()
-        if not df.empty:
-            df.to_csv(self.output_file, index=False)
+        # Always rewrite the output file so stale sequence datasets do not
+        # survive cycles where no valid sequence rows were produced.
+        if df is None:
+            df = pd.DataFrame()
+        df.to_csv(self.output_file, index=False)
         return df
-

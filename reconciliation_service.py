@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -28,6 +29,14 @@ class ReconciliationService:
                     return value
             return [payload]
         return []
+
+    def _parse_timestamp(self, value):
+        if value in (None, ""):
+            return None
+        try:
+            return pd.to_datetime(value, utc=True, errors="coerce")
+        except Exception:
+            return None
 
     def _is_synthetic_fill_id(self, fill_id):
         fid = str(fill_id or "").strip().lower()
@@ -209,6 +218,10 @@ class ReconciliationService:
         remote_trades = [self._normalize_trade(t) for t in remote_trades_raw]
         remote_trades = [t for t in remote_trades if t is not None]
 
+        # Compare only a recent window to avoid permanent mismatches from historical/stale fills.
+        lookback_hours = max(1, int(os.getenv("RECONCILIATION_LOOKBACK_HOURS", "24") or 24))
+        cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=lookback_hours)
+
         remote_orders_df = pd.DataFrame(remote_orders)
         remote_trades_df = pd.DataFrame(remote_trades)
 
@@ -229,6 +242,9 @@ class ReconciliationService:
         for trade in remote_trades:
             oid = str(trade.get("order_id") or "").strip()
             tid = str(trade.get("token_id") or "").strip()
+            ts = self._parse_timestamp(trade.get("filled_at"))
+            if ts is not None and not pd.isna(ts) and ts < cutoff:
+                continue
             if oid in known_order_ids or tid in tracked_tokens:
                 filtered_remote_trades.append(trade)
         remote_trades = filtered_remote_trades
@@ -256,6 +272,9 @@ class ReconciliationService:
                     if not fill_id or fill_id.lower() in {"nan", "none"}:
                         continue
                     if self._is_synthetic_fill_id(fill_id):
+                        continue
+                    ts = self._parse_timestamp(row.get("filled_at"))
+                    if ts is not None and not pd.isna(ts) and ts < cutoff:
                         continue
                     oid = str(row.get("order_id") or "").strip()
                     tid = str(row.get("token_id") or "").strip()

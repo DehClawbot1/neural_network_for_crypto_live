@@ -5,6 +5,12 @@ import joblib
 import numpy as np
 import pandas as pd
 
+try:
+    from inference_runtime_guard import report_error as _report_inference_error
+except Exception:  # pragma: no cover
+    def _report_inference_error(*args, **kwargs):
+        return None
+
 
 class Stage1Inference:
     def __init__(self, weights_dir="weights"):
@@ -73,7 +79,8 @@ class Stage1Inference:
                             raw = clf.decision_function(x_clf)
                             probs = 1.0 / (1.0 + np.exp(-np.clip(raw, -500, 500)))
                     out["p_tp_before_sl"] = np.clip(pd.Series(probs, index=out.index).astype(float), 0.0, 1.0)
-            except Exception:
+            except Exception as exc:
+                _report_inference_error("stage1_inference.classifier", exc, context="p_tp_before_sl_zero_fallback")
                 out["p_tp_before_sl"] = 0.0
 
         if reg_saved is not None:
@@ -97,7 +104,8 @@ class Stage1Inference:
                         .replace([np.inf, -np.inf], 0.0)
                         .fillna(0.0)
                     )
-            except Exception:
+            except Exception as exc:
+                _report_inference_error("stage1_inference.regressor", exc, context="expected_return_zero_fallback")
                 out["expected_return"] = 0.0
 
         out["return_std"] = abs(out["expected_return"].astype(float)) * 0.35

@@ -32,11 +32,20 @@ class LivePositionBook:
                 COALESCE(f.side, o.order_side) AS order_side
             FROM fills f
             LEFT JOIN orders o ON o.order_id = f.order_id
-            ORDER BY COALESCE(f.filled_at, ''), f.fill_id
+            ORDER BY
+                COALESCE(f.filled_at, ''),
+                CASE WHEN UPPER(COALESCE(f.side, o.order_side, '')) = 'BUY' THEN 0 ELSE 1 END,
+                f.fill_id
             """
         )
         books = {}
         for fill in fills:
+            fill_id = str(fill.get("fill_id") or "")
+            # Synthetic dust-clear fills are internal bookkeeping artifacts.
+            # They are useful for local logs, but should not drive live position
+            # reconstruction from exchange-synced fills.
+            if "dust_clear" in fill_id:
+                continue
             tid = fill.get("token_id"); token_id = "" if pd.isna(tid) else str(tid or "") # BUG FIX 10
             condition_id = fill.get("condition_id")
             outcome_side = fill.get("outcome_side")

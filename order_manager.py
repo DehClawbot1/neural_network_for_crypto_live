@@ -624,6 +624,34 @@ class OrderManager:
         return self.client.get_order(order_id)
 
     def wait_for_fill(self, order_id, timeout_seconds=20, poll_seconds=2):
+        # Synthetic dust-clear orders are already materialized as fills in submit_entry.
+        # Do not re-record them here, otherwise each poll path duplicates SELL fills
+        # and corrupts live position reconstruction.
+        if order_id and "dust_clear" in str(order_id):
+            db_row = {}
+            try:
+                rows = self.db.query_all(
+                    "SELECT token_id, condition_id, outcome_side, order_side, price, size FROM orders WHERE order_id = ?",
+                    (str(order_id),),
+                )
+                if rows:
+                    db_row = rows[0]
+            except Exception:
+                db_row = {}
+            fill_payload = {
+                "trade_id": f"fill_{order_id}",
+                "order_id": str(order_id),
+                "token_id": db_row.get("token_id", ""),
+                "condition_id": db_row.get("condition_id"),
+                "outcome_side": db_row.get("outcome_side"),
+                "side": db_row.get("order_side"),
+                "price": float(db_row.get("price", 0.0) or 0.0),
+                "size": float(db_row.get("size", 0.0) or 0.0),
+                "filled_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self._update_order_status(str(order_id), "FILLED", fill_price=fill_payload["price"], fill_size=fill_payload["size"])
+            return {"filled": True, "response": fill_payload, "order_status": {"status": "FILLED", "id": str(order_id)}, "synthetic": True}
+
         deadline = time.time() + float(timeout_seconds)
         last_response = None
         while time.time() < deadline:

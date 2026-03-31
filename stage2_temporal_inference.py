@@ -4,6 +4,12 @@ import joblib
 import numpy as np
 import pandas as pd
 
+try:
+    from inference_runtime_guard import report_error as _report_inference_error
+except Exception:  # pragma: no cover
+    def _report_inference_error(*args, **kwargs):
+        return None
+
 
 class Stage2TemporalInference:
     def __init__(self, weights_dir="weights"):
@@ -66,7 +72,8 @@ class Stage2TemporalInference:
                         raw = clf.decision_function(x_clf)
                         probs = 1.0 / (1.0 + np.exp(-np.clip(raw, -500, 500)))
                     out["temporal_p_tp_before_sl"] = np.clip(pd.Series(probs, index=out.index).astype(float), 0.0, 1.0)
-            except Exception:
+            except Exception as exc:
+                _report_inference_error("stage2_temporal_inference.classifier", exc, context="temporal_p_tp_zero_fallback")
                 out["temporal_p_tp_before_sl"] = 0.0
 
         if reg_saved is not None:
@@ -84,7 +91,8 @@ class Stage2TemporalInference:
                         .replace([np.inf, -np.inf], 0.0)
                         .fillna(0.0)
                     )
-            except Exception:
+            except Exception as exc:
+                _report_inference_error("stage2_temporal_inference.regressor", exc, context="temporal_expected_return_zero_fallback")
                 out["temporal_expected_return"] = 0.0
 
         return out

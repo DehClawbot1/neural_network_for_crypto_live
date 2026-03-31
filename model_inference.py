@@ -4,6 +4,12 @@ import joblib
 import numpy as np
 import pandas as pd
 
+try:
+    from inference_runtime_guard import report_error as _report_inference_error
+except Exception:  # pragma: no cover
+    def _report_inference_error(*args, **kwargs):
+        return None
+
 
 class ModelInference:
     """
@@ -70,7 +76,8 @@ class ModelInference:
                         raw = clf.decision_function(x_clf)
                         probs = 1.0 / (1.0 + np.exp(-np.clip(raw, -500, 500))) # BUG FIX 6: Prevent NaN poisoning
                     out["p_tp_before_sl"] = np.clip(pd.Series(probs, index=out.index).astype(float), 0.0, 1.0)
-            except Exception:
+            except Exception as exc:
+                _report_inference_error("model_inference.classifier", exc, context="p_tp_before_sl_zero_fallback")
                 out["p_tp_before_sl"] = 0.0
 
         if reg_saved is not None:
@@ -80,7 +87,8 @@ class ModelInference:
                 if x_reg is not None:
                     preds = reg.predict(x_reg)
                     out["expected_return"] = pd.Series(np.array(preds).ravel(), index=out.index) # BUG FIX 7: Support 2D (N,1) regressor arrays.astype(float).replace([np.inf, -np.inf], 0.0).fillna(0.0)
-            except Exception:
+            except Exception as exc:
+                _report_inference_error("model_inference.regressor", exc, context="expected_return_zero_fallback")
                 out["expected_return"] = 0.0
 
         out["edge_score"] = out["p_tp_before_sl"].astype(float) * out["expected_return"].astype(float)

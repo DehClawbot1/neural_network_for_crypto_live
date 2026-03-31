@@ -585,14 +585,21 @@ def render_action_board(signals_df, positions_df):
     for _, r in rk.iterrows():
         m = r.get("market_title", r.get("market", "Unknown"))
         cf = pd.to_numeric(pd.Series([r.get("confidence")]), errors="coerce").iloc[0]
-        pt = pd.to_numeric(pd.Series([r.get("p_tp_before_sl")]), errors="coerce").iloc[0]
-        ed = pd.to_numeric(pd.Series([r.get("edge_score")]), errors="coerce").iloc[0]
+        entry_intent = str(r.get("entry_intent", "OPEN_LONG") or "OPEN_LONG").upper()
+        rec_action = str(r.get("recommended_action", r.get("action", "")) or "").upper()
         ao = m in om
-        if ao and pd.notna(cf) and cf < 0.50:
+        if entry_intent == "CLOSE_LONG":
+            g = "Exit / Leave"
+        elif ao and pd.notna(cf) and cf < 0.50:
             g = "Exit / Leave"
         elif ao:
             g = "Hold"
+        elif rec_action in {"SMALL_BUY", "LARGE_BUY", "BUY", "ENTER"}:
+            g = "Enter"
+        elif rec_action in {"IGNORE", "HOLD", "WATCH"}:
+            g = "Watch"
         elif entry_rule.should_enter(r.to_dict()):
+            # Fallback path for historical rows that don't carry explicit runtime action fields.
             g = "Enter"
         else:
             g = "Watch"

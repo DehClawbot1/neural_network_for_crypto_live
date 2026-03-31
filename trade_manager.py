@@ -199,33 +199,52 @@ class TradeManager:
                 client_ref = getattr(self, 'exec_client', getattr(self, 'client', getattr(self, 'execution_client', getattr(self, 'api', None))))
                 if client_ref and hasattr(trade, 'token_id') and trade.token_id:
                     raw_bal = client_ref.get_balance_allowance(asset_type="CONDITIONAL", token_id=trade.token_id)
-                    
-                    bal_val = 0.0
-                    if isinstance(raw_bal, dict) and 'balance' in raw_bal:
-                        bal_val = float(raw_bal['balance'])
+                    bal_raw_val = None
+                    if isinstance(raw_bal, dict):
+                        for key in ("balance", "available", "available_balance", "amount"):
+                            if raw_bal.get(key) is not None:
+                                bal_raw_val = raw_bal.get(key)
+                                break
                     elif raw_bal is not None:
-                        bal_val = float(raw_bal)
-                    
-                    # Polymarket returns microdollars. < 10000 = less than 0.01 shares (dust)
-                    if raw_bal is not None and bal_val < 10000: # BUG FIX 2: Protect against NoneType API drops
+                        bal_raw_val = raw_bal
+
+                    bal_val = 0.0
+                    if bal_raw_val is not None:
+                        try:
+                            normalizer = getattr(client_ref, "_normalize_usdc_balance", None)
+                            if callable(normalizer):
+                                bal_val = float(normalizer(bal_raw_val))
+                            else:
+                                bal_val = float(bal_raw_val)
+                        except Exception:
+                            try:
+                                bal_val = float(bal_raw_val)
+                            except Exception:
+                                bal_val = 0.0
+
+                    # Treat near-zero exchange inventory as external/manual close.
+                    # Use an explicit share epsilon instead of a hardcoded raw-unit threshold.
+                    close_eps = float(os.getenv("EXTERNAL_CLOSE_BALANCE_EPS_SHARES", "1e-6") or 1e-6)
+                    if bal_raw_val is not None and bal_val <= close_eps:
                         close_reason = "external_manual_close"
-                        # Zero out unrealized PnL so the dashboard doesn't skew
-                        if hasattr(trade, 'unrealized_pnl'): trade.unrealized_pnl = 0.0 
+                        if hasattr(trade, 'unrealized_pnl'):
+                            trade.unrealized_pnl = 0.0
             except Exception:
                 pass # Safely ignore if API rate limits or client ref not found
             # -------------------------------------------------------
 
-            if roi >= TradingConfig.PAPER_TP_ROI:
+            # Keep external/manual-close reason sticky: do not overwrite with rule exits.
+            if close_reason is None and roi >= TradingConfig.PAPER_TP_ROI:
                 close_reason = "take_profit_roi"
-            elif (current_price - entry_price) >= TradingConfig.SHADOW_TP_DELTA:
+            elif close_reason is None and (current_price - entry_price) >= TradingConfig.SHADOW_TP_DELTA:
                 close_reason = "take_profit_price_move"
-            elif predicted_target_price is not None and current_price >= predicted_target_price:
+            elif close_reason is None and predicted_target_price is not None and current_price >= predicted_target_price:
                 close_reason = "take_profit_model_target"
-            elif (entry_price - current_price) >= TradingConfig.SHADOW_SL_DELTA:
+            elif close_reason is None and (entry_price - current_price) >= TradingConfig.SHADOW_SL_DELTA:
                 close_reason = "stop_loss"
-            elif minutes_open >= getattr(TradingConfig, 'TIME_STOP_MINUTES', 120):
+            elif close_reason is None and minutes_open >= getattr(TradingConfig, 'TIME_STOP_MINUTES', 120):
                 close_reason = "time_stop"
-            elif trailing_drop >= TradingConfig.PAPER_TRAILING_STOP and minutes_open > 15:
+            elif close_reason is None and trailing_drop >= TradingConfig.PAPER_TRAILING_STOP and minutes_open > 15:
                 close_reason = "trailing_stop"
 
             if close_reason:

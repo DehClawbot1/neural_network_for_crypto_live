@@ -7,6 +7,17 @@ import pandas as pd
 from db import Database
 
 
+def _is_synthetic_fill_id(value) -> bool:
+    fid = str(value or "").strip().lower()
+    return (
+        fid.startswith("fill_dust_clear_")
+        or fid.startswith("dust_clear_")
+        or fid.startswith("fill_ext_sync_")
+        or fid.startswith("ext_sync_")
+        or "dust_clear" in fid
+    )
+
+
 def _safe_read_csv(path: Path):
     if not path.exists():
         return pd.DataFrame()
@@ -51,8 +62,13 @@ def run_audit(logs_dir: str):
     _print_section("Ghost Position Candidates")
     ghosts = pd.DataFrame()
     if not live.empty and not fills.empty:
+        fills_for_ghosts = fills.copy()
+        if "fill_id" in fills_for_ghosts.columns:
+            fills_for_ghosts = fills_for_ghosts[
+                ~fills_for_ghosts["fill_id"].map(_is_synthetic_fill_id)
+            ].copy()
         agg = (
-            fills.assign(
+            fills_for_ghosts.assign(
                 buy_size=lambda d: d.apply(lambda r: float(r["size"] or 0.0) if str(r.get("side", "")).upper() == "BUY" else 0.0, axis=1),
                 sell_size=lambda d: d.apply(lambda r: float(r["size"] or 0.0) if str(r.get("side", "")).upper() == "SELL" else 0.0, axis=1),
             )
@@ -77,12 +93,16 @@ def run_audit(logs_dir: str):
     db_order_ids = set(orders.get("order_id", pd.Series(dtype=str)).dropna().astype(str).tolist())
     csv_fill_ids = set(live_fills_csv.get("fill_id", pd.Series(dtype=str)).dropna().astype(str).tolist())
     db_fill_ids = set(fills.get("fill_id", pd.Series(dtype=str)).dropna().astype(str).tolist())
+    csv_fill_ids_clean = {fid for fid in csv_fill_ids if not _is_synthetic_fill_id(fid)}
+    db_fill_ids_clean = {fid for fid in db_fill_ids if not _is_synthetic_fill_id(fid)}
     print(
         {
             "orders_only_csv": len(csv_order_ids - db_order_ids),
             "orders_only_db": len(db_order_ids - csv_order_ids),
             "fills_only_csv": len(csv_fill_ids - db_fill_ids),
             "fills_only_db": len(db_fill_ids - csv_fill_ids),
+            "fills_only_csv_ex_synth": len(csv_fill_ids_clean - db_fill_ids_clean),
+            "fills_only_db_ex_synth": len(db_fill_ids_clean - csv_fill_ids_clean),
         }
     )
 

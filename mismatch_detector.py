@@ -38,9 +38,21 @@ class StateMismatchDetector:
         )
 
     def detect(self, active_trades, live_positions_df):
-        local_keys = {self._trade_key(trade) for trade in (active_trades or []) if _safe_str(getattr(trade, "token_id", ""))}
-        live_keys = set()
         min_notional = float(os.getenv("MIN_RECONCILED_POSITION_NOTIONAL_USDC", "0.01") or 0.01)
+        local_keys = set()
+        for trade in (active_trades or []):
+            token_id = _safe_str(getattr(trade, "token_id", ""))
+            if not token_id:
+                continue
+            try:
+                shares = float(getattr(trade, "shares", 0.0) or 0.0)
+                px = float(getattr(trade, "current_price", getattr(trade, "entry_price", 0.0)) or 0.0)
+                if shares <= 0 or (shares * max(px, 0.0)) < min_notional:
+                    continue
+            except Exception:
+                continue
+            local_keys.add(self._trade_key(trade))
+        live_keys = set()
         if live_positions_df is not None and not live_positions_df.empty:
             for _, row in live_positions_df.iterrows():
                 token_id = _safe_str(row.get("token_id", ""))

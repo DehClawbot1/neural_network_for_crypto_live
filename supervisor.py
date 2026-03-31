@@ -54,6 +54,21 @@ from db import Database
 from money_manager import MoneyManager
 from orderbook_guard import OrderBookGuard
 from token_utils import normalize_token_id
+try:
+    from inference_runtime_guard import (
+        reset_cycle as _reset_inference_runtime_guard,
+        has_errors as _inference_guard_has_errors,
+        get_errors as _inference_guard_get_errors,
+    )
+except Exception:
+    def _reset_inference_runtime_guard():
+        return None
+
+    def _inference_guard_has_errors():
+        return False
+
+    def _inference_guard_get_errors(limit=None):
+        return []
 
 # Configure logging for zero-intervention monitoring
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -743,6 +758,7 @@ def main_loop():
             pre_cycle_entry_freeze = False
             pre_cycle_freeze_reason = None
             pre_cycle_freeze_detail = {}
+            _reset_inference_runtime_guard()
             if trading_mode == "live" and order_manager is not None and hasattr(order_manager, "risk") and hasattr(order_manager.risk, "reset_failed_orders"):
                 order_manager.risk.reset_failed_orders()
             if trading_mode == "live" and reconciliation_service is not None:
@@ -819,8 +835,21 @@ def main_loop():
                 signals_df = _dedupe_signals_df(signals_df)
             signals_df, markets_df = _inject_always_on_signal(signals_df, markets_df)
             signals_df = _dedupe_signals_df(signals_df)
-            if always_on_enabled and always_on_only and signals_df is not None and not signals_df.empty and "market_slug" in signals_df.columns:
-                signals_df = signals_df[signals_df["market_slug"].astype(str) == always_on_slug].reset_index(drop=True)
+            if always_on_enabled and always_on_only and signals_df is not None and not signals_df.empty:
+                # Keep ALWAYS_ON_ONLY robust when rotating BTC 5m slugs change every round.
+                # Prefer synthetic pinned signals; fall back to slug filtering only if needed.
+                if "signal_source" in signals_df.columns:
+                    src = signals_df["signal_source"].astype(str).str.lower()
+                    pinned = signals_df[src == "always_on_market"]
+                    if not pinned.empty:
+                        signals_df = pinned.reset_index(drop=True)
+                if not signals_df.empty and "market_slug" in signals_df.columns:
+                    configured = str(always_on_slug or "").strip().lower()
+                    if configured.startswith("btc-updown-5m-"):
+                        mask = signals_df["market_slug"].astype(str).str.lower().str.startswith("btc-updown-5m-")
+                    else:
+                        mask = signals_df["market_slug"].astype(str).str.lower() == configured
+                    signals_df = signals_df[mask].reset_index(drop=True)
             autonomous_monitor.write_heartbeat("signal_engine", status="ok", message="signals_scraped", extra={"rows": len(signals_df) if signals_df is not None else 0})
 
             if signals_df is not None and not signals_df.empty and "market_slug" in signals_df.columns:
@@ -855,6 +884,33 @@ def main_loop():
             inferred_df = model_inference.run(features_df)
             inferred_df = stage1_inference.run(inferred_df)
             inferred_df = stage2_inference.run(inferred_df)
+            strict_inference_mode = os.getenv("STRICT_INFERENCE_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
+            if trading_mode == "live" and strict_inference_mode and _inference_guard_has_errors():
+                inference_errors = _inference_guard_get_errors(limit=20)
+                pre_cycle_entry_freeze = True
+                pre_cycle_freeze_reason = "inference_runtime_exception"
+                pre_cycle_freeze_detail = {
+                    "error_count": len(inference_errors),
+                    "errors": [
+                        {
+                            "stage": e.get("stage"),
+                            "error_type": e.get("error_type"),
+                            "message": e.get("message"),
+                            "context": e.get("context"),
+                        }
+                        for e in inference_errors
+                    ],
+                }
+                logging.error(
+                    "STRICT INFERENCE MODE: Runtime inference exceptions detected. Freezing live entries this cycle: %s",
+                    pre_cycle_freeze_detail,
+                )
+                autonomous_monitor.write_heartbeat(
+                    "inference",
+                    status="error",
+                    message="strict_inference_freeze",
+                    extra=pre_cycle_freeze_detail,
+                )
             if "temporal_p_tp_before_sl" in inferred_df.columns:
                 w_stage1 = float(np.clip(getattr(TradingConfig, "STAGE1_BLEND_WEIGHT", 0.65), 0.0, 1.0))
                 w_stage2 = 1.0 - w_stage1
@@ -1464,6 +1520,17 @@ def main_loop():
                 # CLEANED LIVE EXIT & MONEY MANAGER BLOCK
             if trading_mode == "live" and order_manager is not None:
                 for ct in closed_trades:
+                    if str(getattr(ct, "close_reason", "") or "").strip().lower() == "external_manual_close":
+                        logging.info(
+                            "Skipping SELL for externally-closed trade token=%s reason=%s",
+                            str(getattr(ct, "token_id", "") or "")[:16],
+                            getattr(ct, "close_reason", None),
+                        )
+                        try:
+                            trade_manager.persist_closed_trades([ct])
+                        except Exception:
+                            pass
+                        continue
                     _ct_shares = float(getattr(ct, "shares", 0.0) or 0.0)
                     _ct_px = float(getattr(ct, "current_price", 0.0) or getattr(ct, "entry_price", 0.0) or 0.0)
                     if _ct_shares <= 0:
