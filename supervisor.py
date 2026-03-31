@@ -749,8 +749,15 @@ def main_loop():
             autonomous_monitor.write_heartbeat("market_monitor", status="ok", message="markets_fetched", extra={"rows": len(markets_df) if markets_df is not None else 0})
             if markets_df is not None and not markets_df.empty: markets_df = markets_df.loc[:, ~markets_df.columns.duplicated()]
             save_market_snapshot(markets_df)
-            signals_df = run_scraper_cycle()
-            signals_df = _dedupe_signals_df(signals_df)
+            if always_on_enabled and always_on_only:
+                logging.info(
+                    "ALWAYS_ON_ONLY active for slug=%s: skipping wallet scraper and using pinned market signal path.",
+                    always_on_slug,
+                )
+                signals_df = pd.DataFrame()
+            else:
+                signals_df = run_scraper_cycle()
+                signals_df = _dedupe_signals_df(signals_df)
             signals_df, markets_df = _inject_always_on_signal(signals_df, markets_df)
             signals_df = _dedupe_signals_df(signals_df)
             if always_on_enabled and always_on_only and signals_df is not None and not signals_df.empty and "market_slug" in signals_df.columns:
