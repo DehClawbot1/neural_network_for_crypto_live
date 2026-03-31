@@ -1208,7 +1208,23 @@ def main_loop():
                 # CLEANED LIVE EXIT & MONEY MANAGER BLOCK
             if trading_mode == "live" and order_manager is not None:
                 for ct in closed_trades:
-                    if ct.shares <= 0: continue
+                    _ct_shares = float(getattr(ct, "shares", 0.0) or 0.0)
+                    _ct_px = float(getattr(ct, "current_price", 0.0) or getattr(ct, "entry_price", 0.0) or 0.0)
+                    if _ct_shares <= 0:
+                        continue
+                    if (_ct_shares * _ct_px) < 0.01:
+                        logging.info(
+                            "Skipping SELL for dust closed trade token=%s shares=%.8f notional=$%.6f reason=%s",
+                            str(getattr(ct, "token_id", "") or "")[:16],
+                            _ct_shares,
+                            _ct_shares * _ct_px,
+                            getattr(ct, "close_reason", None),
+                        )
+                        try:
+                            trade_manager.persist_closed_trades([ct])
+                        except Exception:
+                            pass
+                        continue
                     _ct_token = str(ct.token_id or "")
                     if not _ct_token: continue
                     

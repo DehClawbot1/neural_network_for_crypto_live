@@ -2,6 +2,7 @@ import logging
 import os
 import signal
 import time
+import re
 
 from historical_dataset_builder import HistoricalDatasetBuilder
 from target_builder import TargetBuilder
@@ -76,10 +77,18 @@ def run_research_pipeline():
         logging.info("Fetching token-level CLOB price history...")
         markets_df = pd.read_csv("logs/markets.csv", engine="python", on_bad_lines="skip") if HistoricalDatasetBuilder().logs_dir.joinpath("markets.csv").exists() else pd.DataFrame()
         token_ids = []
+        def _normalize_token_id(raw):
+            token = str(raw or "").strip().strip('"').strip("'")
+            if not token:
+                return None
+            return token if re.fullmatch(r"\d{8,}", token) else None
         if not markets_df.empty:
             for col in ["yes_token_id", "no_token_id"]:
                 if col in markets_df.columns:
-                    token_ids.extend([str(x) for x in markets_df[col].dropna().tolist() if str(x)])
+                    for value in markets_df[col].dropna().tolist():
+                        token = _normalize_token_id(value)
+                        if token:
+                            token_ids.append(token)
         token_ids = sorted(set(token_ids))
 
         # Cap at MAX_CLOB_TOKENS to prevent 15+ min fetch times

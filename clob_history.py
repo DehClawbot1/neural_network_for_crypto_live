@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -50,14 +51,16 @@ class CLOBHistoryClient:
         frames = []
         total = len(token_ids)
         for idx, token_id in enumerate(token_ids):
-            if not token_id:
+            normalized_token = str(token_id or "").strip().strip('"').strip("'")
+            if not normalized_token or not re.fullmatch(r"\d{8,}", normalized_token):
+                logging.warning("Skipping invalid token_id for CLOB fetch: %r", token_id)
                 continue
             try:
-                logging.info("CLOB fetch %d/%d: %s...", idx + 1, total, str(token_id)[:16])
-                frames.append(self.fetch_history(token_id, days=days, interval=interval))
+                logging.info("CLOB fetch %d/%d: %s...", idx + 1, total, normalized_token[:16])
+                frames.append(self.fetch_history(normalized_token, days=days, interval=interval))
             except Exception as exc:
                 # BUG FIX: Log and skip instead of silently continuing
-                logging.warning("CLOB fetch failed for token %s: %s (skipping)", str(token_id)[:16], exc)
+                logging.warning("CLOB fetch failed for token %s: %s (skipping)", normalized_token[:16], exc)
                 continue
         df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         if not df.empty:

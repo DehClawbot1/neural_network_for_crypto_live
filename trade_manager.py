@@ -44,6 +44,21 @@ class TradeManager:
         if market and outcome_side:
             return f"{market}|{outcome_side}"
         return None
+
+    def _prune_local_dust_trades(self, min_notional=0.01) -> int:
+        removed = 0
+        for key, trade in list(self.active_trades.items()):
+            try:
+                shares = float(getattr(trade, "shares", 0.0) or 0.0)
+                px = float(getattr(trade, "current_price", 0.0) or getattr(trade, "entry_price", 0.0) or 0.0)
+                if shares <= 0 or (shares * px) < float(min_notional):
+                    trade.state = TradeState.CLOSED
+                    trade.close_reason = trade.close_reason or "local_dust_pruned"
+                    self.active_trades.pop(key, None)
+                    removed += 1
+            except Exception:
+                continue
+        return removed
     def _get_trade_key(self, signal_row: pd.Series) -> Optional[str]:
         if str(signal_row.get("action", "BUY")).upper() != "BUY":
             return None # BUG FIX 3: Prevent opening new trades on EXIT signals
@@ -248,7 +263,11 @@ class TradeManager:
 
         if reconciled_positions_df is None or reconciled_positions_df.empty:
             if self.active_trades:
-                logger.warning("Reconciled positions empty. Keeping %s active_trades in memory to prevent amnesia.", len(self.active_trades))
+                removed = self._prune_local_dust_trades(min_notional=0.01)
+                if removed > 0:
+                    logger.info("Pruned %s local dust trades while reconciled positions were empty.", removed)
+                if self.active_trades:
+                    logger.warning("Reconciled positions empty. Keeping %s active_trades in memory to prevent amnesia.", len(self.active_trades))
             return
 
         reconciled_count = len(reconciled_positions_df.index)
@@ -367,7 +386,11 @@ class TradeManager:
 
         if reconciled_positions_df is None or reconciled_positions_df.empty:
             if self.active_trades:
-                logger.warning("[~] Reconciled live positions came back empty. Keeping %s local trades in memory to avoid ghost closes after a transient DB/API failure.", len(self.active_trades))
+                removed = self._prune_local_dust_trades(min_notional=0.01)
+                if removed > 0:
+                    logger.info("[~] Pruned %s local dust trades after empty live reconciliation.", removed)
+                if self.active_trades:
+                    logger.warning("[~] Reconciled live positions came back empty. Keeping %s local trades in memory to avoid ghost closes after a transient DB/API failure.", len(self.active_trades))
             return
 
         rebuilt_trades: Dict[str, TradeLifecycle] = {}
