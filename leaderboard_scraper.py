@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter
+from token_utils import normalize_token_id
 from urllib3.util.retry import Retry
 
 # Configure logging for zero-intervention monitoring
@@ -91,7 +92,10 @@ def load_btc_market_universe(logs_dir="logs"):
     token_ids = set()
     for col in ["yes_token_id", "no_token_id", "token_id"]:
         if col in df.columns:
-            token_ids.update(df[col].dropna().astype(str).tolist())
+            for value in df[col].dropna().tolist():
+                token = normalize_token_id(value)
+                if token:
+                    token_ids.add(token)
     slugs = set(df.get("slug", pd.Series(dtype=str)).dropna().astype(str).tolist())
     return {"condition_ids": condition_ids, "token_ids": token_ids, "slugs": slugs}
 
@@ -120,7 +124,7 @@ def get_recent_btc_trades(wallet_address, limit=50, market_universe=None):
             title = str(trade.get("title", ""))
             title_l = title.lower()
             condition_id = str(cond_id or "")
-            token_id_str = str(token_id or "")
+            token_id_str = normalize_token_id(token_id) or ""
 
             mapped_to_btc = (
                 condition_id in market_universe.get("condition_ids", set())
@@ -147,7 +151,7 @@ def get_recent_btc_trades(wallet_address, limit=50, market_universe=None):
                     "trader_wallet": wallet_address,
                     "market_title": title,
                     "market_slug": slug,
-                    "token_id": token_id,
+                    "token_id": token_id_str or None,
                     "condition_id": cond_id,
                     "order_side": order_side,
                     "trade_side": order_side,

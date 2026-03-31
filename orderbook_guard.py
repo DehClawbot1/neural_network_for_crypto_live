@@ -32,6 +32,7 @@ Usage in supervisor.py:
 
 import logging
 from datetime import datetime, timezone
+from token_utils import normalize_token_id
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -78,6 +79,9 @@ class OrderBookGuard:
 
     def _fetch_order_book(self, token_id):
         """Fetch raw order book from CLOB API."""
+        token_id = normalize_token_id(token_id)
+        if not token_id:
+            return None
         client = self._get_clob_client()
         if client is None:
             return None
@@ -126,8 +130,9 @@ class OrderBookGuard:
           - imbalance (-1 to +1, positive = more bids than asks)
           - top_bids, top_asks (price/size lists)
         """
+        token_id = normalize_token_id(token_id)
         result = {
-            "token_id": str(token_id),
+            "token_id": str(token_id or ""),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "book_available": False,
             "best_bid": None,
@@ -143,6 +148,9 @@ class OrderBookGuard:
             "top_bids": [],
             "top_asks": [],
         }
+
+        if not token_id:
+            return result
 
         book = self._fetch_order_book(token_id)
         if book is None:
@@ -231,6 +239,9 @@ class OrderBookGuard:
         }
 
         # Gate 1: Book must exist
+        if not normalize_token_id(token_id):
+            check["reason"] = "invalid_token_id"
+            return check
         if not analysis["book_available"]:
             check["reason"] = "orderbook_not_available"
             logging.warning("OrderBookGuard: BLOCKED %s — no order book found", str(token_id))

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 import requests
+from token_utils import parse_token_id_list
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -37,7 +38,7 @@ def _is_btc_market(market: dict) -> bool:
 
 def _market_to_row(market: dict) -> dict:
     question = str(market.get("question", "") or market.get("title", ""))
-    clob_token_ids = market.get("clobTokenIds") or market.get("clob_token_ids") or []
+    clob_token_ids = parse_token_id_list(market.get("clobTokenIds") or market.get("clob_token_ids") or [])
     yes_token_id = clob_token_ids[0] if len(clob_token_ids) > 0 else None
     no_token_id = clob_token_ids[1] if len(clob_token_ids) > 1 else None
     best_bid = market.get("bestBid") if market.get("bestBid") is not None else market.get("best_bid", market.get("bid"))

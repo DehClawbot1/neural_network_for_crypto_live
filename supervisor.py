@@ -48,6 +48,7 @@ from mismatch_detector import StateMismatchDetector
 from db import Database
 from money_manager import MoneyManager
 from orderbook_guard import OrderBookGuard
+from token_utils import normalize_token_id
 
 # Configure logging for zero-intervention monitoring
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -238,7 +239,20 @@ def choose_action(signal_row, entry_rule: EntryRuleLayer, entry_brain=None, lega
     if force_candidate and entry_rule.should_enter(signal_row):
         return 1
 
-    # FIX V5: If RL models are loaded and they predicted 0, respect the VETO.
+    # Optional safety valve: if RL keeps returning HOLD, allow rule fallback.
+    # This prevents "stuck forever" behavior when RL is stale or overly conservative.
+    allow_rule_fallback_with_rl_hold = os.getenv("ALLOW_RULE_FALLBACK_WITH_RL_HOLD", "true").strip().lower() in {"1", "true", "yes", "on"}
+    rl_hold_min_confidence = float(os.getenv("RL_HOLD_FALLBACK_MIN_CONFIDENCE", "0.25") or 0.25)
+    if (entry_brain is not None or legacy_brain is not None) and allow_rule_fallback_with_rl_hold:
+        try:
+            confidence = float(signal_row.get("confidence", 0.0) or 0.0)
+        except Exception:
+            confidence = 0.0
+        if confidence >= rl_hold_min_confidence and entry_rule.should_enter(signal_row):
+            edge_score = float(signal_row.get("edge_score", 0.0) or 0.0)
+            return 2 if edge_score >= 0.04 else 1
+
+    # FIX V5: If RL models are loaded and fallback is disabled / conditions not met, keep HOLD.
     if entry_brain is not None or legacy_brain is not None:
         return 0
 
@@ -920,7 +934,8 @@ def main_loop():
                     break
                     
                 signal_row = row.to_dict()
-                token_id = str(signal_row.get("token_id", "") or "")
+                token_id_norm = normalize_token_id(signal_row.get("token_id"))
+                token_id = str(token_id_norm or "")
                 entry_intent = str(signal_row.get("entry_intent", "OPEN_LONG") or "OPEN_LONG").upper()
                 market_key = _trade_key_from_signal(signal_row)
                 

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
+from token_utils import normalize_token_id
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -178,12 +179,13 @@ class FeatureBuilder:
         time_decay_score = _clip01(1.0 - time_left)
 
         outcome_side = str(signal.get("outcome_side", signal.get("side", ""))).upper()
-        token_id = signal.get("token_id")
+        token_id = normalize_token_id(signal.get("token_id"))
         if (token_id in [None, ""] or pd.isna(token_id)) and market_row:
             if outcome_side in {"YES", "UP"}:
-                token_id = market_row.get("yes_token_id")
+                token_id = normalize_token_id(market_row.get("yes_token_id"))
             elif outcome_side in {"NO", "DOWN"}:
-                token_id = market_row.get("no_token_id")
+                token_id = normalize_token_id(market_row.get("no_token_id"))
+        token_id = normalize_token_id(token_id)
         condition_id = signal.get("condition_id") or market_row.get("condition_id")
 
         wallet_info = self.wallet_stats.get(wallet, {})

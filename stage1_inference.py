@@ -1,4 +1,5 @@
 from pathlib import Path
+import warnings
 
 import joblib
 import numpy as np
@@ -60,11 +61,17 @@ class Stage1Inference:
                     out,
                 )
                 if x_clf is not None:
-                    if hasattr(clf, "predict_proba"):
-                        probs = clf.predict_proba(x_clf)[:, 1]
-                    else:
-                        raw = clf.decision_function(x_clf)
-                        probs = 1.0 / (1.0 + np.exp(-np.clip(raw, -500, 500)))
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings(
+                            "ignore",
+                            message="X does not have valid feature names, but LGBMClassifier was fitted with feature names",
+                            category=UserWarning,
+                        )
+                        if hasattr(clf, "predict_proba"):
+                            probs = clf.predict_proba(x_clf)[:, 1]
+                        else:
+                            raw = clf.decision_function(x_clf)
+                            probs = 1.0 / (1.0 + np.exp(-np.clip(raw, -500, 500)))
                     out["p_tp_before_sl"] = np.clip(pd.Series(probs, index=out.index).astype(float), 0.0, 1.0)
             except Exception:
                 out["p_tp_before_sl"] = 0.0
@@ -77,7 +84,13 @@ class Stage1Inference:
                     out,
                 )
                 if x_reg is not None:
-                    preds = reg.predict(x_reg)
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings(
+                            "ignore",
+                            message="X does not have valid feature names, but LGBMRegressor was fitted with feature names",
+                            category=UserWarning,
+                        )
+                        preds = reg.predict(x_reg)
                     out["expected_return"] = (
                         pd.Series(np.asarray(preds).ravel(), index=out.index)
                         .astype(float)
