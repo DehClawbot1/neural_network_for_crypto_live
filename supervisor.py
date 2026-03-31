@@ -517,6 +517,9 @@ def main_loop():
 
     while True:
         try:
+            pre_cycle_entry_freeze = False
+            pre_cycle_freeze_reason = None
+            pre_cycle_freeze_detail = {}
             if trading_mode == "live" and order_manager is not None and hasattr(order_manager, "risk") and hasattr(order_manager.risk, "reset_failed_orders"):
                 order_manager.risk.reset_failed_orders()
             if trading_mode == "live" and reconciliation_service is not None:
@@ -526,6 +529,50 @@ def main_loop():
                     logging.info("Exchange reconciliation synced orders=%s fills=%s", sync_summary.get("orders", 0), sync_summary.get("fills", 0))
                 except Exception as exc:
                     logging.warning("Exchange reconciliation failed: %s", exc)
+                try:
+                    # Strict pre-cycle sync: rebuild and reconcile live open/closed state
+                    # BEFORE evaluating any new entry opportunities.
+                    live_position_book.rebuild_from_db()
+                    pre_positions_df = live_position_book.get_enriched_open_positions(scored_df=None)
+                    trade_manager.reconcile_live_positions(reconciled_positions_df=pre_positions_df)
+
+                    recon_report, _, _ = reconciliation_service.reconcile()
+                    mismatch_count = (
+                        len(recon_report.get("missing_remote_orders", []))
+                        + len(recon_report.get("missing_local_orders", []))
+                        + len(recon_report.get("missing_remote_trades", []))
+                        + len(recon_report.get("missing_local_trades", []))
+                        + len(recon_report.get("order_mismatches", []))
+                    )
+                    if mismatch_count > 0:
+                        pre_cycle_entry_freeze = True
+                        pre_cycle_freeze_reason = "precycle_reconciliation_mismatch"
+                        pre_cycle_freeze_detail = {
+                            "mismatch_count": mismatch_count,
+                            "missing_remote_orders": recon_report.get("missing_remote_orders", []),
+                            "missing_local_orders": recon_report.get("missing_local_orders", []),
+                            "missing_remote_trades": recon_report.get("missing_remote_trades", []),
+                            "missing_local_trades": recon_report.get("missing_local_trades", []),
+                        }
+                        logging.error(
+                            "Pre-cycle reconciliation mismatch detected. Freezing new entries for this cycle: %s",
+                            pre_cycle_freeze_detail,
+                        )
+                        autonomous_monitor.write_heartbeat(
+                            "reconciliation",
+                            status="error",
+                            message="precycle_reconciliation_mismatch",
+                            extra=pre_cycle_freeze_detail,
+                        )
+                    else:
+                        autonomous_monitor.write_heartbeat(
+                            "reconciliation",
+                            status="ok",
+                            message="precycle_sync_ok",
+                            extra={"open_positions": len(pre_positions_df) if pre_positions_df is not None else 0},
+                        )
+                except Exception as exc:
+                    logging.warning("Pre-cycle live sync/reconcile failed: %s", exc)
             logging.info("--- Starting Research + Paper-Trading Evaluation Cycle ---")
 
             # 1. Gather public market context + public wallet activity
@@ -639,9 +686,9 @@ def main_loop():
                 })
                 for trade in current_active_trades if trade.market or trade.token_id
             }
-            live_entry_freeze = False
-            freeze_reason = None
-            freeze_detail = {}
+            live_entry_freeze = pre_cycle_entry_freeze
+            freeze_reason = pre_cycle_freeze_reason
+            freeze_detail = pre_cycle_freeze_detail or {}
             if trading_mode == "live" and live_position_book is not None:
                 live_position_book.rebuild_from_db()
                 reconciled_positions_df = live_position_book.get_enriched_open_positions(scored_df=scored_df)

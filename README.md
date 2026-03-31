@@ -1,93 +1,76 @@
-# Balance Fix + Market Orders + Money Management
+# Neural Network For Crypto (Live Trading)
 
-## The Problem
+This project runs a live Polymarket trading loop with:
+- model-based entries and exits,
+- strict reconciliation against exchange state,
+- position tracking for up to 5 concurrent live positions,
+- anti-ghost safeguards for open/closed trades.
 
-Your bot keeps saying `insufficient_funds` even though you have money on Polymarket.
+## Live Execution Flow
 
-## Root Cause
+Per cycle, the bot now syncs in this order:
+1. Sync open orders + trades from Polymarket into local DB (`orders`, `fills`)
+2. Rebuild `live_positions` from reconciled fills
+3. Reconcile runtime in-memory trades against live DB positions
+4. Run mismatch checks (missing local/remote orders/trades)
+5. If mismatch is detected, freeze new entries for that cycle
+6. Only then evaluate fresh signals and place new entries
 
-The Polymarket CLOB API returns balance in **microdollars** (1,000,000 = $1.00).
+This prevents opening new trades while state is out-of-sync and reduces ghost trades.
 
-The tutorial code shows the correct way:
-```python
-balance = auth_client.get_balance_allowance(...)
-usdc_balance = int(balance['balance']) / 1e6  # ← This division was missing!
-```
+## Position Management
 
-But `order_manager.py` was reading the raw value without dividing:
-```python
-available_balance = float(readiness.get("balance", 0.0))  # BUG: treats microdollars as dollars
-```
+- Max concurrent live positions: `TradingConfig.MAX_CONCURRENT_POSITIONS` (default `5`)
+- Each position is tracked independently (`token_id | condition_id | outcome_side`)
+- Exit paths include:
+  - take-profit / stop-loss / trailing stop / time stop
+  - model-target take-profit (`take_profit_model_target`)
+  - exchange/manual-close detection via conditional token balance checks
 
-So if you had $5.00, the API returned `5000000`, and the bot compared `5000000 >= 10` (which passes) but then the actual CLOB order creation internally also expected normalized amounts, causing a mismatch.
+## Balance and Risk Controls
 
-## What's Fixed
+Live sizing uses **API/CLOB spendable balance** (not on-chain fallback) for:
+- bet-size calculation,
+- pre-order funding checks.
 
-### 1. Balance Normalization (`order_manager.py`)
-- Added `_normalize_balance()` method that divides by 1e6 when the raw value looks like microdollars
-- Added `_get_available_balance()` that logs both raw and normalized values for debugging
-- All balance checks now use normalized values
+Risk controls are dynamic:
+- reserve capital (`CAPITAL_RESERVE_PCT`) to avoid full-wallet deployment
+- per-trade cap by risk percent (`MAX_RISK_PER_TRADE_PCT`)
+- hard absolute cap (`HARD_MAX_BET_USDC`)
+- exchange minimum notional enforcement (`MIN_BET_USDC`, plus $1 floor on market BUY)
 
-### 2. Market Orders (`order_manager.py`)
-- New `submit_market_entry()` method for Fill-or-Kill (FOK) market orders
-- Matches the tutorial pattern exactly:
-  ```python
-  market_order = MarketOrderArgs(token_id=yes_token_id, amount=5.0, side=BUY)
-  signed = auth_client.create_market_order(market_order)
-  response = auth_client.post_order(signed, OrderType.FOK)
-  ```
-- Better for fast-moving Bitcoin 5-min markets
+## Runtime State and Corruption Recovery
 
-### 3. Money Management (`money_manager.py`)
-- Bets are now sized as % of balance, not fixed $10/$50
-- High confidence (>70%): 5% of balance
-- Medium confidence (50-70%): 2% of balance
-- Low confidence (<50%): 1% of balance
-- Reduces bet size after consecutive losses
-- Never exceeds 25% total exposure across all positions
-- Min bet: $0.50, Max bet: $20.00
+The system includes DB integrity checks and optional runtime reset:
+- integrity check via SQLite `PRAGMA quick_check`
+- optional auto-reset trigger:
+  - `RESET_RUNTIME_STATE_ON_DB_CORRUPTION=true`
+- reset archives runtime DB/CSVs and rebuilds schema
+- model weights in `weights/` are preserved
 
-### 4. Supervisor Wiring (`supervisor.py`)
-- Entry path uses market orders when `USE_MARKET_ORDERS=True` (default)
-- Bet sizing uses MoneyManager instead of fixed amounts
-- Better logging of balance and bet decisions
+## Useful Commands
 
-## How to Apply
-
+Run live bot:
 ```bash
-# 1. Copy all files to your project root
-cp fixes/*.py /path/to/your/project/
-
-# 2. Run the apply script
-cd /path/to/your/project
-python apply_all_betting_fixes.py
-
-# 3. Verify balance reads correctly
-python diagnose_balance_fix.py
-
-# 4. Start trading
 python run_bot.py
 ```
 
-## Files
-
-| File | Description |
-|------|-------------|
-| `order_manager.py` | PATCHED: Balance normalization + market order support |
-| `config.py` | PATCHED: Money management settings |
-| `money_manager.py` | NEW: Intelligent bet sizing |
-| `supervisor_betting_patch.py` | NEW: Patches supervisor for market orders |
-| `diagnose_balance_fix.py` | NEW: Diagnostic script to verify balance |
-| `apply_all_betting_fixes.py` | Apply script that patches supervisor.py + run_bot.py |
-
-## Tuning
-
-Edit `config.py` to adjust money management:
-
-```python
-MAX_RISK_PER_TRADE_PCT = 0.05  # 5% per trade (change to 0.10 for 10%)
-MIN_BET_USDC = 0.50            # Minimum bet
-MAX_BET_USDC = 20.0            # Maximum bet
-USE_MARKET_ORDERS = True       # Set False to use limit orders instead
-MAX_TOTAL_EXPOSURE_PCT = 0.25  # Max 25% of balance in open positions
+Audit DB/CSV sync and ghost-trade risk:
+```bash
+python audit_runtime_state.py --logs-dir logs
 ```
+
+Audit + reset only if corruption is detected:
+```bash
+python audit_runtime_state.py --logs-dir logs --reset-if-corrupt
+```
+
+## Key Files
+
+- `supervisor.py`: main live loop, pre-cycle reconciliation gate, entry/exit orchestration
+- `reconciliation_service.py`: exchange order/fill sync + mismatch report
+- `live_position_book.py`: rebuild and verify live positions from fills + exchange balances
+- `trade_manager.py`: position lifecycle + policy/model exit handling
+- `order_manager.py`: order placement, fill tracking, API-balance-based risk checks
+- `money_manager.py`: dynamic position sizing and risk caps
+- `audit_runtime_state.py`: operational audit for drift/ghost/corruption checks
