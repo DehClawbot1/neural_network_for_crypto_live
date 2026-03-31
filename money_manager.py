@@ -70,6 +70,18 @@ class MoneyManager:
             logging.warning("MoneyManager: No balance available ($%.2f)", available_balance)
             return 0.0
 
+        reserve_pct = max(0.0, min(0.95, float(getattr(TradingConfig, "CAPITAL_RESERVE_PCT", 0.20))))
+        reserve_usdc = available_balance * reserve_pct
+        tradable_balance = max(0.0, available_balance - reserve_usdc)
+
+        min_bet_usdc = float(getattr(TradingConfig, "MIN_BET_USDC", 1.0))
+        if tradable_balance < min_bet_usdc:
+            logging.info(
+                "MoneyManager: Tradable balance below minimum bet (tradable=$%.2f, min=$%.2f).",
+                tradable_balance, min_bet_usdc,
+            )
+            return 0.0
+
         # Check total exposure limit (e.g. 85% of total capital)
         max_total_exposure = (available_balance + current_exposure) * TradingConfig.MAX_TOTAL_EXPOSURE_PCT # BUG FIX 2: Compute against total portfolio
         remaining_capacity = max_total_exposure - current_exposure
@@ -82,21 +94,24 @@ class MoneyManager:
 
         # Base bet: confidence-scaled % of current balance (Naturally scales with profit/loss)
         base_pct = self._confidence_bet_pct(confidence)
-        base_bet = available_balance * base_pct
+        base_bet = tradable_balance * base_pct
 
         # Apply loss reduction (Protects against losing streaks)
         loss_factor = self._loss_reduction_factor()
         adjusted_bet = base_bet * loss_factor
 
         # --- DYNAMIC LIMITS ---
-        absolute_floor = getattr(TradingConfig, 'MIN_BET_USDC', 1.00) # Exchange absolute minimum
+        absolute_floor = min_bet_usdc # Exchange absolute minimum
         
-        # Dynamic Min: 2% of your balance, but never lower than the exchange floor
-        dynamic_min = max(absolute_floor, available_balance * 0.02)
+        # Dynamic minimum grows slowly with account size but remains capped.
+        dynamic_min_pct = max(0.0, float(getattr(TradingConfig, "MIN_BET_DYNAMIC_PCT", 0.002)))
+        dynamic_min_cap = max(absolute_floor, float(getattr(TradingConfig, "MAX_DYNAMIC_MIN_BET_USDC", 5.0)))
+        dynamic_min = max(absolute_floor, min(tradable_balance * dynamic_min_pct, dynamic_min_cap))
         
-        # Dynamic Max: Up to the MAX_RISK_PER_TRADE_PCT of current balance (e.g., 15%)
-        # This completely overrides the old hardcoded $5.00 limit
-        dynamic_max = available_balance * getattr(TradingConfig, 'MAX_RISK_PER_TRADE_PCT', 0.15)
+        # Dynamic Max: percentage of tradable balance + hard absolute safety cap.
+        dynamic_max = tradable_balance * getattr(TradingConfig, 'MAX_RISK_PER_TRADE_PCT', 0.15)
+        hard_max = max(absolute_floor, float(getattr(TradingConfig, "HARD_MAX_BET_USDC", 250.0)))
+        dynamic_max = min(dynamic_max, hard_max)
 
         # Cap the bet at the dynamic max and remaining capacity
         adjusted_bet = min(adjusted_bet, dynamic_max)
@@ -116,8 +131,8 @@ class MoneyManager:
         adjusted_bet = round(adjusted_bet, 2)
 
         logging.info(
-            "MoneyManager: balance=$%.2f conf=%.2f base_pct=%.1f%% loss_factor=%.2f -> final_bet=$%.2f (min=$%.2f, max=$%.2f)",
-            available_balance, confidence, base_pct * 100, loss_factor, adjusted_bet, dynamic_min, dynamic_max
+            "MoneyManager: balance=$%.2f reserve=$%.2f tradable=$%.2f conf=%.2f base_pct=%.1f%% loss_factor=%.2f -> final_bet=$%.2f (min=$%.2f, max=$%.2f)",
+            available_balance, reserve_usdc, tradable_balance, confidence, base_pct * 100, loss_factor, adjusted_bet, dynamic_min, dynamic_max
         )
 
         return adjusted_bet

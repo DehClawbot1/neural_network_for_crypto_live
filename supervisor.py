@@ -749,10 +749,14 @@ def main_loop():
                     _available_bal = 0.0
                     if order_manager is not None:
                         try:
-                            _available_bal, _ = order_manager._get_available_balance(asset_type="COLLATERAL")
+                            # Sizing must use the exchange-reported spendable CLOB balance only.
+                            _available_bal, _ = order_manager._get_available_balance(
+                                asset_type="COLLATERAL",
+                                use_onchain_fallback=False,
+                            )
                         except Exception:
                             pass
-                    if _available_bal <= 0 and execution_client is not None:
+                    if _available_bal <= 0 and execution_client is not None and trading_mode != "live":
                         try:
                             _available_bal = execution_client.get_available_balance(asset_type="COLLATERAL")
                         except Exception:

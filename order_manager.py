@@ -91,7 +91,7 @@ class OrderManager:
         factor = 10 ** int(decimals)
         return math.floor(max(shares, 0.0) * factor) / factor
 
-    def _get_available_balance(self, asset_type="COLLATERAL", token_id=None):
+    def _get_available_balance(self, asset_type="COLLATERAL", token_id=None, use_onchain_fallback=True):
         readiness = self.check_readiness(asset_type=asset_type, token_id=token_id)
         raw_balance = None
         if isinstance(readiness, dict):
@@ -115,7 +115,10 @@ class OrderManager:
             except Exception as exc:
                 logging.warning("On-chain collateral lookup failed: %s", exc)
 
-        allow_onchain_fallback = os.getenv("ALLOW_ONCHAIN_BALANCE_FALLBACK", "false").strip().lower() in {"1", "true", "yes", "on"}
+        allow_onchain_fallback = (
+            use_onchain_fallback
+            and os.getenv("ALLOW_ONCHAIN_BALANCE_FALLBACK", "false").strip().lower() in {"1", "true", "yes", "on"}
+        )
         available = normalized_balance
         if allow_onchain_fallback and available <= 0 and str(asset_type).upper() == "COLLATERAL":
             available = onchain_balance
@@ -218,6 +221,23 @@ class OrderManager:
             self._append(self.orders_file, row)
             return row, None
 
+        if normalized_side == "BUY" and amount < 0.99:
+            row = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "order_id": None,
+                "token_id": token_id,
+                "condition_id": condition_id,
+                "outcome_side": outcome_side,
+                "order_side": side,
+                "amount": amount,
+                "order_type": "FOK",
+                "execution_style": "market",
+                "status": "REJECTED",
+                "reason": f"below_clob_minimum_1usd (val={amount})",
+            }
+            self._append(self.orders_file, row)
+            return row, None
+
         decision = self.risk.pre_trade_check(
             token_id=token_id, price=0.5, size=amount,
             spread=spread, open_orders=open_orders, daily_pnl=daily_pnl
@@ -239,7 +259,10 @@ class OrderManager:
             self._append(self.orders_file, row)
             return row, None
 
-        available, readiness = self._get_available_balance(asset_type="COLLATERAL")
+        available, readiness = self._get_available_balance(
+            asset_type="COLLATERAL",
+            use_onchain_fallback=False,
+        )
 
         if available < amount:
             row = {
@@ -382,7 +405,10 @@ class OrderManager:
             return row, None
 
         if normalized_side == "BUY":
-            available_balance, readiness = self._get_available_balance(asset_type="COLLATERAL")
+            available_balance, readiness = self._get_available_balance(
+                asset_type="COLLATERAL",
+                use_onchain_fallback=False,
+            )
 
             if readiness is None and available_balance <= 0:
                 row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": "missing_readiness"}
