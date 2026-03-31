@@ -5,7 +5,7 @@ import time
 import logging
 import numpy as np
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
@@ -197,7 +197,19 @@ def log_ranked_signal(signal_row):
 
 
 def choose_action(signal_row, entry_rule: EntryRuleLayer, entry_brain=None, legacy_brain=None):
+    def _is_truthy(value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return float(value) != 0.0
+        text = str(value or "").strip().lower()
+        return text in {"1", "true", "yes", "on"}
+
     action_val = 0
+    force_candidate = (
+        _is_truthy(signal_row.get("force_candidate"))
+        or str(signal_row.get("signal_source", "")).strip().lower() == "always_on_market"
+    )
     if entry_brain is not None:
         try:
             _av = entry_brain.predict(signal_row)
@@ -220,6 +232,11 @@ def choose_action(signal_row, entry_rule: EntryRuleLayer, entry_brain=None, lega
         return 0
     if action_val != 0:
         return action_val
+
+    # For pinned always-on market candidates, allow rule-based fallback
+    # even when RL models return HOLD/0, so the bot keeps attempting entries.
+    if force_candidate and entry_rule.should_enter(signal_row):
+        return 1
 
     # FIX V5: If RL models are loaded and they predicted 0, respect the VETO.
     if entry_brain is not None or legacy_brain is not None:
@@ -575,6 +592,92 @@ def main_loop():
                 targets[trade_key] = target_price
         return targets
 
+    always_on_enabled = os.getenv("ALWAYS_ON_MARKET_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    always_on_slug = str(os.getenv("ALWAYS_ON_MARKET_SLUG", "btc-updown-5m-1774926600") or "").strip()
+    always_on_only = os.getenv("ALWAYS_ON_ONLY", "true").strip().lower() in {"1", "true", "yes", "on"}
+    always_on_force_entry = os.getenv("ALWAYS_ON_FORCE_ENTRY", "true").strip().lower() in {"1", "true", "yes", "on"}
+    always_on_signal_size = float(os.getenv("ALWAYS_ON_SIGNAL_SIZE", "25") or 25)
+
+    def _inject_always_on_signal(signals_df: pd.DataFrame, markets_df: pd.DataFrame):
+        if not always_on_enabled or not always_on_slug:
+            return signals_df, markets_df
+        now_iso = datetime.now(timezone.utc).isoformat()
+        out_signals = signals_df.copy() if signals_df is not None else pd.DataFrame()
+        out_markets = markets_df.copy() if markets_df is not None else pd.DataFrame()
+
+        if out_markets.empty or "slug" not in out_markets.columns or always_on_slug not in set(out_markets["slug"].dropna().astype(str)):
+            fetched = fetch_markets_by_slugs([always_on_slug])
+            if fetched is not None and not fetched.empty:
+                if out_markets is None or out_markets.empty:
+                    out_markets = fetched.copy()
+                else:
+                    out_markets = pd.concat([out_markets, fetched], ignore_index=True)
+                dedupe_col = "slug" if "slug" in out_markets.columns else "market_id" if "market_id" in out_markets.columns else None
+                if dedupe_col:
+                    out_markets = out_markets.drop_duplicates(subset=[dedupe_col], keep="last")
+                out_markets = out_markets.loc[:, ~out_markets.columns.duplicated()]
+
+        if out_markets is None or out_markets.empty or "slug" not in out_markets.columns:
+            return out_signals, out_markets
+
+        target_rows = out_markets[out_markets["slug"].astype(str) == always_on_slug]
+        if target_rows.empty:
+            logging.warning("Always-on market slug not found this cycle: %s", always_on_slug)
+            return out_signals, out_markets
+
+        market_row = target_rows.iloc[-1].to_dict()
+        yes_token = market_row.get("yes_token_id")
+        no_token = market_row.get("no_token_id")
+        condition_id = market_row.get("condition_id")
+        try:
+            yes_price = float(market_row.get("current_price", market_row.get("last_trade_price", 0.5)) or 0.5)
+        except Exception:
+            yes_price = 0.5
+        yes_price = float(np.clip(yes_price, 0.01, 0.99))
+
+        pref_side = str(os.getenv("ALWAYS_ON_MARKET_SIDE", "AUTO") or "AUTO").strip().upper()
+        if pref_side not in {"YES", "NO"}:
+            pref_side = "YES" if yes_price >= 0.5 else "NO"
+        outcome_side = pref_side
+        token_id = yes_token if outcome_side == "YES" else no_token
+        if token_id in [None, ""]:
+            fallback_token = yes_token or no_token
+            if fallback_token in [None, ""]:
+                logging.warning("Always-on market has no tradable token ids for slug=%s", always_on_slug)
+                return out_signals, out_markets
+            token_id = fallback_token
+            outcome_side = "YES" if token_id == yes_token else "NO"
+
+        signal_price = yes_price if outcome_side == "YES" else float(np.clip(1.0 - yes_price, 0.01, 0.99))
+        synthetic_signal = {
+            "trade_id": f"always_on_{always_on_slug}_{int(time.time())}",
+            "tx_hash": None,
+            "trader_wallet": "system_always_on",
+            "market_title": market_row.get("market_title", market_row.get("question", always_on_slug)),
+            "market_slug": always_on_slug,
+            "token_id": str(token_id),
+            "condition_id": condition_id,
+            "order_side": "BUY",
+            "trade_side": "BUY",
+            "outcome_side": outcome_side,
+            "entry_intent": "OPEN_LONG",
+            "side": outcome_side,
+            "price": signal_price,
+            "size": always_on_signal_size,
+            "timestamp": now_iso,
+            "signal_source": "always_on_market",
+            "force_candidate": 1 if always_on_force_entry else 0,
+        }
+        out_signals = pd.concat([out_signals, pd.DataFrame([synthetic_signal])], ignore_index=True)
+        logging.info(
+            "Always-on signal injected for slug=%s side=%s token=%s price=%.4f",
+            always_on_slug,
+            outcome_side,
+            str(token_id)[:16],
+            signal_price,
+        )
+        return out_signals, out_markets
+
 
     while True:
         try:
@@ -648,6 +751,10 @@ def main_loop():
             save_market_snapshot(markets_df)
             signals_df = run_scraper_cycle()
             signals_df = _dedupe_signals_df(signals_df)
+            signals_df, markets_df = _inject_always_on_signal(signals_df, markets_df)
+            signals_df = _dedupe_signals_df(signals_df)
+            if always_on_enabled and always_on_only and signals_df is not None and not signals_df.empty and "market_slug" in signals_df.columns:
+                signals_df = signals_df[signals_df["market_slug"].astype(str) == always_on_slug].reset_index(drop=True)
             autonomous_monitor.write_heartbeat("signal_engine", status="ok", message="signals_scraped", extra={"rows": len(signals_df) if signals_df is not None else 0})
 
             if signals_df is not None and not signals_df.empty and "market_slug" in signals_df.columns:
@@ -1329,8 +1436,12 @@ def main_loop():
                 sync_ops_state_to_db("logs")
             except Exception as exc:
                 logging.warning("Ops state sync to DB failed: %s", exc)
-            retrainer.maybe_retrain()
-            autonomous_monitor.write_heartbeat("retrainer", status="ok", message="retrain_checked")
+            allow_live_retrain = os.getenv("ENABLE_LIVE_RETRAIN", "false").strip().lower() in {"1", "true", "yes", "on"}
+            if trading_mode != "live" or allow_live_retrain:
+                retrainer.maybe_retrain()
+                autonomous_monitor.write_heartbeat("retrainer", status="ok", message="retrain_checked")
+            else:
+                autonomous_monitor.write_heartbeat("retrainer", status="ok", message="retrain_skipped_live")
 
             if len(trade_manager.get_open_positions()) > 0:
                 logging.info("Cycle complete. Fast-polling active trades. Sleeping for 5 seconds...")
