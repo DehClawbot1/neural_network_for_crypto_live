@@ -89,6 +89,7 @@ def run_audit(logs_dir: str):
     _print_section("CSV vs DB Drift")
     live_orders_csv = _safe_read_csv(logs_path / "live_orders.csv")
     live_fills_csv = _safe_read_csv(logs_path / "live_fills.csv")
+    positions_csv = _safe_read_csv(logs_path / "positions.csv")
     csv_order_ids = set(live_orders_csv.get("order_id", pd.Series(dtype=str)).dropna().astype(str).tolist())
     db_order_ids = set(orders.get("order_id", pd.Series(dtype=str)).dropna().astype(str).tolist())
     csv_fill_ids = set(live_fills_csv.get("fill_id", pd.Series(dtype=str)).dropna().astype(str).tolist())
@@ -103,6 +104,38 @@ def run_audit(logs_dir: str):
             "fills_only_db": len(db_fill_ids - csv_fill_ids),
             "fills_only_csv_ex_synth": len(csv_fill_ids_clean - db_fill_ids_clean),
             "fills_only_db_ex_synth": len(db_fill_ids_clean - csv_fill_ids_clean),
+        }
+    )
+
+    _print_section("Positions CSV vs live_positions Drift")
+    db_live_open_keys = set()
+    if not live.empty:
+        live_open = live[live["status"].astype(str).str.upper() == "OPEN"].copy()
+        for _, row in live_open.iterrows():
+            db_live_open_keys.add(
+                (
+                    str(row.get("token_id") or ""),
+                    str(row.get("condition_id") or ""),
+                    str(row.get("outcome_side") or ""),
+                )
+            )
+    csv_open_keys = set()
+    if not positions_csv.empty:
+        work = positions_csv.copy()
+        if "status" in work.columns:
+            work = work[work["status"].astype(str).str.upper() == "OPEN"]
+        for _, row in work.iterrows():
+            csv_open_keys.add(
+                (
+                    str(row.get("token_id") or ""),
+                    str(row.get("condition_id") or ""),
+                    str(row.get("outcome_side") or ""),
+                )
+            )
+    print(
+        {
+            "positions_only_csv": len(csv_open_keys - db_live_open_keys),
+            "positions_only_db": len(db_live_open_keys - csv_open_keys),
         }
     )
 

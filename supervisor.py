@@ -881,15 +881,52 @@ def main_loop():
             if features_df is not None: features_df = features_df.loc[:, ~features_df.columns.duplicated()].copy()
             if features_df is not None and not features_df.empty: features_df = features_df.loc[:, ~features_df.columns.duplicated()]
             log_raw_candidates(features_df)
+            strict_inference_mode = os.getenv("STRICT_INFERENCE_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
+            if trading_mode == "live" and strict_inference_mode:
+                missing_model_artifacts = []
+                for stage_name, inference_obj in (
+                    ("model_inference", model_inference),
+                    ("stage1_inference", stage1_inference),
+                    ("stage2_temporal_inference", stage2_inference),
+                ):
+                    checker = getattr(inference_obj, "missing_artifacts", None)
+                    if not callable(checker):
+                        continue
+                    try:
+                        for item in checker():
+                            missing_model_artifacts.append(
+                                {
+                                    "stage": stage_name,
+                                    "component": str(item.get("component") or "unknown"),
+                                    "path": str(item.get("path") or ""),
+                                }
+                            )
+                    except Exception as exc:
+                        logging.warning("Strict inference artifact check failed for %s: %s", stage_name, exc)
+                if missing_model_artifacts:
+                    pre_cycle_entry_freeze = True
+                    pre_cycle_freeze_reason = "inference_model_missing"
+                    pre_cycle_freeze_detail = {
+                        "missing_artifact_count": len(missing_model_artifacts),
+                        "missing_artifacts": missing_model_artifacts,
+                    }
+                    logging.error(
+                        "STRICT INFERENCE MODE: Missing inference model artifacts detected. Freezing live entries this cycle: %s",
+                        pre_cycle_freeze_detail,
+                    )
+                    autonomous_monitor.write_heartbeat(
+                        "inference",
+                        status="error",
+                        message="strict_inference_missing_models",
+                        extra=pre_cycle_freeze_detail,
+                    )
             inferred_df = model_inference.run(features_df)
             inferred_df = stage1_inference.run(inferred_df)
             inferred_df = stage2_inference.run(inferred_df)
-            strict_inference_mode = os.getenv("STRICT_INFERENCE_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
             if trading_mode == "live" and strict_inference_mode and _inference_guard_has_errors():
                 inference_errors = _inference_guard_get_errors(limit=20)
                 pre_cycle_entry_freeze = True
-                pre_cycle_freeze_reason = "inference_runtime_exception"
-                pre_cycle_freeze_detail = {
+                runtime_error_detail = {
                     "error_count": len(inference_errors),
                     "errors": [
                         {
@@ -901,6 +938,15 @@ def main_loop():
                         for e in inference_errors
                     ],
                 }
+                if pre_cycle_freeze_reason == "inference_model_missing":
+                    merged_detail = dict(pre_cycle_freeze_detail or {})
+                    merged_detail["runtime_error_count"] = runtime_error_detail["error_count"]
+                    merged_detail["runtime_errors"] = runtime_error_detail["errors"]
+                    pre_cycle_freeze_reason = "inference_model_missing_and_runtime_exception"
+                    pre_cycle_freeze_detail = merged_detail
+                else:
+                    pre_cycle_freeze_reason = "inference_runtime_exception"
+                    pre_cycle_freeze_detail = runtime_error_detail
                 logging.error(
                     "STRICT INFERENCE MODE: Runtime inference exceptions detected. Freezing live entries this cycle: %s",
                     pre_cycle_freeze_detail,
@@ -1636,7 +1682,10 @@ def main_loop():
                 autonomous_monitor.write_heartbeat("trade_manager", status="ok", message="trades_updated", extra={"open_positions": len(open_positions_for_status)})
 
             autonomous_monitor.write_status(trader_signals_df, trades_df, alerts_df, open_positions_df_for_status)
-            trade_manager.persist_open_positions()
+            if trading_mode == "live":
+                trade_manager.persist_open_positions(reconciled_positions_df=open_positions_df_for_status)
+            else:
+                trade_manager.persist_open_positions()
             try:
                 sync_ops_state_to_db("logs")
             except Exception as exc:

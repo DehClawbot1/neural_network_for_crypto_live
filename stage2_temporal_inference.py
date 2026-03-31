@@ -17,6 +17,14 @@ class Stage2TemporalInference:
         self.classifier_file = self.weights_dir / "stage2_temporal_classifier.joblib"
         self.regressor_file = self.weights_dir / "stage2_temporal_regressor.joblib"
 
+    def missing_artifacts(self):
+        missing = []
+        if not self.classifier_file.exists():
+            missing.append({"component": "classifier", "path": str(self.classifier_file)})
+        if not self.regressor_file.exists():
+            missing.append({"component": "regressor", "path": str(self.regressor_file)})
+        return missing
+
     def _load(self, path):
         if not path.exists():
             return None

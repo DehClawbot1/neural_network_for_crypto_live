@@ -91,6 +91,36 @@ class OrderManager:
         factor = 10 ** int(decimals)
         return math.floor(max(shares, 0.0) * factor) / factor
 
+    def _has_recent_dust_clear(self, token_id, condition_id=None, outcome_side=None, lookback_seconds=300):
+        try:
+            lookback_seconds = max(1, int(lookback_seconds))
+        except Exception:
+            lookback_seconds = 300
+        cutoff_iso = (datetime.now(timezone.utc) - pd.Timedelta(seconds=lookback_seconds)).isoformat()
+        try:
+            rows = self.db.query_all(
+                """
+                SELECT order_id
+                FROM orders
+                WHERE order_id LIKE 'dust_clear_%'
+                  AND token_id = ?
+                  AND COALESCE(condition_id, '') = ?
+                  AND COALESCE(outcome_side, '') = ?
+                  AND COALESCE(created_at, '') >= ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (
+                    str(token_id or ""),
+                    str(condition_id or ""),
+                    str(outcome_side or ""),
+                    cutoff_iso,
+                ),
+            )
+            return bool(rows)
+        except Exception:
+            return False
+
     def _get_available_balance(self, asset_type="COLLATERAL", token_id=None, use_onchain_fallback=True):
         readiness = self.check_readiness(asset_type=asset_type, token_id=token_id)
         raw_balance = None
@@ -488,8 +518,36 @@ class OrderManager:
             return row, None
 
         # --- DUST PROTECTION PATCH ---
-        if float(order_size_shares) * float(price) < 0.01:
+        if normalized_side == "SELL" and float(order_size_shares) * float(price) < 0.01:
             import time
+            dedupe_window = int(os.getenv("DUST_CLEAR_DEDUPE_SECONDS", "300") or 300)
+            if self._has_recent_dust_clear(token_id, condition_id, outcome_side, lookback_seconds=dedupe_window):
+                logging.info(
+                    "Skipping duplicate dust clear for %s (recent synthetic clear already recorded within %ss).",
+                    str(token_id)[:16],
+                    dedupe_window,
+                )
+                row = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "order_id": None,
+                    "idempotency_key": idempotency_key,
+                    "token_id": token_id,
+                    "condition_id": condition_id,
+                    "outcome_side": outcome_side,
+                    "order_side": side,
+                    "price": price,
+                    "size": size,
+                    "size_usdc": notional_usdc,
+                    "order_size_shares": order_size_shares,
+                    "order_type": order_type,
+                    "post_only": post_only,
+                    "execution_style": execution_style,
+                    "status": "SKIPPED",
+                    "reason": "dust_already_cleared_recently",
+                    **market_context,
+                }
+                self._append(self.orders_file, row)
+                return row, {"status": "SKIPPED", "reason": "dust_already_cleared_recently"}
             logging.info("Silently clearing dust position for %s (Value < $0.01). Skipping API.", str(token_id)[:16])
             dummy_response = {"status": "FILLED", "orderID": "dust_clear_" + str(int(time.time()))}
             row = {

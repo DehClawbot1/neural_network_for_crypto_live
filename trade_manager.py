@@ -359,17 +359,93 @@ class TradeManager:
             "signal_label": trade.signal_label,
         }
 
-    def persist_open_positions(self):
-        open_trades = self.get_open_positions()
-        if not open_trades:
-            pd.DataFrame(columns=[
+    def _empty_positions_frame(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            columns=[
                 "position_id", "market", "market_title", "token_id",
                 "condition_id", "outcome_side", "order_side",
                 "entry_price", "current_price", "size_usdc", "shares",
                 "market_value", "unrealized_pnl", "realized_pnl",
                 "net_realized_pnl", "opened_at", "status",
                 "confidence", "confidence_at_entry", "signal_label",
-            ]).to_csv(self.positions_file, index=False)
+            ]
+        )
+
+    def _normalize_reconciled_positions_for_csv(self, reconciled_positions_df: pd.DataFrame) -> pd.DataFrame:
+        if reconciled_positions_df is None or reconciled_positions_df.empty:
+            return self._empty_positions_frame()
+        df = reconciled_positions_df.copy()
+        if "token_id" in df.columns:
+            df["token_id"] = df["token_id"].astype(str)
+        if "entry_price" not in df.columns and "avg_entry_price" in df.columns:
+            df["entry_price"] = df["avg_entry_price"]
+        if "current_price" not in df.columns:
+            for col in ("mark_price", "best_bid", "entry_price", "avg_entry_price"):
+                if col in df.columns:
+                    df["current_price"] = df[col]
+                    break
+        if "market" not in df.columns and "market_title" in df.columns:
+            df["market"] = df["market_title"]
+        if "market_title" not in df.columns and "market" in df.columns:
+            df["market_title"] = df["market"]
+        if "position_id" not in df.columns:
+            if "position_key" in df.columns:
+                df["position_id"] = df["position_key"]
+            else:
+                df["position_id"] = (
+                    df.get("token_id", pd.Series(index=df.index, dtype=str)).astype(str)
+                    + "|"
+                    + df.get("condition_id", pd.Series(index=df.index, dtype=str)).astype(str)
+                    + "|"
+                    + df.get("outcome_side", pd.Series(index=df.index, dtype=str)).astype(str)
+                )
+        if "order_side" not in df.columns:
+            df["order_side"] = "BUY"
+        if "shares" not in df.columns:
+            df["shares"] = 0.0
+        if "entry_price" not in df.columns:
+            df["entry_price"] = 0.0
+        if "current_price" not in df.columns:
+            df["current_price"] = df["entry_price"]
+        df["shares"] = pd.to_numeric(df["shares"], errors="coerce").fillna(0.0)
+        df["entry_price"] = pd.to_numeric(df["entry_price"], errors="coerce").fillna(0.0)
+        df["current_price"] = pd.to_numeric(df["current_price"], errors="coerce").fillna(df["entry_price"])
+        if "size_usdc" not in df.columns:
+            df["size_usdc"] = df["shares"] * df["entry_price"]
+        if "market_value" not in df.columns:
+            df["market_value"] = df["shares"] * df["current_price"]
+        if "unrealized_pnl" not in df.columns:
+            df["unrealized_pnl"] = df["shares"] * (df["current_price"] - df["entry_price"])
+        if "realized_pnl" not in df.columns:
+            df["realized_pnl"] = pd.to_numeric(df.get("realized_pnl", 0.0), errors="coerce").fillna(0.0)
+        if "net_realized_pnl" not in df.columns:
+            df["net_realized_pnl"] = pd.to_numeric(df["realized_pnl"], errors="coerce").fillna(0.0)
+        if "opened_at" not in df.columns:
+            df["opened_at"] = df.get("last_fill_at", datetime.now(timezone.utc).isoformat())
+        if "status" not in df.columns:
+            df["status"] = "OPEN"
+        if "confidence" not in df.columns:
+            df["confidence"] = None
+        if "confidence_at_entry" not in df.columns:
+            df["confidence_at_entry"] = df["confidence"]
+        if "signal_label" not in df.columns:
+            df["signal_label"] = None
+
+        keep = self._empty_positions_frame().columns.tolist()
+        for col in keep:
+            if col not in df.columns:
+                df[col] = None
+        return df[keep]
+
+    def persist_open_positions(self, reconciled_positions_df: pd.DataFrame | None = None):
+        if reconciled_positions_df is not None:
+            out_df = self._normalize_reconciled_positions_for_csv(reconciled_positions_df)
+            out_df.to_csv(self.positions_file, index=False)
+            return
+
+        open_trades = self.get_open_positions()
+        if not open_trades:
+            self._empty_positions_frame().to_csv(self.positions_file, index=False)
             return
 
         rows = [self._trade_to_dict(t) for t in open_trades]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+import uuid
 
 import pandas as pd
 
@@ -16,6 +17,27 @@ class LivePositionBook:
         self.logs_dir = Path(logs_dir)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.db = Database(self.logs_dir / "trading.db")
+
+    def _insert_external_sync_sell_fill(self, cursor, *, token_id, condition_id, outcome_side, price, shares, now):
+        shares = float(shares or 0.0)
+        if shares <= 0:
+            return
+        fill_id = f"ext_sync_{uuid.uuid4().hex[:10]}"
+        cursor.execute(
+            """
+            INSERT INTO fills (fill_id, order_id, token_id, condition_id, outcome_side, side, price, size, filled_at)
+            VALUES (?, 'external_manual', ?, ?, ?, 'SELL', ?, ?, ?)
+            """,
+            (
+                fill_id,
+                token_id,
+                condition_id,
+                outcome_side,
+                float(price or 0.0),
+                shares,
+                now,
+            ),
+        )
 
     def rebuild_from_db(self):
         fills = self.db.query_all(
@@ -183,27 +205,17 @@ class LivePositionBook:
                     "Closing stale local live position for %s because exchange conditional balance is zero.",
                     token_id,
                 )
-                # --- PATCH: Inject synthetic SELL fill to permanently prevent resurrection ---
-                local_shares = float(row.get("shares") or 0.0)
-                if local_shares > 0:
-                    import uuid
-                    fake_fill_id = f"ext_sync_{uuid.uuid4().hex[:8]}"
-                    cursor.execute(
-                        """
-                        INSERT INTO fills (fill_id, order_id, token_id, condition_id, outcome_side, side, price, size, filled_at)
-                        VALUES (?, 'external_manual', ?, ?, ?, 'SELL', ?, ?, ?)
-                        """,
-                        (
-                            fake_fill_id, 
-                            token_id, 
-                            row.get("condition_id"), 
-                            row.get("outcome_side"), 
-                            float(row.get("avg_entry_price") or 0.0), 
-                            local_shares, 
-                            now
-                        )
-                    )
-                # -------------------------------------------------------------------------
+                # Persist external/manual close as synthetic SELL fill so future rebuilds
+                # do not resurrect stale shares from historical BUY fills.
+                self._insert_external_sync_sell_fill(
+                    cursor,
+                    token_id=token_id,
+                    condition_id=row.get("condition_id"),
+                    outcome_side=row.get("outcome_side"),
+                    price=float(row.get("avg_entry_price") or 0.0),
+                    shares=local_shares,
+                    now=now,
+                )
                 
                 cursor.execute(
                     "UPDATE live_positions SET shares = 0, status = 'CLOSED', updated_at = ? WHERE position_key = ?",
@@ -212,8 +224,35 @@ class LivePositionBook:
                 continue
 
             if available_shares < local_shares - 1e-5: # BUG FIX 5: Permanently save partial external sells to DB
+                delta_shares = max(0.0, local_shares - float(available_shares or 0.0))
+                if delta_shares > 1e-9:
+                    logger.warning(
+                        "Reconciling partial external close for %s: local_shares=%.6f exchange_shares=%.6f delta=%.6f",
+                        token_id,
+                        local_shares,
+                        float(available_shares or 0.0),
+                        delta_shares,
+                    )
+                    self._insert_external_sync_sell_fill(
+                        cursor,
+                        token_id=token_id,
+                        condition_id=row.get("condition_id"),
+                        outcome_side=row.get("outcome_side"),
+                        price=float(row.get("avg_entry_price") or 0.0),
+                        shares=delta_shares,
+                        now=now,
+                    )
                 row["shares"] = available_shares
-                cursor.execute("UPDATE live_positions SET shares = ?, updated_at = ? WHERE position_key = ?", (available_shares, now, row.get("position_key")))
+                new_status = "OPEN"
+                try:
+                    if float(available_shares or 0.0) * float(local_avg_entry or 0.0) < 0.01:
+                        new_status = "CLOSED"
+                except Exception:
+                    new_status = "OPEN"
+                cursor.execute(
+                    "UPDATE live_positions SET shares = ?, status = ?, updated_at = ? WHERE position_key = ?",
+                    (available_shares, new_status, now, row.get("position_key")),
+                )
                 mutated = True
             else:
                 row["shares"] = local_shares
