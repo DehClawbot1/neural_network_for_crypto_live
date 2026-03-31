@@ -308,7 +308,11 @@ def ensure_signature_type():
         print(f"Current setting: {current} ({labels[current]})")
     print("If you are unsure, start with 1. A wrong choice commonly shows $0 balance or ghost positions.")
     print()
-    choice = input("Your choice [1/2/0] (Enter = keep current, default: 1): ").strip()
+    try:
+        choice = input("Your choice [1/2/0] (Enter = keep current, default: 1): ").strip()
+    except EOFError:
+        choice = current if current in labels else "1"
+        print(f"[+] No interactive stdin available. Using signature_type={choice} ({labels[choice]}).")
     if choice not in ("0", "1", "2"):
         choice = current if current in labels else "1"
     os.environ["POLYMARKET_SIGNATURE_TYPE"] = choice

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Dict, List, Optional
 from datetime import datetime, timezone
 from pathlib import Path
@@ -393,6 +394,7 @@ class TradeManager:
                     logger.warning("[~] Reconciled live positions came back empty. Keeping %s local trades in memory to avoid ghost closes after a transient DB/API failure.", len(self.active_trades))
             return
 
+        min_reconciled_notional = float(os.getenv("MIN_RECONCILED_POSITION_NOTIONAL_USDC", "0.01") or 0.01)
         rebuilt_trades: Dict[str, TradeLifecycle] = {}
         for _, row in reconciled_positions_df.iterrows():
             market = row.get("market") or row.get("market_title") or str(row.get("condition_id") or row.get("token_id") or "unknown_market")
@@ -414,6 +416,12 @@ class TradeManager:
             trade.entry_price = float(row.get("avg_entry_price", row.get("entry_price", 0.0)) or 0.0)
             trade.current_price = float(row.get("mark_price", row.get("current_price", trade.entry_price)) or trade.entry_price)
             trade.shares = float(row.get("shares", 0.0) or 0.0)
+            notional = max(
+                trade.shares * max(trade.current_price, 0.0),
+                trade.shares * max(trade.entry_price, 0.0),
+            )
+            if trade.shares <= 0 or notional < min_reconciled_notional:
+                continue
             trade.size_usdc = trade.shares * trade.entry_price
             trade.realized_pnl = float(row.get("realized_pnl", 0.0) or 0.0)
             trade.unrealized_pnl = float(row.get("unrealized_pnl", 0.0) or 0.0)
@@ -437,4 +445,11 @@ class TradeManager:
                         self.active_trades.pop(key)
                 except Exception:
                     pass
+        removed_dust = self._prune_local_dust_trades(min_notional=min_reconciled_notional)
+        if removed_dust > 0:
+            logger.info(
+                "[~] Pruned %s local dust trades during live reconciliation (<$%.4f).",
+                removed_dust,
+                min_reconciled_notional,
+            )
         logger.info("[~] Reconciled %s live positions into TradeManager.", len(self.active_trades))

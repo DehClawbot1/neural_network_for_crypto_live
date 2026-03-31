@@ -635,6 +635,33 @@ def main_loop():
             return out_signals, out_markets
 
         target_rows = out_markets[out_markets["slug"].astype(str) == always_on_slug]
+        resolved_slug = always_on_slug
+        if target_rows.empty:
+            # BTC up/down 5m markets rotate slug timestamps.
+            # If the configured slug is stale, fall back to the latest open slug with the same base prefix.
+            rotating_prefix = "btc-updown-5m-"
+            requested_slug = str(always_on_slug or "").strip().lower()
+            if requested_slug.startswith(rotating_prefix):
+                prefix_rows = out_markets[out_markets["slug"].astype(str).str.lower().str.startswith(rotating_prefix)]
+                if prefix_rows is not None and not prefix_rows.empty:
+                    if "closed" in prefix_rows.columns:
+                        open_mask = ~prefix_rows["closed"].astype(str).str.lower().isin({"1", "true", "yes"})
+                        open_rows = prefix_rows[open_mask]
+                        if open_rows is not None and not open_rows.empty:
+                            prefix_rows = open_rows
+                    if "end_date" in prefix_rows.columns:
+                        _end = pd.to_datetime(prefix_rows["end_date"], utc=True, errors="coerce")
+                        prefix_rows = prefix_rows.assign(_end_date_sort=_end).sort_values(
+                            by="_end_date_sort", ascending=False, na_position="last"
+                        )
+                    target_rows = prefix_rows.head(1)
+                    if target_rows is not None and not target_rows.empty:
+                        resolved_slug = str(target_rows.iloc[-1].get("slug") or always_on_slug)
+                        logging.info(
+                            "Always-on slug fallback: requested=%s resolved=%s",
+                            always_on_slug,
+                            resolved_slug,
+                        )
         if target_rows.empty:
             logging.warning("Always-on market slug not found this cycle: %s", always_on_slug)
             return out_signals, out_markets
@@ -664,11 +691,11 @@ def main_loop():
 
         signal_price = yes_price if outcome_side == "YES" else float(np.clip(1.0 - yes_price, 0.01, 0.99))
         synthetic_signal = {
-            "trade_id": f"always_on_{always_on_slug}_{int(time.time())}",
+            "trade_id": f"always_on_{resolved_slug}_{int(time.time())}",
             "tx_hash": None,
             "trader_wallet": "system_always_on",
             "market_title": market_row.get("market_title", market_row.get("question", always_on_slug)),
-            "market_slug": always_on_slug,
+            "market_slug": resolved_slug,
             "token_id": str(token_id),
             "condition_id": condition_id,
             "order_side": "BUY",
@@ -685,7 +712,7 @@ def main_loop():
         out_signals = pd.concat([out_signals, pd.DataFrame([synthetic_signal])], ignore_index=True)
         logging.info(
             "Always-on signal injected for slug=%s side=%s token=%s price=%.4f",
-            always_on_slug,
+            resolved_slug,
             outcome_side,
             str(token_id)[:16],
             signal_price,
