@@ -3,6 +3,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+from return_calibration import calibrate_return_predictions
 
 try:
     from inference_runtime_guard import report_error as _report_inference_error
@@ -94,8 +95,8 @@ class ModelInference:
                 x_reg = self._prepare_matrix(reg_saved if isinstance(reg_saved, dict) else {"features": getattr(reg, "feature_names_in_", [])}, out)
                 if x_reg is not None:
                     preds = reg.predict(x_reg)
-                    pred_series = pd.Series(np.array(preds).ravel(), index=out.index)
-                    out["expected_return"] = pd.to_numeric(pred_series, errors="coerce").replace([np.inf, -np.inf], 0.0).fillna(0.0)
+                    calibration = reg_saved.get("return_calibration") if isinstance(reg_saved, dict) else None
+                    out["expected_return"] = calibrate_return_predictions(preds, calibration, index=out.index)
             except Exception as exc:
                 _report_inference_error("model_inference.regressor", exc, context="expected_return_zero_fallback")
                 out["expected_return"] = 0.0

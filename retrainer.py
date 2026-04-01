@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from rl_trainer import train_model
+from supervised_models import SupervisedModels
 from stage1_models import Stage1Models
 from stage2_temporal_models import Stage2TemporalModels
 
@@ -228,6 +229,7 @@ class Retrainer:
             self.closed_trade_threshold,
             rl_timesteps,
         )
+        SupervisedModels(logs_dir=self.logs_dir).train()
         Stage1Models(logs_dir=self.logs_dir).train()
         Stage2TemporalModels(logs_dir=self.logs_dir).train()
         train_model(timesteps=rl_timesteps)

@@ -4,6 +4,7 @@ import warnings
 import joblib
 import pandas as pd
 from model_feature_safety import drop_all_nan_features
+from return_calibration import fit_return_calibration, transform_return_targets
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
 from sklearn.impute import SimpleImputer
@@ -175,8 +176,10 @@ class Stage1Models:
             self._write_feature_importance(usable, clf)
 
         if "forward_return_15m" in df.columns:
+            target_returns = pd.to_numeric(df["forward_return_15m"], errors="coerce").fillna(0.0)
+            return_calibration = fit_return_calibration(target_returns)
             reg = self._build_regressor()
-            reg.fit(X, df["forward_return_15m"].fillna(0.0))
-            joblib.dump({"model": reg, "features": usable}, self.regressor_file)
+            reg.fit(X, transform_return_targets(target_returns, return_calibration))
+            joblib.dump({"model": reg, "features": usable, "return_calibration": return_calibration}, self.regressor_file)
 
         return usable

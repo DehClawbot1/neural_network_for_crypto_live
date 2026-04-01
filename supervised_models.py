@@ -3,6 +3,7 @@ from pathlib import Path
 import joblib
 import pandas as pd
 from model_feature_safety import drop_all_nan_features
+from return_calibration import fit_return_calibration, transform_return_targets
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
@@ -77,11 +78,13 @@ class SupervisedModels:
             joblib.dump({"model": clf, "features": usable}, self.classifier_file)
 
         if "forward_return_15m" in train_df.columns:
+            target_returns = pd.to_numeric(train_df["forward_return_15m"], errors="coerce").fillna(0.0)
+            return_calibration = fit_return_calibration(target_returns)
             reg = Pipeline([
                 ("imputer", SimpleImputer(strategy="median")),
                 ("model", RandomForestRegressor(n_estimators=250, random_state=42, n_jobs=_N_JOBS)),
             ])
-            reg.fit(train_df[usable], train_df["forward_return_15m"].fillna(0.0))
-            joblib.dump({"model": reg, "features": usable}, self.regressor_file)
+            reg.fit(train_df[usable], transform_return_targets(target_returns, return_calibration))
+            joblib.dump({"model": reg, "features": usable, "return_calibration": return_calibration}, self.regressor_file)
 
         return usable

@@ -40,6 +40,7 @@ from polytrade_env import PolyTradeEnv
 from model_inference import ModelInference
 from stage1_inference import Stage1Inference
 from stage2_temporal_inference import Stage2TemporalInference
+from return_calibration import clip_expected_return_series
 from ops_state_sync import sync_ops_state_to_db
 from stage3_hybrid import Stage3HybridScorer
 from config import TradingConfig
@@ -1475,8 +1476,12 @@ def main_loop():
                     inferred_df["p_tp_before_sl"].astype(float).fillna(0.0) * w_stage1
                     + inferred_df["temporal_p_tp_before_sl"].astype(float).fillna(0.0) * w_stage2
                 ).clip(0.0, 1.0)
+            if "expected_return" in inferred_df.columns:
+                inferred_df["expected_return"] = clip_expected_return_series(inferred_df["expected_return"])
             if "temporal_expected_return" in inferred_df.columns:
-                inferred_df["expected_return"] = inferred_df[["expected_return", "temporal_expected_return"]].mean(axis=1)
+                inferred_df["expected_return"] = clip_expected_return_series(
+                    inferred_df[["expected_return", "temporal_expected_return"]].mean(axis=1)
+                )
                 inferred_df["edge_score"] = inferred_df["p_tp_before_sl"].astype(float) * inferred_df["expected_return"].astype(float)
             inferred_df = hybrid_scorer.run(inferred_df)
             if "hybrid_edge" in inferred_df.columns:

@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import warnings
 from model_feature_safety import drop_all_nan_features
+from return_calibration import fit_return_calibration, transform_return_targets
 from sklearn.impute import SimpleImputer
 from sklearn.utils import resample
 from sklearn.metrics import accuracy_score, mean_squared_error, precision_score, recall_score
@@ -184,6 +185,7 @@ class Stage2TemporalModels:
         if target_reg:
             reg_scores = []
             last_reg = None
+            return_calibration = fit_return_calibration(pd.to_numeric(df[target_reg], errors="coerce").fillna(0.0))
             for train_idx, test_idx in tscv.split(df):
                 train_df = df.iloc[train_idx]
                 test_df = df.iloc[test_idx]
@@ -208,14 +210,17 @@ class Stage2TemporalModels:
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", category=ConvergenceWarning)
                     warnings.filterwarnings("ignore", category=UndefinedMetricWarning)
-                    reg.fit(train_df[feature_cols], train_df[target_reg].fillna(0.0))
+                    train_target = pd.to_numeric(train_df[target_reg], errors="coerce").fillna(0.0)
+                    reg.fit(train_df[feature_cols], transform_return_targets(train_target, return_calibration))
                 preds = reg.predict(test_df[feature_cols])
-                reg_scores.append(mean_squared_error(test_df[target_reg].fillna(0.0), preds) ** 0.5)
+                from return_calibration import calibrate_return_predictions
+                calibrated_preds = calibrate_return_predictions(preds, return_calibration, index=test_df.index)
+                reg_scores.append(mean_squared_error(pd.to_numeric(test_df[target_reg], errors="coerce").fillna(0.0), calibrated_preds) ** 0.5)
                 last_reg = reg
             if reg_scores:
                 metrics["temporal_walk_forward_rmse"] = float(sum(reg_scores) / len(reg_scores))
             if last_reg is not None:
-                joblib.dump({"model": last_reg, "features": feature_cols}, self.regressor_file)
+                joblib.dump({"model": last_reg, "features": feature_cols, "return_calibration": return_calibration}, self.regressor_file)
 
         result = pd.DataFrame([metrics]) if metrics else pd.DataFrame()
         if not result.empty:

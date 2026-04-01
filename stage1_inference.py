@@ -4,6 +4,7 @@ import warnings
 import joblib
 import numpy as np
 import pandas as pd
+from return_calibration import calibrate_return_predictions
 
 try:
     from inference_runtime_guard import report_error as _report_inference_error
@@ -106,17 +107,15 @@ class Stage1Inference:
                             category=UserWarning,
                         )
                         preds = reg.predict(x_reg)
-                    out["expected_return"] = (
-                        pd.Series(np.asarray(preds).ravel(), index=out.index)
-                        .astype(float)
-                        .replace([np.inf, -np.inf], 0.0)
-                        .fillna(0.0)
-                    )
+                    calibration = reg_saved.get("return_calibration") if isinstance(reg_saved, dict) else None
+                    out["expected_return"] = calibrate_return_predictions(preds, calibration, index=out.index)
             except Exception as exc:
                 _report_inference_error("stage1_inference.regressor", exc, context="expected_return_zero_fallback")
                 out["expected_return"] = 0.0
 
-        out["return_std"] = abs(out["expected_return"].astype(float)) * 0.35
+        calibration = reg_saved.get("return_calibration") if isinstance(reg_saved, dict) else {}
+        uncertainty_floor = float(calibration.get("uncertainty_floor", 0.02) or 0.02)
+        out["return_std"] = np.maximum(abs(out["expected_return"].astype(float)) * 0.35, uncertainty_floor)
         out["lower_confidence_bound"] = out["expected_return"].astype(float) - out["return_std"].astype(float)
         out["edge_score"] = out["p_tp_before_sl"].astype(float) * out["lower_confidence_bound"].astype(float)
         return out
