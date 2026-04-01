@@ -227,7 +227,21 @@ def load_candidate_decisions_from_db(hours=6):
 def latest_ts(df, cols=None):
     if df is None or df.empty:
         return None
-    for c in (cols or ["timestamp", "updated_at", "created_at", "closed_at", "opened_at"]):
+    default_cols = [
+        "timestamp",
+        "updated_at",
+        "created_at",
+        "closed_at",
+        "opened_at",
+        "last_retrained_at",
+        "entry_time",
+        "exit_time",
+        "last_signal_timestamp",
+        "last_trade_timestamp",
+        "last_alert_timestamp",
+        "last_position_timestamp",
+    ]
+    for c in (cols or default_cols):
         if c in df.columns:
             ts = pd.to_datetime(df[c], errors="coerce", utc=True).dropna()
             if not ts.empty:
@@ -235,8 +249,23 @@ def latest_ts(df, cols=None):
     return None
 
 
-def age_seconds(df, cols=None):
+def path_mtime(path):
+    try:
+        p = Path(path) if path is not None else None
+        if p and p.exists():
+            return pd.Timestamp(p.stat().st_mtime, unit="s", tz="UTC")
+    except Exception:
+        pass
+    return None
+
+
+def age_seconds(df, cols=None, fallback_path=None):
     ts = latest_ts(df, cols)
+    fm = path_mtime(fallback_path) if fallback_path is not None else None
+    if ts is None:
+        ts = fm
+    elif fm is not None and fm > ts:
+        ts = fm
     return max(0, int((pd.Timestamp.utcnow() - ts).total_seconds())) if ts else None
 
 
@@ -321,13 +350,32 @@ def freshness_status(a):
     return "stale", "dot-err"
 
 
+def _safe_cell(v):
+    if v is None:
+        return "N/A"
+    try:
+        if pd.isna(v):
+            return "N/A"
+    except Exception:
+        pass
+    if isinstance(v, (bytes, bytearray, memoryview)):
+        raw = bytes(v)
+        try:
+            return raw.decode("utf-8")
+        except Exception:
+            return raw.hex()
+    if isinstance(v, (dict, list, tuple, set, Path)):
+        return str(v)
+    return v
+
+
 def ensure_safe(df):
     if df is None or getattr(df, "empty", False):
         return df
     out = df.copy()
     for c in out.columns:
         if out[c].dtype == "object":
-            out[c] = out[c].apply(lambda x: "N/A" if x is None or (isinstance(x, float) and pd.isna(x)) else str(x))
+            out[c] = out[c].apply(_safe_cell).astype(str)
     return out
 
 
@@ -493,13 +541,33 @@ def render_freshness(source_frames):
 def render_health(signals_df, markets_df, positions_df, model_status_df, replay_df, health_df):
     st.markdown('<div class="sec-title">Pipeline Health</div>', unsafe_allow_html=True)
 
-    def chk(df, ma=600):
-        a = age_seconds(df)
+    def chk(df, ma=600, path=None, cols=None):
+        a = age_seconds(df, cols=cols, fallback_path=path)
         if a is None:
             return "dot-off"
         return "dot-ok" if a <= ma else "dot-warn" if a <= 1800 else "dot-err"
 
-    items = [("Market monitor", chk(markets_df)), ("Whale tracker", chk(load("whales"))), ("Signal engine", chk(signals_df)), ("Order simulation", chk(positions_df)), ("Model status", chk(model_status_df, 1800)), ("System health", chk(health_df)), ("Replay available", "dot-ok" if replay_df is not None and not replay_df.empty else "dot-off"), ("Signals growing", "dot-ok" if signals_df is not None and len(signals_df) > 0 else "dot-off")]
+    whales_df = load("whales")
+    signals_growing_dot = "dot-off"
+    if health_df is not None and not health_df.empty and "signals_growing" in health_df.columns:
+        sg = str(health_df.iloc[-1].get("signals_growing", "")).strip().lower()
+        if sg in {"yes", "true", "1", "y"}:
+            signals_growing_dot = "dot-ok"
+        elif sg in {"no", "false", "0", "n"}:
+            signals_growing_dot = "dot-warn"
+    elif signals_df is not None and len(signals_df) > 0:
+        signals_growing_dot = "dot-ok"
+
+    items = [
+        ("Market monitor", chk(markets_df, path=FILES["markets"])),
+        ("Whale tracker", chk(whales_df, path=FILES["whales"])),
+        ("Signal engine", chk(signals_df, path=FILES["signals"])),
+        ("Order simulation", chk(positions_df, path=FILES["positions"])),
+        ("Model status", chk(model_status_df, 86400, path=FILES["model_status"], cols=["last_retrained_at", "timestamp", "updated_at", "created_at"])),
+        ("System health", chk(health_df, path=FILES["health"])),
+        ("Replay available", "dot-ok" if replay_df is not None and not replay_df.empty else "dot-off"),
+        ("Signals growing", signals_growing_dot),
+    ]
     h = '<div class="health-grid">'
     for n, d in items:
         h += f'<div class="health-pill"><div class="dot {d}"></div>{n}</div>'
@@ -864,7 +932,7 @@ def render_shadow(shadow_df):
         fig = px.bar(oc, x="Outcome", y="Count", color_discrete_sequence=COLORS)
         st.plotly_chart(sfig(fig, 260).update_layout(title="Shadow Outcome Mix"), use_container_width=True)
     cs = [c for c in ["timestamp", "market_title", "meta_prob", "entry_slippage_bps", "expected_slip_bps", "ev_adj", "outcome", "realized_return", "trades_in_window"] if c in shadow_df.columns]
-    st.dataframe(shadow_df[cs].tail(100), use_container_width=True, hide_index=True)
+    st.dataframe(ensure_safe(shadow_df[cs].tail(100)), use_container_width=True, hide_index=True)
 
 
 def render_quality(sdf, tdf, mdf, wdf, adf, msd, pdf, cdf, rpd, hdf):
@@ -875,7 +943,7 @@ def render_quality(sdf, tdf, mdf, wdf, adf, msd, pdf, cdf, rpd, hdf):
         p = FILES.get(n)
         lt = latest_ts(df)
         rows.append({"file": n, "present": "Yes" if p and p.exists() else "No", "rows": len(df) if df is not None and not df.empty else 0, "latest": lt.strftime('%H:%M:%S') if lt else "N/A", "schema": "ok" if df is not None and not df.empty else "empty"})
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(ensure_safe(pd.DataFrame(rows)), use_container_width=True, hide_index=True)
     c1, c2, c3 = st.columns(3)
     c1.metric("Training Ready", "Yes" if not cdf.empty and not msd.empty else "No")
     c2.metric("Replay Ready", "Yes" if not rpd.empty else "No")
@@ -889,15 +957,15 @@ def render_raw(sdf, tdf, edf, mdf, wdf, adf, msd, pdf, cdf):
     with tabs[1]:
         st.dataframe(ensure_safe(tdf), use_container_width=True)
     with tabs[2]:
-        st.dataframe(edf, use_container_width=True)
+        st.dataframe(ensure_safe(edf), use_container_width=True)
     with tabs[3]:
-        st.dataframe(mdf, use_container_width=True)
+        st.dataframe(ensure_safe(mdf), use_container_width=True)
     with tabs[4]:
-        st.dataframe(wdf, use_container_width=True)
+        st.dataframe(ensure_safe(wdf), use_container_width=True)
     with tabs[5]:
-        st.dataframe(adf, use_container_width=True)
+        st.dataframe(ensure_safe(adf), use_container_width=True)
     with tabs[6]:
-        st.dataframe(msd, use_container_width=True)
+        st.dataframe(ensure_safe(msd), use_container_width=True)
     with tabs[7]:
         st.markdown("**Open**")
         st.dataframe(ensure_safe(pdf), use_container_width=True)
@@ -1068,7 +1136,7 @@ def main():
         render_best_trades(cdf, rpd)
         if not edf.empty:
             st.markdown('<div class="sec-title">Episode Log</div>', unsafe_allow_html=True)
-            st.dataframe(edf.tail(20), use_container_width=True)
+            st.dataframe(ensure_safe(edf.tail(20)), use_container_width=True)
 
     with t4:
         s1, s2, s3 = st.tabs(["Markets", "Whale Activity", "Alerts"])
@@ -1076,7 +1144,7 @@ def main():
             render_markets(mdf)
             if not ddf.empty:
                 st.markdown('<div class="sec-title">Whale Market Distribution</div>', unsafe_allow_html=True)
-                st.dataframe(ddf.head(15), use_container_width=True)
+                st.dataframe(ensure_safe(ddf.head(15)), use_container_width=True)
                 if "unique_wallets" in ddf.columns and "market_title" in ddf.columns:
                     fig = px.bar(ddf.head(10), x="unique_wallets", y="market_title", orientation="h", color_discrete_sequence=["#a855f7"])
                     st.plotly_chart(sfig(fig, 320).update_layout(title="Wallet Clustering"), use_container_width=True)
