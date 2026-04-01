@@ -3,6 +3,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+import warnings
 from model_feature_safety import drop_all_nan_features
 from sklearn.impute import SimpleImputer
 from sklearn.utils import resample
@@ -11,6 +12,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.neural_network import MLPClassifier, MLPRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from sklearn.exceptions import ConvergenceWarning, UndefinedMetricWarning
 
 
 class Stage2TemporalModels:
@@ -71,6 +73,19 @@ class Stage2TemporalModels:
                 return col
         return None
 
+    @staticmethod
+    def _can_use_mlp_early_stopping(n_rows: int, validation_fraction: float = 0.15) -> bool:
+        try:
+            n_rows = int(n_rows)
+        except Exception:
+            return False
+        if n_rows <= 0:
+            return False
+        # MLP early-stopping uses an internal validation split and, for regressors,
+        # computes R2 on that split. Require at least 2 validation samples.
+        n_val = int(np.ceil(n_rows * float(validation_fraction)))
+        return n_val >= 2
+
     def train(self):
         df = self._safe_read()
         if df.empty:
@@ -123,12 +138,29 @@ class Stage2TemporalModels:
                 if train_df.empty or test_df.empty:
                     continue
                 balanced_train_df = self._balance_binary_frame(train_df, target_cls)
+                y_train = balanced_train_df[target_cls].fillna(0).astype(int)
+                class_counts = y_train.value_counts()
+                use_early_stopping_cls = self._can_use_mlp_early_stopping(len(balanced_train_df), validation_fraction=0.15)
+                if len(class_counts) < 2 or class_counts.min() < 2:
+                    use_early_stopping_cls = False
                 clf = Pipeline([
                     ("imputer", SimpleImputer(strategy="constant", fill_value=0)),
                     ("scaler", StandardScaler()),
-                    ("model", MLPClassifier(hidden_layer_sizes=(48, 24), random_state=42, max_iter=600, learning_rate_init=1e-3, alpha=1e-4, early_stopping=True, validation_fraction=0.15, n_iter_no_change=20, tol=1e-3)),
+                    ("model", MLPClassifier(
+                        hidden_layer_sizes=(48, 24),
+                        random_state=42,
+                        max_iter=600,
+                        learning_rate_init=1e-3,
+                        alpha=1e-4,
+                        early_stopping=use_early_stopping_cls,
+                        validation_fraction=0.15,
+                        n_iter_no_change=20,
+                        tol=1e-3,
+                    )),
                 ])
-                clf.fit(balanced_train_df[feature_cols], balanced_train_df[target_cls].fillna(0).astype(int))
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", category=ConvergenceWarning)
+                    clf.fit(balanced_train_df[feature_cols], y_train)
                 y_test = test_df[target_cls].fillna(0).astype(int)
                 preds = clf.predict(test_df[feature_cols])
                 cls_scores.append(accuracy_score(y_test, preds))
@@ -157,12 +189,26 @@ class Stage2TemporalModels:
                 test_df = df.iloc[test_idx]
                 if train_df.empty or test_df.empty:
                     continue
+                use_early_stopping_reg = self._can_use_mlp_early_stopping(len(train_df), validation_fraction=0.15)
                 reg = Pipeline([
                     ("imputer", SimpleImputer(strategy="constant", fill_value=0)),
                     ("scaler", StandardScaler()),
-                    ("model", MLPRegressor(hidden_layer_sizes=(48, 24), random_state=42, max_iter=600, learning_rate_init=1e-3, alpha=1e-4, early_stopping=True, validation_fraction=0.15, n_iter_no_change=20, tol=1e-3)),
+                    ("model", MLPRegressor(
+                        hidden_layer_sizes=(48, 24),
+                        random_state=42,
+                        max_iter=600,
+                        learning_rate_init=1e-3,
+                        alpha=1e-4,
+                        early_stopping=use_early_stopping_reg,
+                        validation_fraction=0.15,
+                        n_iter_no_change=20,
+                        tol=1e-3,
+                    )),
                 ])
-                reg.fit(train_df[feature_cols], train_df[target_reg].fillna(0.0))
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", category=ConvergenceWarning)
+                    warnings.filterwarnings("ignore", category=UndefinedMetricWarning)
+                    reg.fit(train_df[feature_cols], train_df[target_reg].fillna(0.0))
                 preds = reg.predict(test_df[feature_cols])
                 reg_scores.append(mean_squared_error(test_df[target_reg].fillna(0.0), preds) ** 0.5)
                 last_reg = reg
