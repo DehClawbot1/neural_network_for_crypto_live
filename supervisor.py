@@ -61,6 +61,7 @@ from technical_analyzer import TechnicalAnalyzer
 from sentiment_analyzer import SentimentAnalyzer
 from macro_analyzer import MacroAnalyzer
 from onchain_analyzer import OnChainAnalyzer
+from trade_feedback_learner import TradeFeedbackLearner
 try:
     from inference_runtime_guard import (
         reset_cycle as _reset_inference_runtime_guard,
@@ -676,6 +677,7 @@ def main_loop():
     _money_mgr = MoneyManager()
     autonomous_monitor = AutonomousMonitor()
     retrainer = Retrainer()
+    feedback_learner = TradeFeedbackLearner()
     previous_markets_df = None
     previous_entry_freeze_active = False
     previous_entry_freeze_reason = None
@@ -1482,6 +1484,7 @@ def main_loop():
             log_raw_candidates(inferred_df)
             if inferred_df is not None and not inferred_df.empty: inferred_df = inferred_df.loc[:, ~inferred_df.columns.duplicated()]
             scored_df = signal_engine.score_features(inferred_df)
+            scored_df = feedback_learner.apply_to_scored_df(scored_df, signal_engine)
             if scored_df is not None: scored_df = scored_df.loc[:, ~scored_df.columns.duplicated()].copy()
             if scored_df is not None and not scored_df.empty: scored_df = scored_df.loc[:, ~scored_df.columns.duplicated()]
 
@@ -2552,6 +2555,8 @@ def main_loop():
                         _money_mgr.record_win(ct.realized_pnl)
                     else:
                         _money_mgr.record_loss(ct.realized_pnl)
+            finalized_closed_trades = [ct for ct in closed_trades if getattr(ct, "state", None) == TradeState.CLOSED]
+            closed_trade_feedback_count = feedback_learner.record_closed_trades(finalized_closed_trades)
 
             # 5. Phase 2 analytics outputs
             trades_df = safe_read_csv(EXECUTION_FILE)
@@ -2607,7 +2612,10 @@ def main_loop():
             # actually learns from wins and losses during real trading.
             allow_live_retrain = os.getenv("ENABLE_LIVE_RETRAIN", "true").strip().lower() in {"1", "true", "yes", "on"}
             if trading_mode != "live" or allow_live_retrain:
-                retrainer.maybe_retrain()
+                retrainer.maybe_retrain(
+                    force=closed_trade_feedback_count > 0,
+                    reason="closed_trade_feedback" if closed_trade_feedback_count > 0 else "scheduled_cycle_check",
+                )
                 autonomous_monitor.write_heartbeat("retrainer", status="ok", message="retrain_checked")
             else:
                 autonomous_monitor.write_heartbeat("retrainer", status="ok", message="retrain_skipped_live")

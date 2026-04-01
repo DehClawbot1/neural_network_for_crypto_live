@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -34,7 +35,9 @@ class Retrainer:
         self.state_file = self.logs_dir / "retrainer_state.json"
         self.closed_trade_threshold = closed_trade_threshold
         self.replay_threshold = replay_threshold
-        self._last_retrained_closed_count = self._load_last_retrained_closed_count()
+        state_payload = self._load_state_payload()
+        self._last_retrained_closed_count = int(state_payload.get("last_retrained_closed_count", 0) or 0)
+        self._last_retrained_at = str(state_payload.get("last_retrained_at") or "")
 
     def _safe_read(self, path):
         if not path.exists():
@@ -53,17 +56,19 @@ class Retrainer:
         except Exception:
             return float(default)
 
-    def _load_last_retrained_closed_count(self):
+    def _load_state_payload(self):
         if not self.state_file.exists():
-            return 0
+            return {}
         try:
-            payload = json.loads(self.state_file.read_text(encoding="utf-8"))
-            return int(payload.get("last_retrained_closed_count", 0) or 0)
+            return json.loads(self.state_file.read_text(encoding="utf-8"))
         except Exception:
-            return 0
+            return {}
 
-    def _persist_last_retrained_closed_count(self):
-        payload = {"last_retrained_closed_count": int(self._last_retrained_closed_count)}
+    def _persist_state(self):
+        payload = {
+            "last_retrained_closed_count": int(self._last_retrained_closed_count),
+            "last_retrained_at": str(self._last_retrained_at or ""),
+        }
         try:
             self.state_file.write_text(json.dumps(payload), encoding="utf-8")
         except Exception:
@@ -135,7 +140,7 @@ class Retrainer:
         pd.DataFrame([row]).to_csv(self.registry_file, mode="a", header=not self.registry_file.exists(), index=False)
         return True, f"Promoted candidate model {row['model_version']}"
 
-    def maybe_retrain(self):
+    def maybe_retrain(self, force=False, reason="scheduled_cycle_check"):
         closed_df = self._safe_read(self.closed_file)
         replay_df = self._safe_read(self.replay_file)
         backtest_df = self._safe_read(self.backtest_summary_file)
@@ -147,7 +152,31 @@ class Retrainer:
         if not backtest_df.empty and "average_pnl" in backtest_df.columns:
             pnl_degraded = self._safe_float(backtest_df.iloc[-1].get("average_pnl"), 0.0) < 0
 
+        force_every_closed_trade = os.getenv("RETRAIN_ON_EVERY_CLOSED_TRADE", "true").strip().lower() in {"1", "true", "yes", "on"}
+        if force and not force_every_closed_trade:
+            force = False
+
+        min_interval_seconds = max(0, int(os.getenv("RETRAIN_MIN_INTERVAL_SECONDS", "0") or 0))
+        if self._last_retrained_at:
+            try:
+                last_retrained_ts = pd.to_datetime(self._last_retrained_at, utc=True, errors="coerce")
+            except Exception:
+                last_retrained_ts = pd.NaT
+        else:
+            last_retrained_ts = pd.NaT
+        if pd.notna(last_retrained_ts) and min_interval_seconds > 0:
+            seconds_since_last = (pd.Timestamp.now(tz="UTC") - last_retrained_ts).total_seconds()
+            if seconds_since_last < min_interval_seconds:
+                self._write_status(
+                    closed_rows,
+                    replay_rows,
+                    f"Retrain deferred ({reason}): cooldown active {int(seconds_since_last)}s/{min_interval_seconds}s",
+                )
+                return False
+
         should_retrain = (
+            force
+            or
             new_closed >= self.closed_trade_threshold
             or replay_rows >= self.replay_threshold
             or pnl_degraded
@@ -163,17 +192,30 @@ class Retrainer:
             )
             return False
 
+        rl_timesteps = max(
+            256,
+            int(
+                os.getenv(
+                    "FORCED_RETRAIN_RL_TIMESTEPS" if force else "RETRAIN_RL_TIMESTEPS",
+                    "1500" if force else "5000",
+                )
+                or ("1500" if force else "5000")
+            ),
+        )
         logging.info(
-            "Retraining triggered: %d new closed trades (threshold=%d). Refreshing models...",
+            "Retraining triggered (%s): %d new closed trades (threshold=%d). Refreshing models with rl_timesteps=%d...",
+            reason,
             new_closed,
             self.closed_trade_threshold,
+            rl_timesteps,
         )
         Stage1Models(logs_dir=self.logs_dir).train()
         Stage2TemporalModels(logs_dir=self.logs_dir).train()
-        train_model(timesteps=5000)
+        train_model(timesteps=rl_timesteps)
         promoted, message = self._promote_if_better(closed_rows, replay_rows)
 
         self._last_retrained_closed_count = closed_rows
-        self._persist_last_retrained_closed_count()
-        self._write_status(closed_rows, replay_rows, message)
+        self._last_retrained_at = pd.Timestamp.utcnow().isoformat()
+        self._persist_state()
+        self._write_status(closed_rows, replay_rows, f"{message} | reason={reason} | rl_timesteps={rl_timesteps}")
         return promoted

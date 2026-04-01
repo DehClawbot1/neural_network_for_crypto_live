@@ -40,6 +40,63 @@ class TradeManager:
         )
         logger.info("[+] Initialized TradeManager.")
 
+    def _env_float(self, name: str, default: float, minimum: float = 0.0, maximum: float = 1_000_000.0) -> float:
+        try:
+            value = float(os.getenv(name, str(default)) or default)
+        except Exception:
+            value = float(default)
+        value = max(float(minimum), value)
+        value = min(float(maximum), value)
+        return value
+
+    def _env_int(self, name: str, default: int, minimum: int = 0, maximum: int = 1_000_000) -> int:
+        try:
+            value = int(os.getenv(name, str(default)) or default)
+        except Exception:
+            value = int(default)
+        value = max(int(minimum), value)
+        value = min(int(maximum), value)
+        return value
+
+    def _resolve_exit_thresholds(self) -> dict:
+        open_count = len(self.get_open_positions())
+
+        thresholds = {
+            "tp_roi": self._env_float("EXIT_TP_ROI", 0.06, minimum=0.001, maximum=1.0),
+            "tp_delta": self._env_float("EXIT_TP_DELTA", 0.03, minimum=0.001, maximum=1.0),
+            "sl_delta": self._env_float("EXIT_SL_DELTA", 0.02, minimum=0.001, maximum=1.0),
+            "time_stop_minutes": self._env_int("EXIT_TIME_STOP_MINUTES", 90, minimum=1, maximum=10_000),
+            "trailing_stop": self._env_float("EXIT_TRAILING_STOP", 0.05, minimum=0.001, maximum=1.0),
+            "full_book_threshold": self._env_int("FULL_BOOK_POSITION_COUNT", 5, minimum=1, maximum=1_000),
+            "full_book_mode": False,
+        }
+
+        if open_count >= thresholds["full_book_threshold"]:
+            thresholds["full_book_mode"] = True
+            thresholds["tp_roi"] = min(
+                thresholds["tp_roi"],
+                self._env_float("FULL_BOOK_EXIT_TP_ROI", 0.045, minimum=0.001, maximum=1.0),
+            )
+            thresholds["tp_delta"] = min(
+                thresholds["tp_delta"],
+                self._env_float("FULL_BOOK_EXIT_TP_DELTA", 0.025, minimum=0.001, maximum=1.0),
+            )
+            thresholds["sl_delta"] = min(
+                thresholds["sl_delta"],
+                self._env_float("FULL_BOOK_EXIT_SL_DELTA", 0.018, minimum=0.001, maximum=1.0),
+            )
+            thresholds["time_stop_minutes"] = min(
+                thresholds["time_stop_minutes"],
+                self._env_int("FULL_BOOK_EXIT_TIME_STOP_MINUTES", 60, minimum=1, maximum=10_000),
+            )
+            thresholds["trailing_stop"] = min(
+                thresholds["trailing_stop"],
+                self._env_float("FULL_BOOK_EXIT_TRAILING_STOP", 0.035, minimum=0.001, maximum=1.0),
+            )
+
+        thresholds["open_count"] = open_count
+        return thresholds
+
     def _compose_trade_key(self, token_id=None, condition_id=None, outcome_side=None, market=None) -> Optional[str]:
         token_id = str(token_id).strip() if token_id not in [None, ""] else ""
         condition_id = str(condition_id).strip() if condition_id not in [None, ""] else ""
@@ -145,6 +202,17 @@ class TradeManager:
     ):
         closed_trades: List[TradeLifecycle] = []
         close_reasons: Dict[str, str] = {}
+        exit_thresholds = self._resolve_exit_thresholds()
+        logger.info(
+            "Exit policy active: open_positions=%s full_book=%s tp_roi=%.4f tp_delta=%.4f sl_delta=%.4f trailing=%.4f time_stop=%sm",
+            exit_thresholds["open_count"],
+            exit_thresholds["full_book_mode"],
+            exit_thresholds["tp_roi"],
+            exit_thresholds["tp_delta"],
+            exit_thresholds["sl_delta"],
+            exit_thresholds["trailing_stop"],
+            exit_thresholds["time_stop_minutes"],
+        )
 
         for trade_key, trade in list(self.active_trades.items()):
             if trade.state == TradeState.CLOSED:
@@ -239,17 +307,17 @@ class TradeManager:
             # -------------------------------------------------------
 
             # Keep external/manual-close reason sticky: do not overwrite with rule exits.
-            if close_reason is None and roi >= TradingConfig.PAPER_TP_ROI:
+            if close_reason is None and roi >= exit_thresholds["tp_roi"]:
                 close_reason = "take_profit_roi"
-            elif close_reason is None and (current_price - entry_price) >= TradingConfig.SHADOW_TP_DELTA:
+            elif close_reason is None and (current_price - entry_price) >= exit_thresholds["tp_delta"]:
                 close_reason = "take_profit_price_move"
             elif close_reason is None and predicted_target_price is not None and current_price >= predicted_target_price:
                 close_reason = "take_profit_model_target"
-            elif close_reason is None and (entry_price - current_price) >= TradingConfig.SHADOW_SL_DELTA:
+            elif close_reason is None and (entry_price - current_price) >= exit_thresholds["sl_delta"]:
                 close_reason = "stop_loss"
-            elif close_reason is None and minutes_open >= getattr(TradingConfig, 'TIME_STOP_MINUTES', 120):
+            elif close_reason is None and minutes_open >= exit_thresholds["time_stop_minutes"]:
                 close_reason = "time_stop"
-            elif close_reason is None and trailing_drop >= TradingConfig.PAPER_TRAILING_STOP and minutes_open > 15:
+            elif close_reason is None and trailing_drop >= exit_thresholds["trailing_stop"] and minutes_open > 15:
                 close_reason = "trailing_stop"
 
             if close_reason:
