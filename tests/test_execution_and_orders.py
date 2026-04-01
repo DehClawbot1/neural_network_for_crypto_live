@@ -1,4 +1,5 @@
 from unittest.mock import MagicMock, patch
+import os
 
 import pandas as pd
 import pytest
@@ -55,7 +56,8 @@ def test_order_manager_onchain_fallback_allows_buy(mock_execution_client, tmp_pa
     }
     manager = _build_manager(tmp_path)
 
-    row, response = manager.submit_entry(token_id="0x123", price=0.5, size=20, side="BUY")
+    with patch.dict(os.environ, {"ALLOW_ONCHAIN_BALANCE_FALLBACK": "true"}):
+        row, response = manager.submit_entry(token_id="0x123", price=0.5, size=20, side="BUY")
 
     assert response["orderID"] == "test-order-123"
     assert row["status"] == "SUBMITTED"
@@ -74,6 +76,45 @@ def test_wait_for_fill_persists_fill(mock_execution_client, tmp_path):
     db_rows = manager.db.query_all("SELECT order_id, token_id FROM fills WHERE order_id = ?", ("test-order-123",))
     assert db_rows
     assert db_rows[0]["token_id"] == "0x123"
+
+
+def test_record_fill_respects_expanded_live_fill_schema(mock_execution_client, tmp_path):
+    pd.DataFrame(
+        [
+            {
+                "timestamp": "2026-04-01T10:00:00+00:00",
+                "trade_id": "existing-fill",
+                "order_id": "existing-order",
+                "token_id": "tok-0",
+                "condition_id": "cond-0",
+                "outcome_side": "Yes",
+                "side": "BUY",
+                "price": 0.4,
+                "size": 1.0,
+                "filled_at": "2026-04-01T10:00:00+00:00",
+                "fill_id": "existing-fill",
+                "fill_source": "exchange_sync",
+            }
+        ]
+    ).to_csv(tmp_path / "live_fills.csv", index=False)
+
+    manager = _build_manager(tmp_path)
+    manager.record_fill(
+        {
+            "trade_id": "new-fill",
+            "order_id": "new-order",
+            "token_id": "tok-1",
+            "price": 0.5,
+            "size": 2.0,
+            "filled_at": "2026-04-01T10:05:00+00:00",
+        }
+    )
+
+    fills_df = pd.read_csv(tmp_path / "live_fills.csv")
+    assert len(fills_df) == 2
+    assert "fill_source" in fills_df.columns
+    assert fills_df.iloc[-1]["fill_id"] == "new-fill"
+    assert fills_df.iloc[-1]["order_id"] == "new-order"
 
 
 def test_automated_exit_trigger(mock_execution_client, tmp_path):

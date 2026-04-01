@@ -10,6 +10,21 @@ from db import Database
 
 
 class ReconciliationService:
+    FILL_CSV_COLUMNS = [
+        "timestamp",
+        "trade_id",
+        "order_id",
+        "token_id",
+        "condition_id",
+        "outcome_side",
+        "side",
+        "price",
+        "size",
+        "filled_at",
+        "fill_id",
+        "fill_source",
+    ]
+
     def __init__(self, execution_client=None, logs_dir="logs"):
         self.execution_client = execution_client
         self.logs_dir = Path(logs_dir)
@@ -95,10 +110,119 @@ class ReconciliationService:
         except Exception:
             return pd.DataFrame()
 
+    def _extract_fill_ids_from_frame(self, frame: pd.DataFrame):
+        ids = set()
+        if frame is None or frame.empty:
+            return ids
+        for column in ["fill_id", "trade_id"]:
+            if column not in frame.columns:
+                continue
+            for value in frame[column].dropna().astype(str):
+                value = value.strip()
+                if value and value.lower() not in {"nan", "none"}:
+                    ids.add(value)
+        return ids
+
+    def _normalize_live_fill_csv_row(self, fill_row, fill_source="exchange_sync"):
+        filled_at = fill_row.get("filled_at") or fill_row.get("timestamp") or datetime.now(timezone.utc).isoformat()
+        fill_id = str(fill_row.get("fill_id") or fill_row.get("trade_id") or "").strip()
+        if not fill_id:
+            fill_id = f"{fill_row.get('order_id') or 'unknown'}:{filled_at}"
+        return {
+            "timestamp": fill_row.get("timestamp") or filled_at,
+            "trade_id": str(fill_row.get("trade_id") or fill_id),
+            "order_id": fill_row.get("order_id"),
+            "token_id": fill_row.get("token_id"),
+            "condition_id": fill_row.get("condition_id"),
+            "outcome_side": fill_row.get("outcome_side"),
+            "side": fill_row.get("side"),
+            "price": fill_row.get("price"),
+            "size": fill_row.get("size"),
+            "filled_at": filled_at,
+            "fill_id": fill_id,
+            "fill_source": fill_row.get("fill_source") or fill_source,
+        }
+
+    def _merge_live_fill_rows(self, fill_rows):
+        path = self.logs_dir / "live_fills.csv"
+        if not fill_rows:
+            return 0
+
+        existing = self._safe_read_csv("live_fills.csv")
+        existing_fill_ids = self._extract_fill_ids_from_frame(existing)
+
+        normalized_rows = []
+        staged_fill_ids = set()
+        for row in fill_rows:
+            normalized = self._normalize_live_fill_csv_row(row, fill_source=row.get("fill_source") or "exchange_sync")
+            fill_id = str(normalized.get("fill_id") or "").strip()
+            if not fill_id or fill_id in existing_fill_ids or fill_id in staged_fill_ids:
+                continue
+            normalized_rows.append(normalized)
+            staged_fill_ids.add(fill_id)
+
+        if not normalized_rows:
+            return 0
+
+        append_df = pd.DataFrame(normalized_rows)
+        ordered_cols = list(existing.columns)
+        for column in self.FILL_CSV_COLUMNS:
+            if column not in ordered_cols:
+                ordered_cols.append(column)
+        for column in append_df.columns:
+            if column not in ordered_cols:
+                ordered_cols.append(column)
+
+        existing = existing.reindex(columns=ordered_cols)
+        append_df = append_df.reindex(columns=ordered_cols)
+        merged = pd.concat([existing, append_df], ignore_index=True)
+
+        if "fill_id" in merged.columns:
+            dedupe_key = merged["fill_id"].fillna("")
+            if "trade_id" in merged.columns:
+                trade_key = merged["trade_id"].fillna("")
+                dedupe_key = dedupe_key.where(dedupe_key.astype(str).str.strip() != "", trade_key)
+            merged = merged.assign(_dedupe_fill_id=dedupe_key.astype(str))
+            merged = merged[merged["_dedupe_fill_id"].str.strip() != ""]
+            merged = merged.drop_duplicates(subset=["_dedupe_fill_id"], keep="last").drop(columns=["_dedupe_fill_id"])
+
+        merged.to_csv(path, index=False)
+        return len(normalized_rows)
+
+    def backfill_live_fills_csv_from_db(self, include_synthetic=True):
+        try:
+            db_rows = self.db.query_all(
+                """
+                SELECT fill_id, order_id, token_id, condition_id, outcome_side, side, price, size, filled_at
+                FROM fills
+                ORDER BY COALESCE(filled_at, ''), fill_id
+                """
+            )
+        except Exception:
+            db_rows = []
+
+        fill_rows = []
+        for row in db_rows:
+            fill_id = str(row.get("fill_id") or "").strip()
+            if not fill_id:
+                continue
+            if not include_synthetic and self._is_synthetic_fill_id(fill_id):
+                continue
+            fill_source = "db_backfill"
+            lowered = fill_id.lower()
+            if lowered.startswith("fill_dust_clear_") or lowered.startswith("dust_clear_") or "dust_clear" in lowered:
+                fill_source = "dust_clear"
+            elif lowered.startswith("fill_ext_sync_") or lowered.startswith("ext_sync_"):
+                fill_source = "external_sync"
+            fill_rows.append(self._normalize_live_fill_csv_row({**row, "trade_id": fill_id}, fill_source=fill_source))
+
+        return self._merge_live_fill_rows(fill_rows)
+
     def sync_orders_and_fills(self):
         """Sync exchange orders and fills into the local SQLite database."""
         synced_orders = 0
         synced_fills = 0
+        synced_fill_csv_rows = 0
         known_order_ids = set()
         tracked_tokens = set()
 
@@ -160,6 +284,7 @@ class ReconciliationService:
             sync_all_recent = str(os.getenv("SYNC_ALL_RECENT_REMOTE_TRADES", "true")).strip().lower() in {"1", "true", "yes", "on"}
             lookback_hours = max(1, int(os.getenv("SYNC_RECENT_TRADES_LOOKBACK_HOURS", "72") or 72))
             cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=lookback_hours)
+            fill_rows_to_mirror = []
             for raw_trade in self._extract_items(trades_payload):
                 trade = self._normalize_trade(raw_trade)
                 if trade is None:
@@ -189,12 +314,19 @@ class ReconciliationService:
                         trade["filled_at"],
                     ),
                 )
+                fill_rows_to_mirror.append(
+                    self._normalize_live_fill_csv_row(
+                        {**trade, "trade_id": trade["fill_id"]},
+                        fill_source="exchange_sync",
+                    )
+                )
                 # BUG FIX 3: Removed blind FILLED overwrite. Open order sweep will handle terminal status naturally.
                 synced_fills += 1
+            synced_fill_csv_rows = self._merge_live_fill_rows(fill_rows_to_mirror)
         except Exception:
             pass
 
-        return {"orders": synced_orders, "fills": synced_fills}
+        return {"orders": synced_orders, "fills": synced_fills, "fill_csv_rows_added": synced_fill_csv_rows}
 
     def reconcile(self):
         """

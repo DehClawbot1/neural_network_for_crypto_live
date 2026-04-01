@@ -84,6 +84,120 @@ class LivePositionBook:
 
         return sorted(collapsed, key=_sort_key)
 
+    def _identify_redundant_external_sync_fill_ids(self, fills):
+        grouped = {}
+        for fill in fills:
+            tid = fill.get("token_id")
+            token_id = "" if pd.isna(tid) else str(tid or "")
+            condition_id = fill.get("condition_id")
+            outcome_side = fill.get("outcome_side")
+            key = f"{token_id}|{condition_id or ''}|{outcome_side or ''}"
+            grouped.setdefault(key, []).append(fill)
+
+        redundant_ids = []
+        for key_fills in grouped.values():
+            pending_external_syncs = []
+            for fill in key_fills:
+                if self._is_external_sync_fill(fill):
+                    pending_external_syncs.append(fill)
+                    continue
+                if len(pending_external_syncs) > 1:
+                    redundant_ids.extend(
+                        str(item.get("fill_id") or "")
+                        for item in pending_external_syncs[:-1]
+                        if str(item.get("fill_id") or "").strip()
+                    )
+                pending_external_syncs = []
+            if len(pending_external_syncs) > 1:
+                redundant_ids.extend(
+                    str(item.get("fill_id") or "")
+                    for item in pending_external_syncs[:-1]
+                    if str(item.get("fill_id") or "").strip()
+                )
+        return redundant_ids
+
+    def archive_and_prune_redundant_external_sync_fills(self, archive_dir=None, vacuum=False):
+        fills = self.db.query_all(
+            """
+            SELECT
+                f.fill_id,
+                f.order_id,
+                f.token_id,
+                f.condition_id,
+                f.outcome_side,
+                f.side,
+                f.price,
+                f.size,
+                f.filled_at
+            FROM fills f
+            ORDER BY
+                COALESCE(f.filled_at, ''),
+                CASE WHEN UPPER(COALESCE(f.side, '')) = 'BUY' THEN 0 ELSE 1 END,
+                f.fill_id
+            """
+        )
+        redundant_ids = self._identify_redundant_external_sync_fill_ids(fills)
+        if not redundant_ids:
+            return {
+                "archived_rows": 0,
+                "deleted_rows": 0,
+                "archive_csv": None,
+                "archive_jsonl": None,
+            }
+
+        archive_root = Path(archive_dir or (self.logs_dir / "archives"))
+        archive_root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        archive_csv = archive_root / f"ext_sync_redundant_archive_{stamp}.csv"
+        archive_jsonl = archive_root / f"ext_sync_redundant_archive_{stamp}.jsonl"
+
+        placeholders = ",".join("?" for _ in redundant_ids)
+        archived_rows = self.db.query_all(
+            f"""
+            SELECT fill_id, order_id, token_id, condition_id, outcome_side, side, price, size, filled_at
+            FROM fills
+            WHERE fill_id IN ({placeholders})
+            ORDER BY filled_at, fill_id
+            """,
+            tuple(redundant_ids),
+        )
+        archived_df = pd.DataFrame(archived_rows)
+        archived_df.to_csv(archive_csv, index=False)
+        archived_df.to_json(archive_jsonl, orient="records", lines=True)
+
+        cursor = self.db.conn.cursor()
+        try:
+            cursor.execute("BEGIN IMMEDIATE")
+            cursor.execute(
+                f"DELETE FROM fills WHERE fill_id IN ({placeholders})",
+                tuple(redundant_ids),
+            )
+            try:
+                cursor.execute(
+                    f"DELETE FROM external_position_syncs WHERE fill_id IN ({placeholders})",
+                    tuple(redundant_ids),
+                )
+            except Exception:
+                pass
+            self.db.conn.commit()
+        except Exception:
+            self.db.conn.rollback()
+            raise
+
+        self.rebuild_from_db()
+        if bool(vacuum):
+            try:
+                self.db.conn.execute("VACUUM")
+            except Exception:
+                pass
+
+        return {
+            "archived_rows": int(len(archived_rows)),
+            "deleted_rows": int(len(redundant_ids)),
+            "archive_csv": str(archive_csv),
+            "archive_jsonl": str(archive_jsonl),
+        }
+
     def _record_external_sync_event(
         self,
         cursor,

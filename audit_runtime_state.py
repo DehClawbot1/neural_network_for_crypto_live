@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 
 from db import Database
+from live_position_book import LivePositionBook
 
 
 def _is_synthetic_fill_id(value) -> bool:
@@ -18,6 +19,15 @@ def _is_synthetic_fill_id(value) -> bool:
     )
 
 
+def _is_dust_clear_fill_id(value) -> bool:
+    fid = str(value or "").strip().lower()
+    return (
+        fid.startswith("fill_dust_clear_")
+        or fid.startswith("dust_clear_")
+        or "dust_clear" in fid
+    )
+
+
 def _safe_read_csv(path: Path):
     if not path.exists():
         return pd.DataFrame()
@@ -25,6 +35,18 @@ def _safe_read_csv(path: Path):
         return pd.read_csv(path, engine="python", on_bad_lines="skip")
     except Exception:
         return pd.DataFrame()
+
+
+def _collect_fill_ids(frame: pd.DataFrame):
+    ids = set()
+    if frame is None or frame.empty:
+        return ids
+    for column in ["fill_id", "trade_id"]:
+        if column not in frame.columns:
+            continue
+        values = frame[column].dropna().astype(str).tolist()
+        ids.update(value.strip() for value in values if str(value).strip() and str(value).strip().lower() not in {"nan", "none"})
+    return ids
 
 
 def _print_section(title):
@@ -62,21 +84,10 @@ def run_audit(logs_dir: str):
     _print_section("Ghost Position Candidates")
     ghosts = pd.DataFrame()
     if not live.empty and not fills.empty:
-        fills_for_ghosts = fills.copy()
-        if "fill_id" in fills_for_ghosts.columns:
-            fills_for_ghosts = fills_for_ghosts[
-                ~fills_for_ghosts["fill_id"].map(_is_synthetic_fill_id)
-            ].copy()
-        agg = (
-            fills_for_ghosts.assign(
-                buy_size=lambda d: d.apply(lambda r: float(r["size"] or 0.0) if str(r.get("side", "")).upper() == "BUY" else 0.0, axis=1),
-                sell_size=lambda d: d.apply(lambda r: float(r["size"] or 0.0) if str(r.get("side", "")).upper() == "SELL" else 0.0, axis=1),
-            )
-            .groupby(["token_id", "condition_id", "outcome_side"], dropna=False)[["buy_size", "sell_size"]]
-            .sum()
-            .reset_index()
-        )
-        agg["net_shares"] = agg["buy_size"] - agg["sell_size"]
+        book = LivePositionBook(logs_dir=logs_path)
+        rebuilt = book.rebuild_from_db()
+        agg = rebuilt[["token_id", "condition_id", "outcome_side", "shares"]].copy() if not rebuilt.empty else pd.DataFrame(columns=["token_id", "condition_id", "outcome_side", "shares"])
+        agg = agg.rename(columns={"shares": "net_shares"})
         ghosts = live[live["status"].astype(str).str.upper() == "OPEN"].merge(
             agg[["token_id", "condition_id", "outcome_side", "net_shares"]],
             on=["token_id", "condition_id", "outcome_side"],
@@ -92,8 +103,8 @@ def run_audit(logs_dir: str):
     positions_csv = _safe_read_csv(logs_path / "positions.csv")
     csv_order_ids = set(live_orders_csv.get("order_id", pd.Series(dtype=str)).dropna().astype(str).tolist())
     db_order_ids = set(orders.get("order_id", pd.Series(dtype=str)).dropna().astype(str).tolist())
-    csv_fill_ids = set(live_fills_csv.get("fill_id", pd.Series(dtype=str)).dropna().astype(str).tolist())
-    db_fill_ids = set(fills.get("fill_id", pd.Series(dtype=str)).dropna().astype(str).tolist())
+    csv_fill_ids = _collect_fill_ids(live_fills_csv)
+    db_fill_ids = _collect_fill_ids(fills)
     csv_fill_ids_clean = {fid for fid in csv_fill_ids if not _is_synthetic_fill_id(fid)}
     db_fill_ids_clean = {fid for fid in db_fill_ids if not _is_synthetic_fill_id(fid)}
     print(

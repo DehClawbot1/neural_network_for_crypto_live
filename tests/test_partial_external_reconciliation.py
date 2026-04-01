@@ -91,3 +91,29 @@ def test_external_manual_close_is_skipped_from_learning_reports(tmp_path):
 
     assert processed == 0
     assert not learner.report_csv.exists()
+
+
+def test_archive_and_prune_redundant_external_sync_fills(tmp_path):
+    book = LivePositionBook(logs_dir=tmp_path)
+    fills = [
+        ("buy_1", "order_buy_1", "tok-1", "cond-1", "Yes", "BUY", 0.50, 10.0, "2026-04-01T10:00:00+00:00"),
+        ("ext_sync_1", "external_manual", "tok-1", "cond-1", "Yes", "SELL", 0.50, 3.0, "2026-04-01T10:01:00+00:00"),
+        ("ext_sync_2", "external_manual", "tok-1", "cond-1", "Yes", "SELL", 0.50, 7.0, "2026-04-01T10:02:00+00:00"),
+        ("buy_2", "order_buy_2", "tok-2", "cond-2", "No", "BUY", 0.40, 5.0, "2026-04-01T10:00:00+00:00"),
+        ("ext_sync_3", "external_manual", "tok-2", "cond-2", "No", "SELL", 0.40, 1.0, "2026-04-01T10:01:00+00:00"),
+    ]
+    for row in fills:
+        book.db.execute(
+            "INSERT INTO fills (fill_id, order_id, token_id, condition_id, outcome_side, side, price, size, filled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            row,
+        )
+
+    result = book.archive_and_prune_redundant_external_sync_fills(vacuum=False)
+
+    assert result["archived_rows"] == 1
+    assert result["deleted_rows"] == 1
+    assert result["archive_csv"] is not None
+    remaining = pd.DataFrame(book.db.query_all("SELECT fill_id FROM fills ORDER BY filled_at, fill_id"))
+    assert "ext_sync_1" not in remaining["fill_id"].tolist()
+    assert "ext_sync_2" in remaining["fill_id"].tolist()
+    assert "ext_sync_3" in remaining["fill_id"].tolist()

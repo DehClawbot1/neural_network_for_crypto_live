@@ -36,7 +36,33 @@ class OrderManager:
         self.risk = LiveRiskManager(db=self.db)
 
     def _append(self, path: Path, row: dict):
-        pd.DataFrame([row]).to_csv(path, mode="a", header=not path.exists(), index=False)
+        row_df = pd.DataFrame([row])
+        if not path.exists():
+            row_df.to_csv(path, index=False)
+            return
+
+        try:
+            header_cols = pd.read_csv(path, nrows=0, engine="python", on_bad_lines="skip").columns.tolist()
+        except Exception:
+            header_cols = []
+
+        if header_cols and all(column in header_cols for column in row_df.columns):
+            row_df.reindex(columns=header_cols).to_csv(path, mode="a", header=False, index=False)
+            return
+
+        try:
+            existing = pd.read_csv(path, engine="python", on_bad_lines="skip")
+        except Exception:
+            existing = pd.DataFrame(columns=header_cols)
+
+        ordered_cols = list(existing.columns)
+        for column in row_df.columns:
+            if column not in ordered_cols:
+                ordered_cols.append(column)
+
+        existing = existing.reindex(columns=ordered_cols)
+        row_df = row_df.reindex(columns=ordered_cols)
+        pd.concat([existing, row_df], ignore_index=True).to_csv(path, index=False)
 
     def _extract_order_id(self, payload):
         if not isinstance(payload, dict):
@@ -408,7 +434,6 @@ class OrderManager:
         if normalized_side == "BUY":
             available_balance, readiness = self._get_available_balance(
                 asset_type="COLLATERAL",
-                use_onchain_fallback=False,
             )
 
             if readiness is None and available_balance <= 0:
@@ -767,6 +792,7 @@ class OrderManager:
                     "condition_id": db_row.get("condition_id"),
                     "outcome_side": db_row.get("outcome_side"),
                     "side": db_row.get("order_side"),
+                    "status": "FILLED",
                     "price": float(price_value or 0.0),
                     "size": float(size_value or 0.0),
                     "filled_at": fill_event_time,
@@ -851,7 +877,9 @@ class OrderManager:
     def record_fill(self, fill_payload: dict):
         row = {"timestamp": datetime.now(timezone.utc).isoformat(), **fill_payload}
         fill_id = row.get("trade_id") or row.get("fill_id") or f"{row.get('order_id', 'unknown')}:{row['timestamp']}"
+        row["trade_id"] = row.get("trade_id") or fill_id
         row["fill_id"] = fill_id
+        row["fill_source"] = row.get("fill_source") or "order_manager"
         self._append(self.fills_file, row)
         self.db.execute(
             "INSERT OR REPLACE INTO fills (fill_id, order_id, token_id, condition_id, outcome_side, side, price, size, filled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
