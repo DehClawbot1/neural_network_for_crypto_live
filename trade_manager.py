@@ -457,11 +457,15 @@ class TradeManager:
             "best_bid": None,
             "best_ask": None,
             "spread": None,
+            "mid_price": None,
+            "spread_pct": None,
             "mark_source": "trade_manager_memory",
             "trajectory_state": None,
             "drawdown_from_peak": None,
             "recent_return_3": None,
             "runup_from_entry": None,
+            "volatility_short": None,
+            "fallback_ratio": None,
         }
 
     def _empty_positions_frame(self) -> pd.DataFrame:
@@ -473,8 +477,9 @@ class TradeManager:
                 "market_value", "unrealized_pnl", "realized_pnl",
                 "net_realized_pnl", "opened_at", "status",
                 "confidence", "confidence_at_entry", "signal_label",
-                "mark_price", "best_bid", "best_ask", "spread", "mark_source",
+                "mark_price", "best_bid", "best_ask", "spread", "mid_price", "spread_pct", "mark_source",
                 "trajectory_state", "drawdown_from_peak", "recent_return_3", "runup_from_entry",
+                "volatility_short", "fallback_ratio",
             ]
         )
 
@@ -520,6 +525,9 @@ class TradeManager:
         df["entry_price"] = pd.to_numeric(df["entry_price"], errors="coerce").fillna(0.0)
         df["current_price"] = pd.to_numeric(df["current_price"], errors="coerce").fillna(df["entry_price"])
         df["mark_price"] = pd.to_numeric(df["mark_price"], errors="coerce").fillna(df["current_price"])
+        for col in ["best_bid", "best_ask", "spread", "mid_price", "spread_pct", "drawdown_from_peak", "recent_return_3", "runup_from_entry", "volatility_short", "fallback_ratio"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
         if "size_usdc" not in df.columns:
             df["size_usdc"] = df["shares"] * df["entry_price"]
         if "market_value" not in df.columns:

@@ -113,24 +113,8 @@ class PositionTelemetry:
 
         return df
 
-    def capture_positions(self, positions_df: pd.DataFrame | None):
-        if positions_df is None or positions_df.empty:
-            return
-
-        now = datetime.now(timezone.utc).isoformat()
-        df = positions_df.copy()
-        df["timestamp"] = now
-        df["position_key"] = df.apply(self._position_key, axis=1)
-        if "market_title" not in df.columns and "market" in df.columns:
-            df["market_title"] = df["market"]
-        if "market" not in df.columns and "market_title" in df.columns:
-            df["market"] = df["market_title"]
-        if "mark_price" not in df.columns and "current_price" in df.columns:
-            df["mark_price"] = pd.to_numeric(df["current_price"], errors="coerce").fillna(0.0)
-        if "current_price" not in df.columns and "mark_price" in df.columns:
-            df["current_price"] = pd.to_numeric(df["mark_price"], errors="coerce").fillna(0.0)
-
-        keep = [
+    def _snapshot_columns(self):
+        return [
             "timestamp",
             "position_key",
             "token_id",
@@ -153,11 +137,43 @@ class PositionTelemetry:
             "confidence",
             "status",
             "mark_source",
+            "trajectory_state",
+            "drawdown_from_peak",
+            "recent_return_3",
+            "runup_from_entry",
+            "volatility_short",
+            "fallback_ratio",
         ]
+
+    def _project_snapshot_frame(self, positions_df: pd.DataFrame | None, timestamp: str | None = None):
+        if positions_df is None or positions_df.empty:
+            return pd.DataFrame(columns=self._snapshot_columns())
+        now = timestamp or datetime.now(timezone.utc).isoformat()
+        df = positions_df.copy()
+        df["timestamp"] = now
+        df["position_key"] = df.apply(self._position_key, axis=1)
+        if "market_title" not in df.columns and "market" in df.columns:
+            df["market_title"] = df["market"]
+        if "market" not in df.columns and "market_title" in df.columns:
+            df["market"] = df["market_title"]
+        if "mark_price" not in df.columns and "current_price" in df.columns:
+            df["mark_price"] = pd.to_numeric(df["current_price"], errors="coerce").fillna(0.0)
+        if "current_price" not in df.columns and "mark_price" in df.columns:
+            df["current_price"] = pd.to_numeric(df["mark_price"], errors="coerce").fillna(0.0)
+
+        keep = self._snapshot_columns()
         for col in keep:
             if col not in df.columns:
                 df[col] = np.nan
-        df[keep].to_csv(self.snapshots_file, mode="a", header=not self.snapshots_file.exists(), index=False)
+        return df[keep].copy()
+
+    def capture_positions(self, positions_df: pd.DataFrame | None):
+        if positions_df is None or positions_df.empty:
+            return
+
+        now = datetime.now(timezone.utc).isoformat()
+        df = self._project_snapshot_frame(positions_df, timestamp=now)
+        df.to_csv(self.snapshots_file, mode="a", header=not self.snapshots_file.exists(), index=False)
 
         portfolio_row = pd.DataFrame(
             [
@@ -195,12 +211,15 @@ class PositionTelemetry:
 
     def build_trajectory_metrics(self, positions_df: pd.DataFrame | None = None, hours: int = 24) -> dict:
         snapshots = self.load_snapshots(hours=hours)
+        if positions_df is not None and not positions_df.empty:
+            current = self._project_snapshot_frame(positions_df)
+            snapshots = pd.concat([snapshots, current], ignore_index=True, sort=False) if not snapshots.empty else current
+            keys = current["position_key"].astype(str).tolist()
+            snapshots = snapshots[snapshots["position_key"].astype(str).isin(keys)].copy()
         if snapshots.empty:
             return {}
-
-        if positions_df is not None and not positions_df.empty:
-            keys = positions_df.copy().apply(self._position_key, axis=1).astype(str).tolist()
-            snapshots = snapshots[snapshots["position_key"].astype(str).isin(keys)].copy()
+        snapshots["timestamp"] = pd.to_datetime(snapshots["timestamp"], errors="coerce", utc=True)
+        snapshots = snapshots[snapshots["timestamp"].notna()].copy()
         if snapshots.empty:
             return {}
 
@@ -304,3 +323,42 @@ class PositionTelemetry:
                 "liquidity_stress_signal": liquidity_stress_signal,
             }
         return metrics
+
+    def apply_trajectory_metrics(self, positions_df: pd.DataFrame | None, metrics: dict | None = None):
+        if positions_df is None or positions_df.empty:
+            return pd.DataFrame() if positions_df is None else positions_df
+        metrics = metrics or {}
+        if not metrics:
+            return positions_df
+
+        df = positions_df.copy()
+        df["position_key"] = df.apply(self._position_key, axis=1)
+        for col in [
+            "trajectory_state",
+            "drawdown_from_peak",
+            "recent_return_3",
+            "runup_from_entry",
+            "volatility_short",
+            "fallback_ratio",
+            "spread_pct",
+        ]:
+            if col not in df.columns:
+                df[col] = np.nan
+
+        for idx, row in df.iterrows():
+            trade_key = f"{str(row.get('token_id', '') or '').strip()}|{str(row.get('condition_id', '') or '').strip()}|{str(row.get('outcome_side', '') or '').strip()}"
+            telemetry_row = metrics.get(trade_key, {})
+            if not telemetry_row:
+                continue
+            for col in [
+                "trajectory_state",
+                "drawdown_from_peak",
+                "recent_return_3",
+                "runup_from_entry",
+                "volatility_short",
+                "fallback_ratio",
+                "spread_pct",
+            ]:
+                if telemetry_row.get(col) is not None:
+                    df.at[idx, col] = telemetry_row.get(col)
+        return df
