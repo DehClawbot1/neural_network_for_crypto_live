@@ -49,6 +49,27 @@ def _collect_fill_ids(frame: pd.DataFrame):
     return ids
 
 
+def _collect_closed_keys(frame: pd.DataFrame):
+    keys = set()
+    if frame is None or frame.empty:
+        return keys
+    if "close_fingerprint" in frame.columns:
+        values = frame["close_fingerprint"].dropna().astype(str).tolist()
+        keys.update(value.strip() for value in values if str(value).strip() and str(value).strip().lower() not in {"nan", "none"})
+        if keys:
+            return keys
+    candidates = ["token_id", "condition_id", "outcome_side", "opened_at", "close_reason", "entry_price", "exit_price", "shares"]
+    if not all(column in frame.columns for column in candidates):
+        return keys
+    work = frame[candidates].copy()
+    work["exit_price"] = work["exit_price"].fillna(frame["current_price"] if "current_price" in frame.columns else "")
+    for _, row in work.iterrows():
+        key = "|".join(str(row.get(col, "") or "") for col in candidates)
+        if key.strip("|"):
+            keys.add(key)
+    return keys
+
+
 def _print_section(title):
     print(f"\n=== {title} ===")
 
@@ -147,6 +168,39 @@ def run_audit(logs_dir: str):
         {
             "positions_only_csv": len(csv_open_keys - db_live_open_keys),
             "positions_only_db": len(db_live_open_keys - csv_open_keys),
+        }
+    )
+
+    _print_section("Closed Lifecycle Drift")
+    closed_positions_csv = _safe_read_csv(logs_path / "closed_positions.csv")
+    feedback_reports_csv = _safe_read_csv(logs_path / "trade_feedback_reports.csv")
+    with sqlite3.connect(db_path) as conn:
+        closed_db = pd.read_sql_query(
+            """
+            SELECT position_id, token_id, condition_id, outcome_side, close_reason, entry_price,
+                   current_price, exit_price, shares, opened_at, closed_at, close_fingerprint
+            FROM positions
+            WHERE UPPER(COALESCE(status, '')) = 'CLOSED'
+            """,
+            conn,
+        )
+    closed_csv_keys = _collect_closed_keys(closed_positions_csv)
+    closed_db_keys = _collect_closed_keys(closed_db)
+    feedback_keys = _collect_closed_keys(feedback_reports_csv)
+    expected_feedback = set()
+    if not closed_positions_csv.empty:
+        feedback_src = closed_positions_csv.copy()
+        if "close_reason" in feedback_src.columns:
+            feedback_src = feedback_src[
+                ~feedback_src["close_reason"].astype(str).str.strip().str.lower().eq("external_manual_close")
+            ]
+        expected_feedback = _collect_closed_keys(feedback_src)
+    print(
+        {
+            "closed_only_csv": len(closed_csv_keys - closed_db_keys),
+            "closed_only_db": len(closed_db_keys - closed_csv_keys),
+            "feedback_expected_missing": len(expected_feedback - feedback_keys),
+            "feedback_unexpected_extra": len(feedback_keys - expected_feedback),
         }
     )
 

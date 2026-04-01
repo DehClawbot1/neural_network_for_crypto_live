@@ -42,6 +42,19 @@ class Database:
         self._ensure_column("candidate_decisions", "available_balance", "REAL")
         self._ensure_column("candidate_decisions", "order_id", "TEXT")
         self._ensure_column("candidate_decisions", "details_json", "TEXT")
+        self._ensure_column("positions", "market", "TEXT")
+        self._ensure_column("positions", "market_title", "TEXT")
+        self._ensure_column("positions", "order_side", "TEXT")
+        self._ensure_column("positions", "size_usdc", "REAL")
+        self._ensure_column("positions", "net_realized_pnl", "REAL")
+        self._ensure_column("positions", "confidence", "REAL")
+        self._ensure_column("positions", "confidence_at_entry", "REAL")
+        self._ensure_column("positions", "signal_label", "TEXT")
+        self._ensure_column("positions", "close_reason", "TEXT")
+        self._ensure_column("positions", "exit_price", "REAL")
+        self._ensure_column("positions", "close_fingerprint", "TEXT")
+        self._ensure_column("positions", "is_reconciliation_close", "INTEGER")
+        self._ensure_column("positions", "lifecycle_source", "TEXT")
         self._ensure_column("fills", "condition_id", "TEXT")
         self._ensure_column("fills", "outcome_side", "TEXT")
         self._ensure_column("fills", "side", "TEXT")
@@ -61,16 +74,29 @@ class Database:
             """
             CREATE TABLE IF NOT EXISTS positions (
                 position_id TEXT PRIMARY KEY,
+                market TEXT,
+                market_title TEXT,
                 token_id TEXT,
                 condition_id TEXT,
                 outcome_side TEXT,
+                order_side TEXT,
                 status TEXT,
                 entry_price REAL,
                 current_price REAL,
+                size_usdc REAL,
                 shares REAL,
                 market_value REAL,
                 realized_pnl REAL,
+                net_realized_pnl REAL,
                 unrealized_pnl REAL,
+                confidence REAL,
+                confidence_at_entry REAL,
+                signal_label TEXT,
+                close_reason TEXT,
+                exit_price REAL,
+                close_fingerprint TEXT,
+                is_reconciliation_close INTEGER,
+                lifecycle_source TEXT,
                 opened_at TEXT,
                 closed_at TEXT
             );

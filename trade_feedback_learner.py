@@ -1,7 +1,9 @@
+import hashlib
 import json
 import logging
 import os
 import re
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -67,9 +69,14 @@ class TradeFeedbackLearner:
     def _trade_report_id(self, trade):
         token_id = self._slugify(getattr(trade, "token_id", "") or "no_token")
         outcome_side = self._slugify(getattr(trade, "outcome_side", "") or "na")
+        opened_at = self._safe_iso(getattr(trade, "opened_at", None)) or ""
         closed_at = self._safe_iso(getattr(trade, "closed_at", None)) or datetime.now(timezone.utc).isoformat()
+        opened_stamp = re.sub(r"[^0-9]", "", opened_at)[:14] or "unknown"
         closed_stamp = re.sub(r"[^0-9]", "", closed_at)[:14] or "unknown"
-        return f"{closed_stamp}_{token_id}_{outcome_side}"
+        close_fingerprint = str(getattr(trade, "close_fingerprint", "") or "").strip()
+        digest_source = close_fingerprint or f"{token_id}|{outcome_side}|{opened_stamp}|{closed_stamp}"
+        digest = hashlib.sha1(digest_source.encode("utf-8")).hexdigest()[:10]
+        return f"{closed_stamp}_{opened_stamp}_{token_id}_{outcome_side}_{digest}"
 
     def _query_one(self, query, params):
         rows = self.db.query_all(query, params)
@@ -302,6 +309,44 @@ class TradeFeedbackLearner:
             summary_df.to_csv(self.summary_csv, index=False)
         return summary_df
 
+    def _closed_row_to_trade(self, row: dict):
+        exit_price = row.get("exit_price", row.get("current_price"))
+        return SimpleNamespace(
+            position_id=row.get("position_id"),
+            market=row.get("market") or row.get("market_title"),
+            token_id=row.get("token_id"),
+            condition_id=row.get("condition_id"),
+            outcome_side=row.get("outcome_side"),
+            signal_label=row.get("signal_label"),
+            confidence_at_entry=self._safe_float(row.get("confidence_at_entry", row.get("confidence", 0.0)), 0.0),
+            entry_price=self._safe_float(row.get("entry_price"), 0.0),
+            current_price=self._safe_float(exit_price, self._safe_float(row.get("current_price"), 0.0)),
+            realized_pnl=self._safe_float(row.get("realized_pnl"), 0.0),
+            size_usdc=self._safe_float(row.get("size_usdc"), 0.0),
+            shares=self._safe_float(row.get("shares"), 0.0),
+            opened_at=row.get("opened_at"),
+            closed_at=row.get("closed_at"),
+            close_reason=row.get("close_reason"),
+            close_fingerprint=row.get("close_fingerprint"),
+            state="CLOSED",
+        )
+
+    def backfill_from_closed_positions_csv(self, include_reconciliation=False):
+        closed_path = self.logs_dir / "closed_positions.csv"
+        closed_df = self._safe_read(closed_path)
+        if closed_df.empty:
+            return {"csv_rows": 0, "processed_reports": 0}
+
+        trades = []
+        for _, row in closed_df.iterrows():
+            close_reason = str(row.get("close_reason", "") or "").strip().lower()
+            if not include_reconciliation and close_reason == "external_manual_close":
+                continue
+            trades.append(self._closed_row_to_trade(row.to_dict()))
+
+        processed = self.record_closed_trades(trades)
+        return {"csv_rows": len(closed_df.index), "processed_reports": processed}
+
     def _relabel(self, row: dict, labels: dict):
         confidence = self._safe_float(row.get("confidence"), 0.0)
         if confidence < 0.45:
@@ -465,6 +510,8 @@ class TradeFeedbackLearner:
             report_payload = {
                 "report_id": report_id,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
+                "position_id": getattr(trade, "position_id", None),
+                "close_fingerprint": getattr(trade, "close_fingerprint", None),
                 "market": getattr(trade, "market", None),
                 "token_id": getattr(trade, "token_id", None),
                 "condition_id": getattr(trade, "condition_id", None),
@@ -518,6 +565,8 @@ class TradeFeedbackLearner:
                 {
                     "report_id": report_id,
                     "generated_at": report_payload["generated_at"],
+                    "position_id": report_payload["position_id"],
+                    "close_fingerprint": report_payload["close_fingerprint"],
                     "market": report_payload["market"],
                     "token_id": report_payload["token_id"],
                     "condition_id": report_payload["condition_id"],
@@ -555,12 +604,18 @@ class TradeFeedbackLearner:
             processed += 1
 
         if report_rows:
-            pd.DataFrame(report_rows).to_csv(
-                self.report_csv,
-                mode="a",
-                header=not self.report_csv.exists(),
-                index=False,
-            )
+            report_df = pd.DataFrame(report_rows)
+            existing_report_df = self._safe_read(self.report_csv)
+            ordered_cols = list(existing_report_df.columns)
+            for column in report_df.columns:
+                if column not in ordered_cols:
+                    ordered_cols.append(column)
+            existing_report_df = existing_report_df.reindex(columns=ordered_cols)
+            report_df = report_df.reindex(columns=ordered_cols)
+            merged = report_df.copy() if existing_report_df.empty else pd.concat([existing_report_df, report_df], ignore_index=True)
+            if "report_id" in merged.columns:
+                merged = merged.drop_duplicates(subset=["report_id"], keep="last")
+            merged.to_csv(self.report_csv, index=False)
             self._refresh_summary()
             logging.info("Recorded %s trade feedback reports.", processed)
         return processed

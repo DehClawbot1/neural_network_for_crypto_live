@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Dict, List, Optional
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 import pandas as pd
 
 from balance_normalization import maybe_trace_allowance_payload
+from db import Database
 from trade_lifecycle import TradeLifecycle, TradeState
 from config import TradingConfig
 
@@ -34,6 +36,7 @@ class TradeManager:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.positions_file = self.logs_dir / "positions.csv"
         self.closed_file = self.logs_dir / "closed_positions.csv"
+        self.db = Database(self.logs_dir / "trading.db")
         self._empty_reconciled_streak = 0
         self._max_empty_reconciled_streak = max(
             1,
@@ -443,7 +446,13 @@ class TradeManager:
 
     def _trade_to_dict(self, trade: TradeLifecycle) -> dict:
         return {
-            "position_id": f"{trade.market}-{trade.outcome_side}",
+            "position_id": self._canonical_position_id(
+                token_id=trade.token_id,
+                condition_id=trade.condition_id,
+                outcome_side=trade.outcome_side,
+                opened_at=trade.opened_at,
+                market=trade.market,
+            ),
             "market": trade.market,
             "market_title": trade.market,
             "token_id": trade.token_id,
@@ -477,6 +486,11 @@ class TradeManager:
             "runup_from_entry": None,
             "volatility_short": None,
             "fallback_ratio": None,
+            "close_reason": getattr(trade, "close_reason", None),
+            "exit_price": getattr(trade, "current_price", None) if getattr(trade, "state", None) == TradeState.CLOSED else None,
+            "close_fingerprint": self._closed_trade_fingerprint(trade) if getattr(trade, "state", None) == TradeState.CLOSED else None,
+            "is_reconciliation_close": str(getattr(trade, "close_reason", "") or "").strip().lower() == "external_manual_close",
+            "lifecycle_source": "trade_manager_memory",
         }
 
     def _sync_trade_from_rebuilt(self, existing_trade: TradeLifecycle, rebuilt_trade: TradeLifecycle):
@@ -509,6 +523,88 @@ class TradeManager:
             ]
         )
 
+    def _canonical_position_id(
+        self,
+        *,
+        token_id=None,
+        condition_id=None,
+        outcome_side=None,
+        opened_at=None,
+        market=None,
+        close_fingerprint=None,
+    ) -> str:
+        if close_fingerprint:
+            stamp = re.sub(r"[^0-9]", "", str(opened_at or ""))[:14] or "unknown"
+            return f"{stamp}|{str(close_fingerprint)}"
+        open_stamp = re.sub(r"[^0-9]", "", str(opened_at or ""))[:14] or "unknown"
+        token_part = str(token_id or market or "unknown").strip() or "unknown"
+        condition_part = str(condition_id or "").strip() or "na"
+        outcome_part = str(outcome_side or "").strip() or "na"
+        return f"{token_part}|{condition_part}|{outcome_part}|{open_stamp}"
+
+    def _build_closed_trade_row(self, trade: TradeLifecycle) -> dict:
+        close_fingerprint = self._closed_trade_fingerprint(trade)
+        row = self._trade_to_dict(trade)
+        row["position_id"] = self._canonical_position_id(
+            token_id=trade.token_id,
+            condition_id=trade.condition_id,
+            outcome_side=trade.outcome_side,
+            opened_at=trade.opened_at,
+            market=trade.market,
+            close_fingerprint=close_fingerprint,
+        )
+        row["close_reason"] = trade.close_reason or "policy_exit"
+        row["exit_price"] = trade.current_price
+        row["realized_pnl"] = round(trade.realized_pnl, 4)
+        row["net_realized_pnl"] = round(trade.realized_pnl, 4)
+        row["status"] = "CLOSED"
+        row["close_fingerprint"] = close_fingerprint
+        row["is_reconciliation_close"] = str(trade.close_reason or "").strip().lower() == "external_manual_close"
+        row["lifecycle_source"] = "trade_manager_closed"
+        return row
+
+    def _upsert_position_rows_to_db(self, rows: List[dict]):
+        for row in rows or []:
+            self.db.execute(
+                """
+                INSERT OR REPLACE INTO positions (
+                    position_id, market, market_title, token_id, condition_id, outcome_side, order_side,
+                    status, entry_price, current_price, size_usdc, shares, market_value, realized_pnl,
+                    net_realized_pnl, unrealized_pnl, confidence, confidence_at_entry, signal_label,
+                    close_reason, exit_price, close_fingerprint, is_reconciliation_close, lifecycle_source,
+                    opened_at, closed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row.get("position_id"),
+                    row.get("market"),
+                    row.get("market_title"),
+                    row.get("token_id"),
+                    row.get("condition_id"),
+                    row.get("outcome_side"),
+                    row.get("order_side"),
+                    row.get("status"),
+                    row.get("entry_price"),
+                    row.get("current_price"),
+                    row.get("size_usdc"),
+                    row.get("shares"),
+                    row.get("market_value"),
+                    row.get("realized_pnl"),
+                    row.get("net_realized_pnl"),
+                    row.get("unrealized_pnl"),
+                    row.get("confidence"),
+                    row.get("confidence_at_entry"),
+                    row.get("signal_label"),
+                    row.get("close_reason"),
+                    row.get("exit_price"),
+                    row.get("close_fingerprint"),
+                    int(bool(row.get("is_reconciliation_close"))) if row.get("is_reconciliation_close") is not None else 0,
+                    row.get("lifecycle_source"),
+                    row.get("opened_at"),
+                    row.get("closed_at"),
+                ),
+            )
+
     def _empty_positions_frame(self) -> pd.DataFrame:
         return pd.DataFrame(
             columns=[
@@ -521,6 +617,7 @@ class TradeManager:
                 "mark_price", "best_bid", "best_ask", "spread", "mid_price", "spread_pct", "mark_source",
                 "trajectory_state", "drawdown_from_peak", "recent_return_3", "runup_from_entry",
                 "volatility_short", "fallback_ratio",
+                "close_reason", "exit_price", "close_fingerprint", "is_reconciliation_close", "lifecycle_source",
             ]
         )
 
@@ -589,6 +686,16 @@ class TradeManager:
             df["confidence_at_entry"] = df["confidence"]
         if "signal_label" not in df.columns:
             df["signal_label"] = None
+        if "close_reason" not in df.columns:
+            df["close_reason"] = None
+        if "exit_price" not in df.columns:
+            df["exit_price"] = None
+        if "close_fingerprint" not in df.columns:
+            df["close_fingerprint"] = None
+        if "is_reconciliation_close" not in df.columns:
+            df["is_reconciliation_close"] = False
+        if "lifecycle_source" not in df.columns:
+            df["lifecycle_source"] = "trade_manager_reconciled_open"
 
         keep = self._empty_positions_frame().columns.tolist()
         for col in keep:
@@ -600,6 +707,7 @@ class TradeManager:
         if reconciled_positions_df is not None:
             out_df = self._normalize_reconciled_positions_for_csv(reconciled_positions_df)
             out_df.to_csv(self.positions_file, index=False)
+            self._upsert_position_rows_to_db(out_df.to_dict("records"))
             return
 
         open_trades = self.get_open_positions()
@@ -608,12 +716,15 @@ class TradeManager:
             return
 
         rows = [self._trade_to_dict(t) for t in open_trades]
-        pd.DataFrame(rows).to_csv(self.positions_file, index=False)
+        out_df = pd.DataFrame(rows)
+        out_df.to_csv(self.positions_file, index=False)
+        self._upsert_position_rows_to_db(rows)
 
     def _append_closed_trades(self, closed_trades: List[TradeLifecycle]):
         if not closed_trades:
             return
         existing_fingerprints = set()
+        existing_df = pd.DataFrame()
         if self.closed_file.exists():
             try:
                 existing_df = pd.read_csv(self.closed_file, engine="python", on_bad_lines="skip")
@@ -636,24 +747,67 @@ class TradeManager:
                     getattr(trade, "close_reason", None),
                 )
                 continue
-            row = self._trade_to_dict(trade)
-            row["close_reason"] = trade.close_reason or "policy_exit"
-            row["exit_price"] = trade.current_price
-            row["realized_pnl"] = round(trade.realized_pnl, 4)
-            row["net_realized_pnl"] = round(trade.realized_pnl, 4)
-            row["status"] = "CLOSED"
-            row["close_fingerprint"] = close_fingerprint
-            row["is_reconciliation_close"] = str(trade.close_reason or "").strip().lower() == "external_manual_close"
+            row = self._build_closed_trade_row(trade)
             rows.append(row)
             existing_fingerprints.add(close_fingerprint)
 
         if not rows:
             return
 
-        pd.DataFrame(rows).to_csv(
-            self.closed_file, mode="a",
-            header=not self.closed_file.exists(), index=False,
-        )
+        append_df = pd.DataFrame(rows)
+        ordered_cols = list(existing_df.columns)
+        for column in append_df.columns:
+            if column not in ordered_cols:
+                ordered_cols.append(column)
+        existing_df = existing_df.reindex(columns=ordered_cols)
+        append_df = append_df.reindex(columns=ordered_cols)
+        merged = append_df.copy() if existing_df.empty else pd.concat([existing_df, append_df], ignore_index=True)
+        merged.to_csv(self.closed_file, index=False)
+        self._upsert_position_rows_to_db(rows)
+
+    def backfill_closed_positions_db_from_csv(self):
+        if not self.closed_file.exists():
+            return {"db_rows_upserted": 0, "csv_rows": 0}
+        try:
+            closed_df = pd.read_csv(self.closed_file, engine="python", on_bad_lines="skip")
+        except Exception:
+            return {"db_rows_upserted": 0, "csv_rows": 0}
+        if closed_df.empty:
+            return {"db_rows_upserted": 0, "csv_rows": 0}
+
+        rows = []
+        for _, row in closed_df.iterrows():
+            data = row.to_dict()
+            close_fingerprint = str(data.get("close_fingerprint") or "").strip()
+            if not close_fingerprint:
+                close_fingerprint = "|".join(
+                    [
+                        str(data.get("token_id", "") or ""),
+                        str(data.get("condition_id", "") or ""),
+                        str(data.get("outcome_side", "") or ""),
+                        str(data.get("opened_at", "") or ""),
+                        str(data.get("close_reason", "") or ""),
+                        f"{float(data.get('entry_price', 0.0) or 0.0):.6f}",
+                        f"{float(data.get('exit_price', data.get('current_price', 0.0)) or 0.0):.6f}",
+                        f"{float(data.get('shares', 0.0) or 0.0):.6f}",
+                    ]
+                )
+            data["close_fingerprint"] = close_fingerprint
+            data["position_id"] = self._canonical_position_id(
+                token_id=data.get("token_id"),
+                condition_id=data.get("condition_id"),
+                outcome_side=data.get("outcome_side"),
+                opened_at=data.get("opened_at"),
+                market=data.get("market"),
+                close_fingerprint=close_fingerprint,
+            )
+            data["status"] = "CLOSED"
+            data["exit_price"] = data.get("exit_price", data.get("current_price"))
+            data["lifecycle_source"] = data.get("lifecycle_source") or "closed_positions_csv_backfill"
+            rows.append(data)
+
+        self._upsert_position_rows_to_db(rows)
+        return {"db_rows_upserted": len(rows), "csv_rows": len(closed_df.index)}
     def reconcile_live_positions(self, execution_client=None, reconciled_positions_df: pd.DataFrame | None = None):
         if reconciled_positions_df is None:
             try:
