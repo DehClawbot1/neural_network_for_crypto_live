@@ -28,6 +28,9 @@ def default_return_calibration() -> dict:
         "clip_upper": abs_clip,
         "scale": scale,
         "uncertainty_floor": max(0.01, abs_clip * 0.08),
+        "train_rows": 0,
+        "train_median": 0.0,
+        "reliability": 1.0,
     }
 
 
@@ -40,11 +43,16 @@ def fit_return_calibration(values) -> dict:
     abs_clip_ceiling = max(0.10, _env_float("EXPECTED_RETURN_ABS_CLIP", 0.60))
     min_abs_bound = min(0.10, abs_clip_ceiling)
     tail_headroom = max(1.0, _env_float("EXPECTED_RETURN_TAIL_HEADROOM", 1.10))
+    full_confidence_rows = max(25.0, _env_float("EXPECTED_RETURN_FULL_CONFIDENCE_ROWS", 200.0))
+    min_reliability = min(1.0, max(0.05, _env_float("EXPECTED_RETURN_MIN_RELIABILITY", 0.20)))
 
     q01 = float(series.quantile(0.01))
     q99 = float(series.quantile(0.99))
     observed_min = float(series.min())
     observed_max = float(series.max())
+    observed_median = float(series.quantile(0.50))
+    train_rows = int(len(series))
+    reliability = float(np.clip(train_rows / full_confidence_rows, min_reliability, 1.0))
 
     clip_lower = min(observed_min * tail_headroom, q01 * tail_headroom, -min_abs_bound)
     clip_upper = max(observed_max * tail_headroom, q99 * tail_headroom, min_abs_bound)
@@ -66,6 +74,9 @@ def fit_return_calibration(values) -> dict:
         "clip_upper": float(clip_upper),
         "scale": float(scale),
         "uncertainty_floor": float(max(0.01, min(abs_clip_ceiling * 0.20, series.std(ddof=0) * 0.35 if len(series) > 1 else 0.02))),
+        "train_rows": train_rows,
+        "train_median": observed_median,
+        "reliability": reliability,
         "train_min": observed_min,
         "train_max": observed_max,
         "train_q01": q01,
@@ -95,6 +106,9 @@ def calibrate_return_predictions(predictions, calibration: dict | None = None, i
     clip_lower = float(calibration.get("clip_lower", fallback["clip_lower"]))
     clip_upper = float(calibration.get("clip_upper", fallback["clip_upper"]))
     scale = max(0.01, float(calibration.get("scale", fallback["scale"])))
+    train_median = float(calibration.get("train_median", fallback["train_median"]))
+    reliability = float(calibration.get("reliability", fallback["reliability"]))
+    reliability = float(np.clip(reliability, 0.0, 1.0))
 
     series = predictions if isinstance(predictions, pd.Series) else pd.Series(np.asarray(predictions).ravel(), index=index)
     if index is not None and len(series.index) != len(index):
@@ -104,6 +118,9 @@ def calibrate_return_predictions(predictions, calibration: dict | None = None, i
     if calibration.get("transform") == "signed_tanh":
         series = pd.Series(np.tanh(np.clip(series, -10.0, 10.0)) * scale, index=series.index, dtype=float)
 
+    # Small datasets can produce extreme but unstable regressors.
+    # Revert partially toward the training-median ROI until sample size grows.
+    series = train_median + ((series - train_median) * reliability)
     return series.clip(lower=clip_lower, upper=clip_upper)
 
 
@@ -115,4 +132,3 @@ def clip_expected_return_series(values, calibration: dict | None = None) -> pd.S
     series = values if isinstance(values, pd.Series) else pd.Series(values)
     series = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], 0.0).fillna(0.0).astype(float)
     return series.clip(lower=clip_lower, upper=clip_upper)
-

@@ -199,6 +199,7 @@ class TradeManager:
         execution_client=None,
         persist_closed: bool = True,
         predictive_exit_targets: Dict[str, float] | None = None,
+        trajectory_metrics: Dict[str, dict] | None = None,
     ):
         closed_trades: List[TradeLifecycle] = []
         close_reasons: Dict[str, str] = {}
@@ -263,6 +264,7 @@ class TradeManager:
                         predicted_target_price = float(predicted_target_price)
                     except Exception:
                         predicted_target_price = None
+            trajectory_signal = trajectory_metrics.get(trade_key, {}) if trajectory_metrics else {}
 
             # --- STRICT SYNC: Verify external Polymarket balance ---
             # If you manually closed this trade on the Polymarket website, 
@@ -313,6 +315,12 @@ class TradeManager:
                 close_reason = "take_profit_price_move"
             elif close_reason is None and predicted_target_price is not None and current_price >= predicted_target_price:
                 close_reason = "take_profit_model_target"
+            elif close_reason is None and bool(trajectory_signal.get("panic_exit_signal")):
+                close_reason = "trajectory_panic_exit"
+            elif close_reason is None and bool(trajectory_signal.get("reversal_exit_signal")):
+                close_reason = "trajectory_reversal_exit"
+            elif close_reason is None and roi > 0 and bool(trajectory_signal.get("profit_lock_signal")):
+                close_reason = "trajectory_profit_lock"
             elif close_reason is None and (entry_price - current_price) >= exit_thresholds["sl_delta"]:
                 close_reason = "stop_loss"
             elif close_reason is None and minutes_open >= exit_thresholds["time_stop_minutes"]:
@@ -443,6 +451,15 @@ class TradeManager:
             "confidence": trade.confidence_at_entry,
             "confidence_at_entry": trade.confidence_at_entry,
             "signal_label": trade.signal_label,
+            "mark_price": trade.current_price,
+            "best_bid": None,
+            "best_ask": None,
+            "spread": None,
+            "mark_source": "trade_manager_memory",
+            "trajectory_state": None,
+            "drawdown_from_peak": None,
+            "recent_return_3": None,
+            "runup_from_entry": None,
         }
 
     def _empty_positions_frame(self) -> pd.DataFrame:
@@ -454,6 +471,8 @@ class TradeManager:
                 "market_value", "unrealized_pnl", "realized_pnl",
                 "net_realized_pnl", "opened_at", "status",
                 "confidence", "confidence_at_entry", "signal_label",
+                "mark_price", "best_bid", "best_ask", "spread", "mark_source",
+                "trajectory_state", "drawdown_from_peak", "recent_return_3", "runup_from_entry",
             ]
         )
 
@@ -493,9 +512,12 @@ class TradeManager:
             df["entry_price"] = 0.0
         if "current_price" not in df.columns:
             df["current_price"] = df["entry_price"]
+        if "mark_price" not in df.columns:
+            df["mark_price"] = df["current_price"]
         df["shares"] = pd.to_numeric(df["shares"], errors="coerce").fillna(0.0)
         df["entry_price"] = pd.to_numeric(df["entry_price"], errors="coerce").fillna(0.0)
         df["current_price"] = pd.to_numeric(df["current_price"], errors="coerce").fillna(df["entry_price"])
+        df["mark_price"] = pd.to_numeric(df["mark_price"], errors="coerce").fillna(df["current_price"])
         if "size_usdc" not in df.columns:
             df["size_usdc"] = df["shares"] * df["entry_price"]
         if "market_value" not in df.columns:
