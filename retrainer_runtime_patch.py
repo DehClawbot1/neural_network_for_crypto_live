@@ -103,30 +103,56 @@ class IncrementalRetrainer(_legacy_retrainer.Retrainer):
         except Exception:
             return {}
 
+    def _status_payload(
+        self,
+        *,
+        closed_rows: int,
+        replay_rows: int,
+        last_trained_closed_rows: int,
+        last_trained_replay_rows: int,
+        last_retrained_at,
+        action: str,
+    ):
+        new_closed_rows = max(0, int(closed_rows) - int(last_trained_closed_rows))
+        new_replay_rows = max(0, int(replay_rows) - int(last_trained_replay_rows))
+        progress_closed = round(new_closed_rows / max(1, self.min_new_closed_rows), 4)
+        progress_replay = round(new_replay_rows / max(1, self.min_new_replay_rows), 4)
+        return {
+            "closed_trade_rows": int(closed_rows),
+            "replay_rows": int(replay_rows),
+            "last_trained_closed_rows": int(last_trained_closed_rows),
+            "last_trained_replay_rows": int(last_trained_replay_rows),
+            "new_closed_rows": int(new_closed_rows),
+            "new_replay_rows": int(new_replay_rows),
+            "min_new_closed_rows": int(self.min_new_closed_rows),
+            "min_new_replay_rows": int(self.min_new_replay_rows),
+            "closed_trade_threshold": int(self.min_new_closed_rows),
+            "replay_threshold": int(self.min_new_replay_rows),
+            "cooldown_minutes": int(self.cooldown_minutes),
+            "progress_ratio": max(progress_closed, progress_replay),
+            "last_action": action,
+            "last_retrained_at": last_retrained_at,
+            "status_schema": "incremental_runtime_patch_v2",
+        }
+
     def _write_status(self, closed_rows: int, replay_rows: int, action: str):
         state = self._read_status_state()
         last_trained_closed_rows = int(state.get("last_trained_closed_rows", 0) or 0)
         last_trained_replay_rows = int(state.get("last_trained_replay_rows", 0) or 0)
         last_retrained_at = state.get("last_retrained_at")
-        progress_closed = round(max(0, closed_rows - last_trained_closed_rows) / max(1, self.min_new_closed_rows), 4)
-        progress_replay = round(max(0, replay_rows - last_trained_replay_rows) / max(1, self.min_new_replay_rows), 4)
         self.status_file.write_text(action + "\n", encoding="utf-8")
         pd.DataFrame([
-            {
-                "closed_trade_rows": closed_rows,
-                "replay_rows": replay_rows,
-                "last_trained_closed_rows": last_trained_closed_rows,
-                "last_trained_replay_rows": last_trained_replay_rows,
-                "min_new_closed_rows": self.min_new_closed_rows,
-                "min_new_replay_rows": self.min_new_replay_rows,
-                "cooldown_minutes": self.cooldown_minutes,
-                "progress_ratio": max(progress_closed, progress_replay),
-                "last_action": action,
-                "last_retrained_at": last_retrained_at,
-            }
+            self._status_payload(
+                closed_rows=closed_rows,
+                replay_rows=replay_rows,
+                last_trained_closed_rows=last_trained_closed_rows,
+                last_trained_replay_rows=last_trained_replay_rows,
+                last_retrained_at=last_retrained_at,
+                action=action,
+            )
         ]).to_csv(self.status_csv, index=False)
 
-    def maybe_retrain(self):
+    def maybe_retrain(self, force=False, reason="scheduled_cycle_check"):
         closed_df = self._safe_read(self.closed_file)
         replay_df = self._safe_read(self.replay_file)
         backtest_df = self._safe_read(self.backtest_summary_file)
@@ -144,40 +170,42 @@ class IncrementalRetrainer(_legacy_retrainer.Retrainer):
         if not backtest_df.empty and "average_pnl" in backtest_df.columns:
             pnl_degraded = self._safe_float(backtest_df.iloc[-1].get("average_pnl"), 0.0) < 0
 
+        force_every_closed_trade = _env_bool("RETRAIN_ON_EVERY_CLOSED_TRADE", True)
+        if force and not force_every_closed_trade:
+            force = False
+
         cooldown_active = False
         if pd.notna(last_retrained_at):
             minutes_since = (pd.Timestamp.utcnow() - last_retrained_at).total_seconds() / 60.0
             cooldown_active = minutes_since < self.cooldown_minutes
 
         should_retrain = (
-            new_closed_rows >= self.min_new_closed_rows
-            or new_replay_rows >= self.min_new_replay_rows
-            or pnl_degraded
-        ) and not cooldown_active
+            force
+            or (
+                (
+                    new_closed_rows >= self.min_new_closed_rows
+                    or new_replay_rows >= self.min_new_replay_rows
+                    or pnl_degraded
+                ) and not cooldown_active
+            )
+        )
 
         if not should_retrain:
             reason = (
                 f"Retrain skipped: new_closed={new_closed_rows}/{self.min_new_closed_rows}, "
                 f"new_replay={new_replay_rows}/{self.min_new_replay_rows}, "
-                f"cooldown_active={cooldown_active}, pnl_degraded={pnl_degraded}"
+                f"cooldown_active={cooldown_active}, pnl_degraded={pnl_degraded}, trigger={reason}"
             )
             self.status_file.write_text(reason + "\n", encoding="utf-8")
             pd.DataFrame([
-                {
-                    "closed_trade_rows": closed_rows,
-                    "replay_rows": replay_rows,
-                    "last_trained_closed_rows": last_trained_closed_rows,
-                    "last_trained_replay_rows": last_trained_replay_rows,
-                    "min_new_closed_rows": self.min_new_closed_rows,
-                    "min_new_replay_rows": self.min_new_replay_rows,
-                    "cooldown_minutes": self.cooldown_minutes,
-                    "progress_ratio": max(
-                        round(new_closed_rows / max(1, self.min_new_closed_rows), 4),
-                        round(new_replay_rows / max(1, self.min_new_replay_rows), 4),
-                    ),
-                    "last_action": reason,
-                    "last_retrained_at": status.get("last_retrained_at"),
-                }
+                self._status_payload(
+                    closed_rows=closed_rows,
+                    replay_rows=replay_rows,
+                    last_trained_closed_rows=last_trained_closed_rows,
+                    last_trained_replay_rows=last_trained_replay_rows,
+                    last_retrained_at=status.get("last_retrained_at"),
+                    action=reason,
+                )
             ]).to_csv(self.status_csv, index=False)
             return False
 
@@ -188,18 +216,14 @@ class IncrementalRetrainer(_legacy_retrainer.Retrainer):
         now_iso = pd.Timestamp.utcnow().isoformat()
         self.status_file.write_text(message + "\n", encoding="utf-8")
         pd.DataFrame([
-            {
-                "closed_trade_rows": closed_rows,
-                "replay_rows": replay_rows,
-                "last_trained_closed_rows": closed_rows,
-                "last_trained_replay_rows": replay_rows,
-                "min_new_closed_rows": self.min_new_closed_rows,
-                "min_new_replay_rows": self.min_new_replay_rows,
-                "cooldown_minutes": self.cooldown_minutes,
-                "progress_ratio": 0.0,
-                "last_action": message,
-                "last_retrained_at": now_iso,
-            }
+            self._status_payload(
+                closed_rows=closed_rows,
+                replay_rows=replay_rows,
+                last_trained_closed_rows=closed_rows,
+                last_trained_replay_rows=replay_rows,
+                last_retrained_at=now_iso,
+                action=f"{message} | reason={reason}",
+            )
         ]).to_csv(self.status_csv, index=False)
         return promoted
 

@@ -3,6 +3,7 @@ import os
 import signal
 import time
 import re
+from pathlib import Path
 
 from historical_dataset_builder import HistoricalDatasetBuilder
 from target_builder import TargetBuilder
@@ -42,6 +43,89 @@ class PipelineTimeout(Exception):
 
 def _timeout_handler(signum, frame):
     raise PipelineTimeout(f"Research pipeline exceeded {MAX_PIPELINE_SECONDS}s hard limit")
+
+
+def _safe_read_csv(path: Path):
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path, engine="python", on_bad_lines="skip")
+    except Exception:
+        return pd.DataFrame()
+
+
+def _ensure_dashboard_supervised_eval(logs_dir="logs"):
+    logs_path = Path(logs_dir)
+    target_file = logs_path / "supervised_eval.csv"
+    if target_file.exists():
+        return
+
+    time_split_df = _safe_read_csv(logs_path / "time_split_eval.csv")
+    walk_forward_df = _safe_read_csv(logs_path / "walk_forward_eval.csv")
+    stage2_df = _safe_read_csv(logs_path / "stage2_temporal_eval.csv")
+    backtest_df = _safe_read_csv(logs_path / "backtest_summary.csv")
+
+    accuracy = None
+    rows_evaluated = None
+    evaluation_split = "fallback"
+    metric_source = None
+
+    if not time_split_df.empty and "test_accuracy" in time_split_df.columns:
+        accuracy = pd.to_numeric(time_split_df["test_accuracy"], errors="coerce").dropna()
+        accuracy = float(accuracy.iloc[-1]) if not accuracy.empty else None
+        if "test_rows" in time_split_df.columns:
+            rows = pd.to_numeric(time_split_df["test_rows"], errors="coerce").dropna()
+            rows_evaluated = int(rows.iloc[-1]) if not rows.empty else None
+        evaluation_split = "time_split_test"
+        metric_source = "time_split_eval.csv"
+    elif not walk_forward_df.empty and "accuracy" in walk_forward_df.columns:
+        accuracy = pd.to_numeric(walk_forward_df["accuracy"], errors="coerce").dropna()
+        accuracy = float(accuracy.iloc[-1]) if not accuracy.empty else None
+        if "test_rows" in walk_forward_df.columns:
+            rows = pd.to_numeric(walk_forward_df["test_rows"], errors="coerce").dropna()
+            rows_evaluated = int(rows.iloc[-1]) if not rows.empty else None
+        evaluation_split = "walk_forward"
+        metric_source = "walk_forward_eval.csv"
+    elif not stage2_df.empty and "temporal_walk_forward_accuracy" in stage2_df.columns:
+        accuracy = pd.to_numeric(stage2_df["temporal_walk_forward_accuracy"], errors="coerce").dropna()
+        accuracy = float(accuracy.iloc[-1]) if not accuracy.empty else None
+        evaluation_split = "stage2_temporal_walk_forward"
+        metric_source = "stage2_temporal_eval.csv"
+
+    sharpe = None
+    max_drawdown = None
+    mean_strategy_return = None
+    if not backtest_df.empty:
+        if "sharpe_like" in backtest_df.columns:
+            series = pd.to_numeric(backtest_df["sharpe_like"], errors="coerce").dropna()
+            sharpe = float(series.iloc[-1]) if not series.empty else None
+        if "max_drawdown" in backtest_df.columns:
+            series = pd.to_numeric(backtest_df["max_drawdown"], errors="coerce").dropna()
+            max_drawdown = float(series.iloc[-1]) if not series.empty else None
+        if "average_pnl" in backtest_df.columns:
+            series = pd.to_numeric(backtest_df["average_pnl"], errors="coerce").dropna()
+            mean_strategy_return = float(series.iloc[-1]) if not series.empty else None
+
+    if accuracy is None and sharpe is None and max_drawdown is None and mean_strategy_return is None:
+        return
+
+    payload = pd.DataFrame([
+        {
+            "accuracy": accuracy,
+            "precision": None,
+            "recall": None,
+            "f1": None,
+            "mean_strategy_return": mean_strategy_return,
+            "sharpe": sharpe,
+            "max_drawdown": max_drawdown,
+            "rows_evaluated": rows_evaluated,
+            "evaluation_split": evaluation_split,
+            "metric_source": metric_source or "fallback_artifacts",
+            "generated_at": pd.Timestamp.utcnow().isoformat(),
+        }
+    ])
+    payload.to_csv(target_file, index=False)
+    logging.info("Wrote fallback supervised_eval.csv for dashboard compatibility.")
 
 
 def run_research_pipeline():
@@ -168,6 +252,7 @@ def run_research_pipeline():
         WalkForwardEvaluator().evaluate()
         TimeSplitTrainer().run()
         PathReplaySimulator().write()
+        _ensure_dashboard_supervised_eval("logs")
 
         elapsed = time.time() - pipeline_start
         logging.info("Research pipeline complete in %.0fs.", elapsed)

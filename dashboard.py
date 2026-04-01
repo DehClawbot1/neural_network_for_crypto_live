@@ -63,7 +63,10 @@ FILES = {
     "heartbeats": LOGS / "service_heartbeats.csv",
     "supervised_eval": LOGS / "supervised_eval.csv",
     "time_split": LOGS / "time_split_eval.csv",
+    "stage2_temporal": LOGS / "stage2_temporal_eval.csv",
+    "walk_forward": LOGS / "walk_forward_eval.csv",
     "replay": LOGS / "path_replay_backtest.csv",
+    "backtest_summary": LOGS / "backtest_summary.csv",
     "wallet_backtest": LOGS / "backtest_by_wallet.csv",
     "registry": WEIGHTS / "model_registry.csv",
     "shadow": LOGS / "shadow_results.csv",
@@ -315,6 +318,121 @@ def optional_number(v, d=3):
         return round(float(v), d)
     except Exception:
         return "N/A"
+
+
+def to_float(v, default=None):
+    try:
+        if v is None or pd.isna(v):
+            return default
+        out = float(v)
+        if not np.isfinite(out):
+            return default
+        return out
+    except Exception:
+        return default
+
+
+def fmt_ts(v):
+    try:
+        ts = pd.to_datetime(v, errors="coerce", utc=True)
+        if pd.isna(ts):
+            return "N/A"
+        return ts.strftime("%Y-%m-%d %H:%M:%S UTC")
+    except Exception:
+        return "N/A"
+
+
+def latest_non_empty(df, columns):
+    if df is None or df.empty:
+        return None
+    for col in columns:
+        if col not in df.columns:
+            continue
+        series = df[col].dropna()
+        if series.empty:
+            continue
+        for value in reversed(series.tolist()):
+            if str(value).strip() not in {"", "None", "nan", "NaT"}:
+                return value
+    return None
+
+
+def resolve_numeric_metric(candidates):
+    for label, df, column in candidates:
+        if df is None or df.empty or column not in df.columns:
+            continue
+        series = pd.to_numeric(df[column], errors="coerce").dropna()
+        if not series.empty:
+            return float(series.iloc[-1]), label, column
+    return None, None, None
+
+
+def resolve_text_metric(candidates):
+    for label, df, columns in candidates:
+        value = latest_non_empty(df, columns)
+        if value is not None:
+            return str(value), label
+    return None, None
+
+
+def resolve_registry_snapshot(registry_df):
+    if registry_df is None or registry_df.empty or "model_version" not in registry_df.columns:
+        return {}, 0
+    work = registry_df.copy()
+    work["model_version"] = work["model_version"].astype(str).str.strip()
+    work = work[work["model_version"] != ""].copy()
+    if work.empty:
+        return {}, 0
+    malformed = 0
+    if "promoted_at" in work.columns:
+        work["_promoted_at_ts"] = pd.to_datetime(work["promoted_at"], errors="coerce", utc=True)
+        malformed = int(work["_promoted_at_ts"].isna().sum())
+        valid = work[work["_promoted_at_ts"].notna()].copy()
+        if not valid.empty:
+            valid = valid.sort_values("_promoted_at_ts")
+            return valid.iloc[-1].to_dict(), malformed
+    return work.iloc[-1].to_dict(), malformed
+
+
+def resolve_retrainer_status(status_df):
+    if status_df is None or status_df.empty:
+        return {}
+    row = status_df.iloc[-1].to_dict()
+    closed_total = int(to_float(row.get("closed_trade_rows", row.get("dataset_rows", 0)), 0) or 0)
+    replay_total = int(to_float(row.get("replay_rows", 0), 0) or 0)
+    closed_threshold = int(
+        to_float(
+            row.get("closed_trade_threshold", row.get("retrain_threshold", row.get("min_new_closed_rows", 0))),
+            0,
+        )
+        or 0
+    )
+    replay_threshold = int(to_float(row.get("replay_threshold", row.get("min_new_replay_rows", 0)), 0) or 0)
+    last_trained_closed = to_float(row.get("last_trained_closed_rows"), None)
+    last_trained_replay = to_float(row.get("last_trained_replay_rows"), None)
+    new_closed = max(0, closed_total - int(last_trained_closed or 0)) if last_trained_closed is not None else None
+    new_replay = max(0, replay_total - int(last_trained_replay or 0)) if last_trained_replay is not None else None
+    progress = to_float(row.get("progress_ratio"), None)
+    if progress is None:
+        if new_closed is not None and closed_threshold > 0:
+            progress = new_closed / max(1, closed_threshold)
+        elif closed_total > 0 and closed_threshold > 0:
+            progress = closed_total / max(1, closed_threshold)
+        else:
+            progress = 0.0
+    return {
+        "closed_total": closed_total,
+        "replay_total": replay_total,
+        "closed_threshold": closed_threshold,
+        "replay_threshold": replay_threshold,
+        "new_closed": new_closed,
+        "new_replay": new_replay,
+        "cooldown_minutes": int(to_float(row.get("cooldown_minutes"), 0) or 0),
+        "progress_ratio": max(0.0, min(1.0, float(progress))),
+        "last_action": str(row.get("last_action", "Unknown") or "Unknown"),
+        "last_retrained_at": row.get("last_retrained_at"),
+        "status_schema": row.get("status_schema", "unknown"),
+    }
 
 
 def pnl_color(v):
@@ -869,40 +987,150 @@ def render_alerts(alerts_df):
     st.dataframe(ensure_safe(v[cs].tail(50) if cs else v.tail(50)), use_container_width=True, hide_index=True)
 
 
-def render_models(msd, rpd, rgd, sdf, sup, tsd, wbt):
+def render_models(msd, sup, tsd, s2d, wfd, rpd, bsd, rgd):
     st.markdown('<div class="sec-title">Model / Learning Status</div>', unsafe_allow_html=True)
-    missing = [f"{l}: {Path(p).name}" for l, p in [("contract targets", LOGS / "contract_targets.csv"), ("CLOB history", LOGS / "clob_price_history.csv"), ("replay", FILES["replay"]), ("supervised eval", FILES["supervised_eval"]), ("time-split eval", FILES["time_split"])] if not Path(p).exists()]
+    test_acc, test_src, test_col = resolve_numeric_metric([
+        ("time_split_eval.csv", tsd, "test_accuracy"),
+        ("walk_forward_eval.csv", wfd, "accuracy"),
+        ("supervised_eval.csv", sup, "accuracy"),
+        ("stage2_temporal_eval.csv", s2d, "temporal_walk_forward_accuracy"),
+    ])
+    val_acc, val_src, val_col = resolve_numeric_metric([
+        ("time_split_eval.csv", tsd, "val_accuracy"),
+        ("supervised_eval.csv", sup, "accuracy"),
+    ])
+    sharpe, sharpe_src, sharpe_col = resolve_numeric_metric([
+        ("supervised_eval.csv", sup, "sharpe"),
+        ("backtest_summary.csv", bsd, "sharpe_like"),
+    ])
+    profit_factor, pf_src, pf_col = resolve_numeric_metric([
+        ("backtest_summary.csv", bsd, "profit_factor"),
+    ])
+    replay_trades, replay_src, replay_col = resolve_numeric_metric([
+        ("backtest_summary.csv", bsd, "trades"),
+    ])
+    if replay_trades is None and rpd is not None and not rpd.empty:
+        replay_trades = float(len(rpd))
+        replay_src = "path_replay_backtest.csv"
+        replay_col = "rows"
+
+    registry_row, malformed_registry_rows = resolve_registry_snapshot(rgd)
+    retrain_status = resolve_retrainer_status(msd)
+    champion = str(registry_row.get("model_version") or "N/A")
+    champion_src = "model_registry.csv" if registry_row else None
+    last_train_raw = retrain_status.get("last_retrained_at") or registry_row.get("promoted_at")
+    if not last_train_raw:
+        weight_times = [t for t in [path_mtime(WEIGHTS / "ppo_polytrader.zip"), path_mtime(WEIGHTS / "ppo_polytrader_vecnormalize.pkl")] if t is not None]
+        last_train_raw = max(weight_times) if weight_times else None
+    last_train = fmt_ts(last_train_raw)
+    last_train_src = "model_status.csv" if retrain_status.get("last_retrained_at") else ("model_registry.csv" if registry_row.get("promoted_at") else "weights")
+
+    missing = []
+    if not (LOGS / "contract_targets.csv").exists():
+        missing.append("contract targets")
+    if not (LOGS / "clob_price_history.csv").exists():
+        missing.append("CLOB history")
+    if replay_trades is None:
+        missing.append("replay performance")
+    if test_acc is None and val_acc is None:
+        missing.append("accuracy artifacts")
+    if sharpe is None:
+        missing.append("risk-adjusted performance")
+    if not registry_row:
+        missing.append("champion registry")
     if missing:
-        st.warning("Missing: " + "; ".join(missing))
+        st.warning("Missing or unresolved: " + "; ".join(missing))
+    elif malformed_registry_rows:
+        st.info(f"Registry audit: ignored {malformed_registry_rows} malformed legacy registry row(s) and used the last valid champion snapshot.")
+
     st.write(f"**Weights:** {'current' if (WEIGHTS / 'ppo_polytrader.zip').exists() else 'missing'}")
-    isa = fmt_num(sup.iloc[-1]["accuracy"], 3) if not sup.empty and "accuracy" in sup.columns else "N/A"
-    ta = fmt_num(tsd.iloc[-1]["test_accuracy"], 3) if not tsd.empty and "test_accuracy" in tsd.columns else "N/A"
-    sh = fmt_num(sup.iloc[-1]["sharpe"], 3) if not sup.empty and "sharpe" in sup.columns else "N/A"
-    ch = "N/A"
-    lt = "N/A"
-    if not rgd.empty:
-        nc = next((c for c in ["model_name", "name", "model_version"] if c in rgd.columns), None)
-        dc = next((c for c in ["promoted_at", "trained_at"] if c in rgd.columns), None)
-        if nc:
-            ch = str(rgd.iloc[-1][nc])
-        if dc:
-            lt = str(rgd.iloc[-1][dc])
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Test Acc", ta)
-    c2.metric("Replay Trades", len(rpd))
-    c3.metric("Sharpe", sh)
-    c4.metric("In-Sample", isa)
-    c5.metric("Champion", ch)
-    c6.metric("Last Train", lt)
-    if not msd.empty:
-        la = msd.iloc[-1].to_dict()
-        rows = int(la.get("closed_trade_rows", la.get("dataset_rows", 0)) or 0)
-        th = int(la.get("closed_trade_threshold", la.get("retrain_threshold", 0)) or 0)
-        pr = float(la.get("progress_ratio", 0) or 0)
-        act = la.get("last_action", "Unknown")
-        st.progress(max(0.0, min(1.0, pr)))
-        st.caption(f"Closed: {rows}/{th} | Progress: {pr:.0%}")
-        st.code(act, language="text")
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+    c1.metric("Test Acc", fmt_num(test_acc, 3) if test_acc is not None else "N/A")
+    c2.metric("Val Acc", fmt_num(val_acc, 3) if val_acc is not None else "N/A")
+    c3.metric("Replay Trades", str(int(replay_trades)) if replay_trades is not None else "N/A")
+    c4.metric("Sharpe", fmt_num(sharpe, 3) if sharpe is not None else "N/A")
+    c5.metric("Profit Factor", fmt_num(profit_factor, 3) if profit_factor is not None else "N/A")
+    c6.metric("Champion", champion)
+    c7.metric("Last Train", last_train)
+
+    resolved_bits = []
+    if test_src:
+        resolved_bits.append(f"test <- {test_src}:{test_col}")
+    if val_src:
+        resolved_bits.append(f"validation <- {val_src}:{val_col}")
+    if sharpe_src:
+        resolved_bits.append(f"sharpe <- {sharpe_src}:{sharpe_col}")
+    if pf_src:
+        resolved_bits.append(f"profit_factor <- {pf_src}:{pf_col}")
+    if last_train_src:
+        resolved_bits.append(f"last_train <- {last_train_src}")
+    if resolved_bits:
+        st.caption("Resolved sources: " + " | ".join(resolved_bits))
+
+    if retrain_status:
+        pr = retrain_status["progress_ratio"]
+        st.progress(pr)
+        if retrain_status.get("new_closed") is not None:
+            parts = [f"New closed: {retrain_status['new_closed']}/{retrain_status['closed_threshold'] or 0}"]
+            if retrain_status.get("replay_threshold"):
+                parts.append(f"New replay: {retrain_status.get('new_replay', 0)}/{retrain_status['replay_threshold']}")
+        else:
+            parts = [f"Closed total: {retrain_status['closed_total']}"]
+            if retrain_status.get("closed_threshold"):
+                parts[0] += f"/{retrain_status['closed_threshold']}"
+        parts.append(f"Progress: {pr:.0%}")
+        if retrain_status.get("cooldown_minutes"):
+            parts.append(f"Cooldown: {retrain_status['cooldown_minutes']}m")
+        if retrain_status.get("last_retrained_at"):
+            parts.append(f"Last retrain: {fmt_ts(retrain_status['last_retrained_at'])}")
+        st.caption(" | ".join(parts))
+        st.code(retrain_status.get("last_action", "Unknown"), language="text")
+
+    audit_rows = [
+        {
+            "field": "Test accuracy",
+            "value": fmt_num(test_acc, 3) if test_acc is not None else "N/A",
+            "resolved_source": test_src or "missing",
+            "status": "ok" if test_src else "missing",
+        },
+        {
+            "field": "Validation accuracy",
+            "value": fmt_num(val_acc, 3) if val_acc is not None else "N/A",
+            "resolved_source": val_src or "missing",
+            "status": "ok" if val_src else "missing",
+        },
+        {
+            "field": "Sharpe / risk-adjusted score",
+            "value": fmt_num(sharpe, 3) if sharpe is not None else "N/A",
+            "resolved_source": sharpe_src or "missing",
+            "status": "ok" if sharpe_src else "missing",
+        },
+        {
+            "field": "Profit factor",
+            "value": fmt_num(profit_factor, 3) if profit_factor is not None else "N/A",
+            "resolved_source": pf_src or "missing",
+            "status": "ok" if pf_src else "missing",
+        },
+        {
+            "field": "Replay trades",
+            "value": str(int(replay_trades)) if replay_trades is not None else "N/A",
+            "resolved_source": replay_src or "missing",
+            "status": "ok" if replay_src else "missing",
+        },
+        {
+            "field": "Champion version",
+            "value": champion,
+            "resolved_source": champion_src or "missing",
+            "status": "ok" if champion_src else "missing",
+        },
+        {
+            "field": "Last retrain timestamp",
+            "value": last_train,
+            "resolved_source": last_train_src or "missing",
+            "status": "ok" if last_train != "N/A" else "missing",
+        },
+    ]
+    st.dataframe(ensure_safe(pd.DataFrame(audit_rows)), use_container_width=True, hide_index=True)
 
 
 def render_shadow(shadow_df):
@@ -937,7 +1165,23 @@ def render_shadow(shadow_df):
 
 def render_quality(sdf, tdf, mdf, wdf, adf, msd, pdf, cdf, rpd, hdf):
     st.markdown('<div class="sec-title">Data Quality and Pipeline Readiness</div>', unsafe_allow_html=True)
-    frames = {"signals": sdf, "execution": tdf, "markets": mdf, "whales": wdf, "alerts": adf, "positions": pdf, "closed": cdf, "model_status": msd, "health": hdf, "replay": rpd}
+    frames = {
+        "signals": sdf,
+        "execution": tdf,
+        "markets": mdf,
+        "whales": wdf,
+        "alerts": adf,
+        "positions": pdf,
+        "closed": cdf,
+        "model_status": msd,
+        "health": hdf,
+        "replay": rpd,
+        "supervised_eval": load("supervised_eval"),
+        "time_split": load("time_split"),
+        "stage2_temporal": load("stage2_temporal"),
+        "walk_forward": load("walk_forward"),
+        "backtest_summary": load("backtest_summary"),
+    }
     rows = []
     for n, df in frames.items():
         p = FILES.get(n)
@@ -1051,7 +1295,10 @@ def main():
     cdf = load("closed")
     sup = load("supervised_eval")
     tsd = load("time_split")
+    s2d = load("stage2_temporal")
+    wfd = load("walk_forward")
     rpd = load("replay")
+    bsd = load("backtest_summary")
     wbt = load("wallet_backtest")
     rgd = load("registry")
     shd = load("shadow")
@@ -1156,7 +1403,7 @@ def main():
     with t5:
         sm, sq = st.tabs(["Model Performance", "Data Quality and Readiness"])
         with sm:
-            render_models(msd, rpd, rgd, sdf, sup, tsd, wbt)
+            render_models(msd, sup, tsd, s2d, wfd, rpd, bsd, rgd)
         with sq:
             render_quality(sdf, tdf, mdf, wdf, adf, msd, pdf, cdf, rpd, hdf)
             if dbg:
