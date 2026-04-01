@@ -549,6 +549,12 @@ def main_loop():
     """The continuous autonomous loop (research + paper-trading mode)."""
     logging.info("Initializing LIVE PolyMarket Supervisor...")
 
+    def _env_float(name: str, default: float) -> float:
+        try:
+            return float(os.getenv(name, str(default)) or default)
+        except Exception:
+            return float(default)
+
     entry_brain = load_entry_brain()
     position_brain = load_position_brain()
     legacy_brain = None
@@ -575,7 +581,23 @@ def main_loop():
     stage1_inference = Stage1Inference()
     stage2_inference = Stage2TemporalInference()
     hybrid_scorer = Stage3HybridScorer()
-    entry_rule = EntryRuleLayer()
+    entry_min_score = _env_float("ENTRY_MIN_SCORE", 0.25)
+    entry_max_spread = _env_float("ENTRY_MAX_SPREAD", 0.20)
+    entry_min_liquidity = _env_float("ENTRY_MIN_LIQUIDITY", 5.0)
+    entry_min_liquidity_score = _env_float("ENTRY_MIN_LIQUIDITY_SCORE", 0.05)
+    entry_rule = EntryRuleLayer(
+        min_score=entry_min_score,
+        max_spread=entry_max_spread,
+        min_liquidity=entry_min_liquidity,
+        min_liquidity_score=entry_min_liquidity_score,
+    )
+    logging.info(
+        "EntryRule thresholds: min_score=%.4f max_spread=%.4f min_liquidity=%.4f min_liquidity_score=%.4f",
+        entry_min_score,
+        entry_max_spread,
+        entry_min_liquidity,
+        entry_min_liquidity_score,
+    )
     whale_tracker = WhaleTracker()
     alerts_engine = AlertsEngine()
     trader_analytics = TraderAnalytics()
