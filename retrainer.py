@@ -91,8 +91,25 @@ class Retrainer:
             ]
         ).to_csv(self.status_csv, index=False)
 
+    def _normalize_registry(self, registry: pd.DataFrame):
+        if registry is None or registry.empty:
+            return pd.DataFrame()
+        required = ["model_version", "promoted_at"]
+        if not all(col in registry.columns for col in required):
+            return pd.DataFrame()
+        work = registry.copy()
+        work["model_version"] = work["model_version"].astype(str).str.strip()
+        work["promoted_at"] = pd.to_datetime(work["promoted_at"], errors="coerce", utc=True)
+        work = work[(work["model_version"] != "") & work["promoted_at"].notna()].copy()
+        if work.empty:
+            return pd.DataFrame()
+        return work.sort_values("promoted_at")
+
     def _current_registry_row(self):
         registry = self._safe_read(self.registry_file)
+        if registry.empty:
+            return None
+        registry = self._normalize_registry(registry)
         if registry.empty:
             return None
         return registry.iloc[-1].to_dict()
@@ -137,7 +154,9 @@ class Retrainer:
             "test_accuracy": self._safe_float(candidate.get("test_accuracy"), 0.0),
             "promoted_at": pd.Timestamp.utcnow().isoformat(),
         }
-        pd.DataFrame([row]).to_csv(self.registry_file, mode="a", header=not self.registry_file.exists(), index=False)
+        existing_registry = self._normalize_registry(self._safe_read(self.registry_file))
+        updated_registry = pd.concat([existing_registry, pd.DataFrame([row])], ignore_index=True)
+        updated_registry.to_csv(self.registry_file, index=False)
         return True, f"Promoted candidate model {row['model_version']}"
 
     def maybe_retrain(self, force=False, reason="scheduled_cycle_check"):

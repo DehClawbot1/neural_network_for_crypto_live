@@ -57,13 +57,24 @@ def _safe_read_csv(path: Path):
 def _ensure_dashboard_supervised_eval(logs_dir="logs"):
     logs_path = Path(logs_dir)
     target_file = logs_path / "supervised_eval.csv"
-    if target_file.exists():
-        return
 
     time_split_df = _safe_read_csv(logs_path / "time_split_eval.csv")
     walk_forward_df = _safe_read_csv(logs_path / "walk_forward_eval.csv")
     stage2_df = _safe_read_csv(logs_path / "stage2_temporal_eval.csv")
     backtest_df = _safe_read_csv(logs_path / "backtest_summary.csv")
+    source_paths = [
+        logs_path / "time_split_eval.csv",
+        logs_path / "walk_forward_eval.csv",
+        logs_path / "stage2_temporal_eval.csv",
+        logs_path / "backtest_summary.csv",
+    ]
+    source_mtimes = [path.stat().st_mtime for path in source_paths if path.exists()]
+    target_mtime = target_file.stat().st_mtime if target_file.exists() else None
+    legacy_eval_enabled = os.getenv("ENABLE_LEGACY_BTC_DIRECTION_MODEL", "false").strip().lower() in {"1", "true", "yes", "on"}
+    if legacy_eval_enabled and target_file.exists():
+        return
+    if target_file.exists() and target_mtime is not None and source_mtimes and target_mtime >= max(source_mtimes):
+        return
 
     accuracy = None
     rows_evaluated = None

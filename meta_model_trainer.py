@@ -128,7 +128,7 @@ class MetaModelTrainer:
         return model, precision_at_k
 
     def _update_registry(self, ts, precision, roc_auc, features, train_rows, test_rows):
-        registry_path = self.model_dir / "model_registry.csv"
+        registry_path = self.model_dir / "meta_model_registry.csv"
         new_row = pd.DataFrame([{
             "timestamp": ts,
             "precision_top_10": precision,

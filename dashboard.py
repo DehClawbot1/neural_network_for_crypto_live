@@ -1132,6 +1132,33 @@ def render_models(msd, sup, tsd, s2d, wfd, rpd, bsd, rgd):
     ]
     st.dataframe(ensure_safe(pd.DataFrame(audit_rows)), use_container_width=True, hide_index=True)
 
+    artifact_specs = [
+        ("supervised_eval.csv", FILES["supervised_eval"], sup, "Evaluator / fallback aggregator", "dashboard accuracy + sharpe"),
+        ("time_split_eval.csv", FILES["time_split"], tsd, "TimeSplitTrainer", "dashboard test/val accuracy"),
+        ("stage2_temporal_eval.csv", FILES["stage2_temporal"], s2d, "Stage2TemporalModels", "dashboard fallback temporal metrics"),
+        ("walk_forward_eval.csv", FILES["walk_forward"], wfd, "WalkForwardEvaluator", "dashboard fallback walk-forward accuracy"),
+        ("backtest_summary.csv", FILES["backtest_summary"], bsd, "Backtester", "dashboard replay trades + sharpe + profit factor"),
+        ("model_status.csv", FILES["model_status"], msd, "Retrainer / runtime patch", "dashboard retrain progress + last train"),
+        ("model_registry.csv", FILES["registry"], rgd, "Retrainer promotion registry", "dashboard champion version"),
+    ]
+    artifact_rows = []
+    for label, path, df, producer, consumer in artifact_specs:
+        file_ts = path_mtime(path)
+        latest_row_ts = latest_ts(df)
+        best_ts = max([t for t in [file_ts, latest_row_ts] if t is not None], default=None)
+        artifact_rows.append(
+            {
+                "artifact": label,
+                "present": "Yes" if Path(path).exists() else "No",
+                "rows": len(df) if df is not None and not df.empty else 0,
+                "latest_seen": best_ts.strftime("%Y-%m-%d %H:%M:%S UTC") if best_ts is not None else "N/A",
+                "producer": producer,
+                "consumed_by": consumer,
+            }
+        )
+    with st.expander("Model Artifact Audit"):
+        st.dataframe(ensure_safe(pd.DataFrame(artifact_rows)), use_container_width=True, hide_index=True)
+
 
 def render_shadow(shadow_df):
     st.markdown('<div class="sec-title">Shadow Execution</div>', unsafe_allow_html=True)

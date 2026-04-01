@@ -42,6 +42,9 @@ RESEARCH_ARTIFACTS = [
     LOGS_DIR / "wallet_alpha_history.csv",
     LOGS_DIR / "supervised_eval.csv",
     LOGS_DIR / "time_split_eval.csv",
+    LOGS_DIR / "stage2_temporal_eval.csv",
+    LOGS_DIR / "walk_forward_eval.csv",
+    LOGS_DIR / "backtest_summary.csv",
     LOGS_DIR / "path_replay_backtest.csv",
 ]
 
