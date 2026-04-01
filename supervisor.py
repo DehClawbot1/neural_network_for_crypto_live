@@ -3,6 +3,7 @@ import os
 import json
 import time
 import logging
+import re
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
@@ -88,6 +89,7 @@ MARKETS_FILE = "logs/markets.csv"
 CANDIDATE_DECISIONS_FILE = "logs/candidate_decisions.csv"
 CANDIDATE_CYCLE_STATS_FILE = "logs/candidate_cycle_stats.csv"
 ALWAYS_ON_STATE_FILE = Path("logs/always_on_slug_state.json")
+UPDOWN_SLUG_RE = re.compile(r"^btc-updown-(?P<minutes>\d+)m-(?P<epoch>\d{9,})$")
 
 
 class StatefulRecurrentBrain:
@@ -592,6 +594,15 @@ def main_loop():
     """The continuous autonomous loop (research + paper-trading mode)."""
     logging.info("Initializing LIVE PolyMarket Supervisor...")
 
+    def _env_int(name: str, default: int, minimum: int = 0, maximum: int = 100000) -> int:
+        try:
+            value = int(os.getenv(name, str(default)) or default)
+        except Exception:
+            value = int(default)
+        value = max(int(minimum), value)
+        value = min(int(maximum), value)
+        return value
+
     def _env_float(name: str, default: float) -> float:
         try:
             return float(os.getenv(name, str(default)) or default)
@@ -710,6 +721,27 @@ def main_loop():
             return f"{token_id}|{condition_id}|{outcome_side}"
         return f"{market}|{outcome_side}" if market and outcome_side else None
 
+    updown_market_grace_seconds = _env_int("UPDOWN_MARKET_GRACE_SECONDS", 120, minimum=0, maximum=3600)
+
+    def _is_expired_updown_slug(slug_value) -> bool:
+        slug = str(slug_value or "").strip().lower()
+        if not slug:
+            return False
+        match = UPDOWN_SLUG_RE.match(slug)
+        if not match:
+            return False
+        try:
+            duration_minutes = max(1, int(match.group("minutes")))
+            start_epoch = int(match.group("epoch"))
+        except Exception:
+            return False
+        start_ts = pd.to_datetime(start_epoch, unit="s", utc=True, errors="coerce")
+        if pd.isna(start_ts):
+            return False
+        end_ts = start_ts + pd.Timedelta(minutes=duration_minutes)
+        expiry_cutoff = end_ts + pd.Timedelta(seconds=updown_market_grace_seconds)
+        return pd.Timestamp.now(tz="UTC") > expiry_cutoff
+
     def _extract_open_market_universe(markets_df: pd.DataFrame):
         open_token_ids: set[str] = set()
         open_condition_ids: set[str] = set()
@@ -741,6 +773,8 @@ def main_loop():
 
             slug = str(row.get("slug") or row.get("market_slug") or "").strip().lower()
             if slug and slug != "nan":
+                if _is_expired_updown_slug(slug):
+                    continue
                 open_market_slugs.add(slug)
 
             _add_token(row.get("yes_token_id"))
@@ -1779,6 +1813,14 @@ def main_loop():
 
                 signal_condition_id = str(signal_row.get("condition_id") or "").strip().lower()
                 signal_slug = str(signal_row.get("market_slug") or "").strip().lower()
+                if signal_slug and _is_expired_updown_slug(signal_slug):
+                    _log_candidate_skip(
+                        signal_row,
+                        "expired_market_slug",
+                        gate="freshness",
+                        market_slug=signal_slug,
+                    )
+                    continue
                 if not open_market_slugs:
                     _log_candidate_skip(
                         signal_row,
@@ -1976,14 +2018,15 @@ def main_loop():
                         )
                         if not ob_check["tradable"]:
                             logging.info("OrderBookGuard BLOCKED %s: %s", token_id[:16], ob_check["reason"])
-                            if ob_check.get("reason") == "orderbook_not_available":
+                            ob_reason = str(ob_check.get("reason") or "").strip().lower()
+                            if ob_reason == "orderbook_not_available":
                                 _orderbook_unavailable_tokens.add(token_id)
                             _log_candidate_skip(
                                 signal_row,
-                                "no_liquidity",
+                                "orderbook_not_available" if ob_reason == "orderbook_not_available" else "no_liquidity",
                                 gate="liquidity",
                                 model_action=action_map.get(action_val, "UNKNOWN"),
-                                ob_reason=ob_check.get("reason"),
+                                ob_reason=ob_reason,
                             )
                             continue
                         fill_price = ob_check.get("recommended_entry_price") or quote_entry_price(signal_row)

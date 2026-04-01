@@ -1,6 +1,7 @@
 import time
 import logging
 import os
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -11,6 +12,7 @@ from urllib3.util.retry import Retry
 
 # Configure logging for zero-intervention monitoring
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+UPDOWN_SLUG_RE = re.compile(r"^btc-updown-(?P<minutes>\d+)m-(?P<epoch>\d{9,})$")
 
 
 def _env_int(name, default, minimum=1, maximum=10000):
@@ -38,6 +40,25 @@ def _today_start_iso():
     lookback_hours = int(os.getenv("SIGNAL_LOOKBACK_HOURS", "24"))
     lookback_hours = max(1, lookback_hours)
     return pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=lookback_hours)
+
+
+def _is_expired_updown_slug(slug: str, now_utc=None) -> bool:
+    slug_text = str(slug or "").strip().lower()
+    match = UPDOWN_SLUG_RE.match(slug_text)
+    if not match:
+        return False
+    try:
+        duration_minutes = max(1, int(match.group("minutes")))
+        start_epoch = int(match.group("epoch"))
+    except Exception:
+        return False
+    start_ts = pd.to_datetime(start_epoch, unit="s", utc=True, errors="coerce")
+    if pd.isna(start_ts):
+        return False
+    end_ts = start_ts + pd.Timedelta(minutes=duration_minutes)
+    grace_seconds = _env_int("UPDOWN_MARKET_GRACE_SECONDS", 120, minimum=0, maximum=3600)
+    now_utc = now_utc if now_utc is not None else pd.Timestamp.now(tz="UTC")
+    return now_utc > (end_ts + pd.Timedelta(seconds=grace_seconds))
 
 
 def _normalize_timestamp_value(value):
@@ -123,6 +144,16 @@ def _trade_to_signal(trade, market_universe=None, wallet_fallback=None):
     trade_ts = pd.to_datetime(normalized_ts, utc=True, errors="coerce")
     if pd.isna(trade_ts) or trade_ts < _today_start_iso():
         return None
+    now_utc = pd.Timestamp.now(tz="UTC")
+    if _is_expired_updown_slug(slug, now_utc=now_utc):
+        return None
+
+    # Rotating BTC up/down markets resolve quickly; keep only near-term trades
+    # to avoid stale candidates overwhelming the live execution path.
+    if UPDOWN_SLUG_RE.match(str(slug).strip().lower()):
+        updown_max_age_minutes = _env_int("UPDOWN_SIGNAL_MAX_AGE_MINUTES", 45, minimum=5, maximum=360)
+        if trade_ts < now_utc - pd.Timedelta(minutes=updown_max_age_minutes):
+            return None
 
     order_side = str(trade.get("side", "BUY") or "BUY").upper()
     entry_intent = "OPEN_LONG" if order_side == "BUY" else "CLOSE_LONG"
