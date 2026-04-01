@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 import requests
+from balance_normalization import normalize_allowance_balance
 
 # Only import set_key if we'll actually write to .env
 try:
@@ -361,39 +362,10 @@ class ExecutionClient:
         Some API responses return raw integer (microdollars), others return
         float dollars. This normalizer handles both cases.
         """
-        if raw_balance is None:
-            return 0.0
-        raw_text = str(raw_balance).strip()
-        if not raw_text:
-            return 0.0
-        try:
-            val = float(raw_text) # BUG FIX 10: Handle empty string API drops safely
-        except (TypeError, ValueError):
-            return 0.0
-        # If balance looks like raw microdollars (>= 1,000,000 and is integer-like),
-        # convert to dollars. Otherwise assume it's already in dollars.
-        # If configured as microdollars, convert values that look like raw integers
-        # A $5 balance in microdollars = 5000000; in dollars = 5.0
-        # Microdollar values are always >= 1,000,000 ($1 = 1M microdollars)
-        # A value of 5000.0 is $5000 in real dollars, NOT $0.005 in microdollars
-        try:
-            from config import TradingConfig
-            is_micro = getattr(TradingConfig, 'BALANCE_IS_MICRODOLLARS', True)
-        except ImportError:
-            is_micro = True
-        if is_micro:
-            # Safer detection: only auto-scale clear integer-like raw-unit payloads.
-            # Examples:
-            #   "5000000" -> 5.0 USDC
-            #   "0.75"    -> already 0.75 USDC
-            if re.fullmatch(r"-?\d+", raw_text):
-                try:
-                    return int(raw_text) / 1e6
-                except Exception:
-                    return val
-            if abs(val - round(val)) < 1e-9 and abs(val) >= 1_000_000:
-                return val / 1e6
-        return val
+        return normalize_allowance_balance(raw_balance, asset_type="COLLATERAL")
+
+    def _normalize_allowance_balance(self, raw_balance, asset_type="COLLATERAL"):
+        return normalize_allowance_balance(raw_balance, asset_type=asset_type)
 
     def _rpc_call(self, rpc_url, method, params):
         response = requests.post(
@@ -452,7 +424,7 @@ class ExecutionClient:
         if isinstance(payload, dict):
             for key in ["balance", "available", "available_balance", "amount"]:
                 if payload.get(key) is not None:
-                    api_balance = self._normalize_usdc_balance(payload[key])
+                    api_balance = self._normalize_allowance_balance(payload[key], asset_type=asset_type)
                     break
         if str(asset_type or "COLLATERAL").upper() == "COLLATERAL":
             allow_onchain_fallback = os.getenv("ALLOW_ONCHAIN_BALANCE_FALLBACK", "false").strip().lower() in {"1", "true", "yes", "on"}

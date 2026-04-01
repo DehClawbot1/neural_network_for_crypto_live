@@ -190,6 +190,20 @@ class Database:
                 created_at TEXT,
                 resolved_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS external_position_syncs (
+                sync_id TEXT PRIMARY KEY,
+                position_key TEXT,
+                token_id TEXT,
+                condition_id TEXT,
+                outcome_side TEXT,
+                sync_type TEXT,
+                local_shares_before REAL,
+                exchange_shares REAL,
+                delta_shares REAL,
+                avg_entry_price REAL,
+                fill_id TEXT,
+                observed_at TEXT
+            );
             CREATE INDEX IF NOT EXISTS idx_positions_token_id ON positions(token_id);
             CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
             CREATE INDEX IF NOT EXISTS idx_orders_token_id ON orders(token_id);
@@ -211,6 +225,8 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_live_positions_token_id ON live_positions(token_id);
             CREATE INDEX IF NOT EXISTS idx_live_positions_status ON live_positions(status);
             CREATE INDEX IF NOT EXISTS idx_state_mismatches_created_at ON state_mismatches(created_at);
+            CREATE INDEX IF NOT EXISTS idx_external_position_syncs_position_key ON external_position_syncs(position_key);
+            CREATE INDEX IF NOT EXISTS idx_external_position_syncs_observed_at ON external_position_syncs(observed_at);
             """
         )
         self.conn.commit()

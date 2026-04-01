@@ -8,6 +8,7 @@ import time
 
 import pandas as pd
 
+from balance_normalization import normalize_allowance_balance
 from execution_client import ExecutionClient
 from live_risk_manager import LiveRiskManager
 from db import Database
@@ -51,37 +52,7 @@ class OrderManager:
         return status in {"FILLED", "EXECUTED", "MATCHED", "CANCELED", "CANCELLED", "FAILED", "REJECTED"}
 
     def _normalize_balance(self, raw_balance):
-        if raw_balance is None:
-            return 0.0
-        raw_text = str(raw_balance).strip()
-        if not raw_text:
-            return 0.0
-        try:
-            val = float(raw_text)
-        except (TypeError, ValueError):
-            return 0.0
-
-        try:
-            from config import TradingConfig
-            is_micro = getattr(TradingConfig, 'BALANCE_IS_MICRODOLLARS', True)
-        except ImportError:
-            is_micro = True
-            
-        # PATCHED: Unconditionally divide by 1e6 if is_micro is true. 
-        # API returns all balances (USDC and conditional tokens) in 6 decimals.
-        # Failing to do this causes fractional balances (e.g. 500,000) to evaluate 
-        # as 500,000 full shares instead of 0.5 shares.
-        if is_micro:
-            # Safer scaling: convert only clearly integer-like raw units.
-            if re.fullmatch(r"-?\d+", raw_text):
-                try:
-                    return int(raw_text) / 1e6
-                except Exception:
-                    return val
-            if abs(val - round(val)) < 1e-9 and abs(val) >= 1_000_000:
-                return val / 1e6
-            
-        return val
+        return normalize_allowance_balance(raw_balance, asset_type="COLLATERAL")
 
     def _round_down_shares(self, shares, decimals=6):
         try:

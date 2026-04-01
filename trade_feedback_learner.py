@@ -21,7 +21,7 @@ class TradeFeedbackLearner:
         self.reports_dir.mkdir(parents=True, exist_ok=True)
         self.report_csv = self.logs_dir / "trade_feedback_reports.csv"
         self.summary_csv = self.logs_dir / "trade_feedback_summary.csv"
-        self.db = Database()
+        self.db = Database(self.logs_dir / "trading.db")
 
     def _safe_float(self, value, default=0.0):
         try:
@@ -407,6 +407,13 @@ class TradeFeedbackLearner:
         processed = 0
         for trade in closed_trades:
             if str(getattr(trade, "state", "")).upper().endswith("OPEN"):
+                continue
+            close_reason = str(getattr(trade, "close_reason", "") or "").strip().lower()
+            if close_reason == "external_manual_close":
+                logging.info(
+                    "Skipping learning report for externally reconciled close token=%s.",
+                    str(getattr(trade, "token_id", "") or "")[:16],
+                )
                 continue
 
             entry_price = self._safe_float(getattr(trade, "entry_price", 0.0), 0.0)

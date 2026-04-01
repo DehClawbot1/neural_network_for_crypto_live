@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from balance_normalization import maybe_trace_allowance_payload
 from trade_lifecycle import TradeLifecycle, TradeState
 from config import TradingConfig
 
@@ -286,9 +287,9 @@ class TradeManager:
                     bal_val = 0.0
                     if bal_raw_val is not None:
                         try:
-                            normalizer = getattr(client_ref, "_normalize_usdc_balance", None)
+                            normalizer = getattr(client_ref, "_normalize_allowance_balance", None)
                             if callable(normalizer):
-                                bal_val = float(normalizer(bal_raw_val))
+                                bal_val = float(normalizer(bal_raw_val, asset_type="CONDITIONAL"))
                             else:
                                 bal_val = float(bal_raw_val)
                         except Exception:
@@ -296,6 +297,16 @@ class TradeManager:
                                 bal_val = float(bal_raw_val)
                             except Exception:
                                 bal_val = 0.0
+                    maybe_trace_allowance_payload(
+                        logs_dir=self.logs_dir,
+                        source="trade_manager.strict_sync",
+                        asset_type="CONDITIONAL",
+                        token_id=trade.token_id,
+                        payload=raw_bal,
+                        normalized_balance=bal_val,
+                        local_balance=getattr(trade, "shares", 0.0),
+                        note=f"close_eps={float(os.getenv('EXTERNAL_CLOSE_BALANCE_EPS_SHARES', '1e-6') or 1e-6)}",
+                    )
 
                     # Treat near-zero exchange inventory as external/manual close.
                     # Use an explicit share epsilon instead of a hardcoded raw-unit threshold.
@@ -468,6 +479,36 @@ class TradeManager:
             "fallback_ratio": None,
         }
 
+    def _sync_trade_from_rebuilt(self, existing_trade: TradeLifecycle, rebuilt_trade: TradeLifecycle):
+        existing_trade.market = rebuilt_trade.market or existing_trade.market
+        existing_trade.token_id = rebuilt_trade.token_id or existing_trade.token_id
+        existing_trade.condition_id = rebuilt_trade.condition_id or existing_trade.condition_id
+        existing_trade.outcome_side = rebuilt_trade.outcome_side or existing_trade.outcome_side
+        if rebuilt_trade.entry_price > 0:
+            existing_trade.entry_price = rebuilt_trade.entry_price
+        if rebuilt_trade.current_price > 0:
+            existing_trade.current_price = rebuilt_trade.current_price
+        existing_trade.shares = float(rebuilt_trade.shares or 0.0)
+        existing_trade.size_usdc = float(rebuilt_trade.size_usdc or (existing_trade.shares * max(existing_trade.entry_price, 0.0)))
+        existing_trade.realized_pnl = float(rebuilt_trade.realized_pnl or 0.0)
+        existing_trade.unrealized_pnl = float(rebuilt_trade.unrealized_pnl or 0.0)
+        existing_trade.opened_at = rebuilt_trade.opened_at or existing_trade.opened_at
+        existing_trade.state = TradeState.OPEN
+
+    def _closed_trade_fingerprint(self, trade: TradeLifecycle) -> str:
+        return "|".join(
+            [
+                str(getattr(trade, "token_id", "") or ""),
+                str(getattr(trade, "condition_id", "") or ""),
+                str(getattr(trade, "outcome_side", "") or ""),
+                str(getattr(trade, "opened_at", "") or ""),
+                str(getattr(trade, "close_reason", "") or ""),
+                f"{float(getattr(trade, 'entry_price', 0.0) or 0.0):.6f}",
+                f"{float(getattr(trade, 'current_price', 0.0) or 0.0):.6f}",
+                f"{float(getattr(trade, 'shares', 0.0) or 0.0):.6f}",
+            ]
+        )
+
     def _empty_positions_frame(self) -> pd.DataFrame:
         return pd.DataFrame(
             columns=[
@@ -572,16 +613,42 @@ class TradeManager:
     def _append_closed_trades(self, closed_trades: List[TradeLifecycle]):
         if not closed_trades:
             return
+        existing_fingerprints = set()
+        if self.closed_file.exists():
+            try:
+                existing_df = pd.read_csv(self.closed_file, engine="python", on_bad_lines="skip")
+                if not existing_df.empty and "close_fingerprint" in existing_df.columns:
+                    existing_fingerprints = {
+                        str(value)
+                        for value in existing_df["close_fingerprint"].dropna().astype(str).tolist()
+                        if str(value).strip()
+                    }
+            except Exception:
+                existing_fingerprints = set()
 
         rows = []
         for trade in closed_trades:
+            close_fingerprint = self._closed_trade_fingerprint(trade)
+            if close_fingerprint in existing_fingerprints:
+                logger.info(
+                    "Skipping duplicate closed-trade persistence for %s (%s).",
+                    str(getattr(trade, "token_id", "") or "")[:16],
+                    getattr(trade, "close_reason", None),
+                )
+                continue
             row = self._trade_to_dict(trade)
             row["close_reason"] = trade.close_reason or "policy_exit"
             row["exit_price"] = trade.current_price
             row["realized_pnl"] = round(trade.realized_pnl, 4)
             row["net_realized_pnl"] = round(trade.realized_pnl, 4)
             row["status"] = "CLOSED"
+            row["close_fingerprint"] = close_fingerprint
+            row["is_reconciliation_close"] = str(trade.close_reason or "").strip().lower() == "external_manual_close"
             rows.append(row)
+            existing_fingerprints.add(close_fingerprint)
+
+        if not rows:
+            return
 
         pd.DataFrame(rows).to_csv(
             self.closed_file, mode="a",
@@ -646,8 +713,7 @@ class TradeManager:
         cutoff = datetime.now(timezone.utc).timestamp() - 60
         for key, rebuilt_trade in rebuilt_trades.items():
             if key in self.active_trades:
-                self.active_trades[key].current_price = rebuilt_trade.current_price
-                self.active_trades[key].unrealized_pnl = rebuilt_trade.unrealized_pnl
+                self._sync_trade_from_rebuilt(self.active_trades[key], rebuilt_trade)
             else:
                 self.active_trades[key] = rebuilt_trade
         for key in list(self.active_trades.keys()):

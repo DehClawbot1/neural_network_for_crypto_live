@@ -230,6 +230,18 @@ def load_candidate_decisions_from_db(hours=6):
         return pd.DataFrame()
 
 
+def filter_closed_trade_performance_rows(closed_df):
+    if closed_df is None or getattr(closed_df, "empty", False):
+        return closed_df
+    work = closed_df.copy()
+    keep_mask = pd.Series(True, index=work.index)
+    if "is_reconciliation_close" in work.columns:
+        keep_mask &= ~work["is_reconciliation_close"].astype(str).str.strip().str.lower().isin({"1", "true", "yes"})
+    if "close_reason" in work.columns:
+        keep_mask &= ~work["close_reason"].astype(str).str.strip().str.lower().eq("external_manual_close")
+    return work.loc[keep_mask].copy()
+
+
 def latest_ts(df, cols=None):
     if df is None or df.empty:
         return None
@@ -575,11 +587,12 @@ def render_metrics(signals_df, positions_df, closed_df, alerts_df, markets_df):
     upnl = float(pd.to_numeric(positions_df.get("unrealized_pnl", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if not positions_df.empty and "unrealized_pnl" in positions_df.columns else 0.0
     rpnl = 0.0
     wr = "N/A"
-    n_closed = len(closed_df) if not closed_df.empty else 0
-    if not closed_df.empty:
-        pc = next((c for c in ["net_realized_pnl", "realized_pnl"] if c in closed_df.columns), None)
+    performance_closed_df = filter_closed_trade_performance_rows(closed_df)
+    n_closed = len(performance_closed_df) if performance_closed_df is not None and not performance_closed_df.empty else 0
+    if performance_closed_df is not None and not performance_closed_df.empty:
+        pc = next((c for c in ["net_realized_pnl", "realized_pnl"] if c in performance_closed_df.columns), None)
         if pc:
-            ps = pd.to_numeric(closed_df[pc], errors="coerce").fillna(0)
+            ps = pd.to_numeric(performance_closed_df[pc], errors="coerce").fillna(0)
             rpnl = float(ps.sum())
             if len(ps):
                 wr = f"{(ps > 0).mean() * 100:.1f}%"
@@ -866,15 +879,16 @@ def render_action_board(signals_df, positions_df):
 def render_pnl_summary(positions_df, closed_df):
     st.markdown('<div class="sec-title">PnL Summary</div>', unsafe_allow_html=True)
     no = len(positions_df) if not positions_df.empty else 0
-    nc = len(closed_df) if not closed_df.empty else 0
-    rc = next((c for c in ["net_realized_pnl", "realized_pnl"] if c in closed_df.columns), None) if not closed_df.empty else None
+    perf_closed_df = filter_closed_trade_performance_rows(closed_df)
+    nc = len(perf_closed_df) if perf_closed_df is not None and not perf_closed_df.empty else 0
+    rc = next((c for c in ["net_realized_pnl", "realized_pnl"] if c in perf_closed_df.columns), None) if perf_closed_df is not None and not perf_closed_df.empty else None
     uc = "unrealized_pnl" if not positions_df.empty and "unrealized_pnl" in positions_df.columns else None
-    rp = float(pd.to_numeric(closed_df[rc], errors="coerce").fillna(0).sum()) if rc else 0.0
+    rp = float(pd.to_numeric(perf_closed_df[rc], errors="coerce").fillna(0).sum()) if rc else 0.0
     up = float(pd.to_numeric(positions_df[uc], errors="coerce").fillna(0).sum()) if uc else 0.0
     wr = "N/A"
     ar = "N/A"
-    if rc and not closed_df.empty:
-        ps = pd.to_numeric(closed_df[rc], errors="coerce").fillna(0)
+    if rc and perf_closed_df is not None and not perf_closed_df.empty:
+        ps = pd.to_numeric(perf_closed_df[rc], errors="coerce").fillna(0)
         if len(ps):
             wr = f"{(ps > 0).mean() * 100:.1f}%"
             ar = f"{ps.mean():.2f}"

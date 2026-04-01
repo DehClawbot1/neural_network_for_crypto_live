@@ -9,6 +9,7 @@ import uuid
 import pandas as pd
 
 from db import Database
+from balance_normalization import maybe_trace_allowance_payload
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,7 @@ class LivePositionBook:
     def _insert_external_sync_sell_fill(self, cursor, *, token_id, condition_id, outcome_side, price, shares, now):
         shares = float(shares or 0.0)
         if shares <= 0:
-            return
+            return None
         fill_id = f"ext_sync_{uuid.uuid4().hex[:10]}"
         cursor.execute(
             """
@@ -39,6 +40,144 @@ class LivePositionBook:
                 now,
             ),
         )
+        return fill_id
+
+    def _is_external_sync_fill(self, fill: dict) -> bool:
+        fill_id = str(fill.get("fill_id") or "").strip().lower()
+        order_id = str(fill.get("order_id") or "").strip().lower()
+        return fill_id.startswith("ext_sync_") or order_id == "external_manual"
+
+    def _collapse_consecutive_external_sync_fills(self, fills):
+        grouped = {}
+        for fill in fills:
+            tid = fill.get("token_id")
+            token_id = "" if pd.isna(tid) else str(tid or "")
+            condition_id = fill.get("condition_id")
+            outcome_side = fill.get("outcome_side")
+            key = f"{token_id}|{condition_id or ''}|{outcome_side or ''}"
+            grouped.setdefault(key, []).append(fill)
+
+        collapsed = []
+        for key_fills in grouped.values():
+            pending_external_sync = None
+            for fill in key_fills:
+                if self._is_external_sync_fill(fill):
+                    # Keep only the latest external-sync reconciliation in a run with
+                    # no intervening real exchange fill. Older synthetic entries are
+                    # superseded by the most recent exchange-confirmed share count.
+                    pending_external_sync = fill
+                    continue
+                if pending_external_sync is not None:
+                    collapsed.append(pending_external_sync)
+                    pending_external_sync = None
+                collapsed.append(fill)
+            if pending_external_sync is not None:
+                collapsed.append(pending_external_sync)
+
+        def _sort_key(fill):
+            side = str(fill.get("side") or fill.get("order_side") or "").upper()
+            return (
+                str(fill.get("filled_at") or ""),
+                0 if side == "BUY" else 1,
+                str(fill.get("fill_id") or ""),
+            )
+
+        return sorted(collapsed, key=_sort_key)
+
+    def _record_external_sync_event(
+        self,
+        cursor,
+        *,
+        position_key,
+        token_id,
+        condition_id,
+        outcome_side,
+        sync_type,
+        local_shares_before,
+        exchange_shares,
+        delta_shares,
+        avg_entry_price,
+        fill_id,
+        observed_at,
+    ):
+        sync_id = f"sync_{uuid.uuid4().hex[:12]}"
+        cursor.execute(
+            """
+            INSERT INTO external_position_syncs
+            (sync_id, position_key, token_id, condition_id, outcome_side, sync_type, local_shares_before, exchange_shares, delta_shares, avg_entry_price, fill_id, observed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                sync_id,
+                position_key,
+                token_id,
+                condition_id,
+                outcome_side,
+                sync_type,
+                float(local_shares_before or 0.0),
+                float(exchange_shares or 0.0),
+                float(delta_shares or 0.0),
+                float(avg_entry_price or 0.0),
+                fill_id,
+                observed_at,
+            ),
+        )
+
+    def _has_recent_external_sync(
+        self,
+        cursor,
+        *,
+        position_key,
+        sync_type,
+        local_shares_before,
+        exchange_shares,
+        delta_shares,
+    ) -> bool:
+        dedupe_seconds = max(1, int(os.getenv("EXTERNAL_SYNC_DEDUPE_SECONDS", "180") or 180))
+        cutoff = (datetime.now(timezone.utc) - pd.Timedelta(seconds=dedupe_seconds)).isoformat()
+        tol = 1e-6
+        rows = cursor.execute(
+            """
+            SELECT sync_id
+            FROM external_position_syncs
+            WHERE position_key = ?
+              AND sync_type = ?
+              AND ABS(COALESCE(local_shares_before, 0) - ?) <= ?
+              AND ABS(COALESCE(exchange_shares, 0) - ?) <= ?
+              AND ABS(COALESCE(delta_shares, 0) - ?) <= ?
+              AND COALESCE(observed_at, '') >= ?
+            ORDER BY observed_at DESC
+            LIMIT 1
+            """,
+            (
+                position_key,
+                sync_type,
+                float(local_shares_before or 0.0),
+                tol,
+                float(exchange_shares or 0.0),
+                tol,
+                float(delta_shares or 0.0),
+                tol,
+                cutoff,
+            ),
+        ).fetchall()
+        return bool(rows)
+
+    def _load_latest_external_syncs(self):
+        rows = self.db.query_all(
+            """
+            SELECT s.position_key, s.exchange_shares, s.observed_at
+            FROM external_position_syncs s
+            JOIN (
+                SELECT position_key, MAX(observed_at) AS observed_at
+                FROM external_position_syncs
+                GROUP BY position_key
+            ) latest
+              ON latest.position_key = s.position_key
+             AND latest.observed_at = s.observed_at
+            """
+        )
+        return {str(row.get("position_key") or ""): row for row in rows}
 
     def rebuild_from_db(self):
         fills = self.db.query_all(
@@ -61,6 +200,7 @@ class LivePositionBook:
                 f.fill_id
             """
         )
+        fills = self._collapse_consecutive_external_sync_fills(fills)
         books = {}
         for fill in fills:
             fill_id = str(fill.get("fill_id") or "")
@@ -91,6 +231,7 @@ class LivePositionBook:
                     "avg_entry_price": 0.0,
                     "realized_pnl": 0.0,
                     "last_fill_at": filled_at,
+                    "last_buy_at": None,
                     "source": "fills_reconciled",
                     "status": "OPEN",
                 },
@@ -103,12 +244,32 @@ class LivePositionBook:
                 if new_shares > 0:
                     book["avg_entry_price"] = ((prev_shares * float(book["avg_entry_price"])) + (shares * price)) / new_shares
                 book["shares"] = new_shares
+                book["last_buy_at"] = filled_at or book.get("last_buy_at")
             elif side == "SELL":
                 shares_closed = min(float(book["shares"]), shares)
                 book["realized_pnl"] += shares_closed * (price - float(book["avg_entry_price"]))
                 book["shares"] = max(0.0, float(book["shares"]) - shares)
                 if book["shares"] <= 0:
                     book["avg_entry_price"] = 0.0
+
+        latest_syncs = self._load_latest_external_syncs()
+        for row in books.values():
+            sync = latest_syncs.get(str(row.get("position_key") or ""))
+            if not sync:
+                continue
+            try:
+                observed_at = pd.to_datetime(sync.get("observed_at"), utc=True, errors="coerce")
+                last_buy_at = pd.to_datetime(row.get("last_buy_at"), utc=True, errors="coerce")
+                exchange_shares = float(sync.get("exchange_shares") or 0.0)
+            except Exception:
+                continue
+            if pd.notna(last_buy_at) and pd.notna(observed_at) and last_buy_at > observed_at:
+                continue
+            if exchange_shares < float(row.get("shares") or 0.0) - 1e-6:
+                row["shares"] = exchange_shares
+                if exchange_shares <= 1e-9:
+                    row["avg_entry_price"] = 0.0
+                row["source"] = "fills_reconciled_external_sync"
 
         now = datetime.now(timezone.utc).isoformat()
         dust_notional_threshold = 0.01
@@ -148,13 +309,13 @@ class LivePositionBook:
 
         return pd.DataFrame(list(books.values())) if books else pd.DataFrame(columns=["position_key", "token_id", "condition_id", "outcome_side", "shares", "avg_entry_price", "realized_pnl", "last_fill_at", "source", "status"]) # BUG FIX 4 if books else pd.DataFrame(columns=["position_key", "token_id", "condition_id", "outcome_side", "shares", "avg_entry_price", "realized_pnl", "last_fill_at", "source", "status"]) # BUG FIX 4
 
-    def _extract_available_balance(self, payload, execution_client):
+    def _extract_available_balance(self, payload, execution_client, asset_type="COLLATERAL"):
         if not isinstance(payload, dict): return None
         if "error" in payload or "message" in payload: return None # BUG FIX 1: Prevent API errors from wiping DB
         for key in ["balance", "available", "available_balance", "amount"]:
             if payload.get(key) is not None:
                 try:
-                    return float(execution_client._normalize_usdc_balance(payload[key]))
+                    return float(execution_client._normalize_allowance_balance(payload[key], asset_type=asset_type))
                 except Exception:
                     try:
                         return float(payload[key])
@@ -194,29 +355,69 @@ class LivePositionBook:
                 continue
             try:
                 payload = execution_client.get_balance_allowance(asset_type="CONDITIONAL", token_id=token_id)
-                available_shares = self._extract_available_balance(payload, execution_client)
+                available_shares = self._extract_available_balance(payload, execution_client, asset_type="CONDITIONAL")
+                maybe_trace_allowance_payload(
+                    logs_dir=self.logs_dir,
+                    source="live_position_book.verify",
+                    asset_type="CONDITIONAL",
+                    token_id=token_id,
+                    payload=payload,
+                    normalized_balance=available_shares,
+                    local_balance=local_shares,
+                    note=f"position_key={row.get('position_key')}",
+                )
             except Exception as exc:
                 logger.debug("Conditional balance verification failed for %s: %s", token_id[:16], exc)
                 verified_rows.append(row)
                 continue
 
+            position_key = str(row.get("position_key") or f"{token_id}|{row.get('condition_id') or ''}|{row.get('outcome_side') or ''}")
             if available_shares is not None and available_shares <= 1e-9: # BUG FIX 1
                 mutated = True
                 logger.warning(
                     "Closing stale local live position for %s because exchange conditional balance is zero.",
                     token_id,
                 )
-                # Persist external/manual close as synthetic SELL fill so future rebuilds
-                # do not resurrect stale shares from historical BUY fills.
-                self._insert_external_sync_sell_fill(
+                fill_id = None
+                if not self._has_recent_external_sync(
                     cursor,
-                    token_id=token_id,
-                    condition_id=row.get("condition_id"),
-                    outcome_side=row.get("outcome_side"),
-                    price=float(row.get("avg_entry_price") or 0.0),
-                    shares=local_shares,
-                    now=now,
-                )
+                    position_key=position_key,
+                    sync_type="full_close",
+                    local_shares_before=local_shares,
+                    exchange_shares=0.0,
+                    delta_shares=local_shares,
+                ):
+                    # Persist external/manual close as synthetic SELL fill so future rebuilds
+                    # do not resurrect stale shares from historical BUY fills.
+                    fill_id = self._insert_external_sync_sell_fill(
+                        cursor,
+                        token_id=token_id,
+                        condition_id=row.get("condition_id"),
+                        outcome_side=row.get("outcome_side"),
+                        price=float(row.get("avg_entry_price") or 0.0),
+                        shares=local_shares,
+                        now=now,
+                    )
+                    self._record_external_sync_event(
+                        cursor,
+                        position_key=position_key,
+                        token_id=token_id,
+                        condition_id=row.get("condition_id"),
+                        outcome_side=row.get("outcome_side"),
+                        sync_type="full_close",
+                        local_shares_before=local_shares,
+                        exchange_shares=0.0,
+                        delta_shares=local_shares,
+                        avg_entry_price=row.get("avg_entry_price"),
+                        fill_id=fill_id,
+                        observed_at=now,
+                    )
+                else:
+                    logger.info(
+                        "Skipping duplicate external full-close sync for %s (local=%.6f exchange=0).",
+                        token_id,
+                        local_shares,
+                    )
                 
                 cursor.execute(
                     "UPDATE live_positions SET shares = 0, status = 'CLOSED', updated_at = ? WHERE position_key = ?",
@@ -234,15 +435,45 @@ class LivePositionBook:
                         float(available_shares or 0.0),
                         delta_shares,
                     )
-                    self._insert_external_sync_sell_fill(
+                    if not self._has_recent_external_sync(
                         cursor,
-                        token_id=token_id,
-                        condition_id=row.get("condition_id"),
-                        outcome_side=row.get("outcome_side"),
-                        price=float(row.get("avg_entry_price") or 0.0),
-                        shares=delta_shares,
-                        now=now,
-                    )
+                        position_key=position_key,
+                        sync_type="partial_close",
+                        local_shares_before=local_shares,
+                        exchange_shares=available_shares,
+                        delta_shares=delta_shares,
+                    ):
+                        fill_id = self._insert_external_sync_sell_fill(
+                            cursor,
+                            token_id=token_id,
+                            condition_id=row.get("condition_id"),
+                            outcome_side=row.get("outcome_side"),
+                            price=float(row.get("avg_entry_price") or 0.0),
+                            shares=delta_shares,
+                            now=now,
+                        )
+                        self._record_external_sync_event(
+                            cursor,
+                            position_key=position_key,
+                            token_id=token_id,
+                            condition_id=row.get("condition_id"),
+                            outcome_side=row.get("outcome_side"),
+                            sync_type="partial_close",
+                            local_shares_before=local_shares,
+                            exchange_shares=available_shares,
+                            delta_shares=delta_shares,
+                            avg_entry_price=row.get("avg_entry_price"),
+                            fill_id=fill_id,
+                            observed_at=now,
+                        )
+                    else:
+                        logger.info(
+                            "Skipping duplicate external partial-close sync for %s (local=%.6f exchange=%.6f delta=%.6f).",
+                            token_id,
+                            local_shares,
+                            float(available_shares or 0.0),
+                            delta_shares,
+                        )
                 row["shares"] = available_shares
                 new_status = "OPEN"
                 try:
