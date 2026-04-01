@@ -40,6 +40,16 @@ class TradeFeedbackLearner:
         except Exception:
             return pd.DataFrame()
 
+    def _safe_json_load(self, value, default=None):
+        if value in [None, ""]:
+            return {} if default is None else default
+        if isinstance(value, dict):
+            return value
+        try:
+            return json.loads(value)
+        except Exception:
+            return {} if default is None else default
+
     def _safe_iso(self, value):
         try:
             ts = pd.to_datetime(value, utc=True, errors="coerce")
@@ -95,6 +105,145 @@ class TradeFeedbackLearner:
             (token_id, condition_id, outcome_side),
         )
         return entry_ctx, model_ctx
+
+    def _grade_trade(self, realized_pnl: float, roi: float):
+        if realized_pnl > 0 and roi >= 0.06:
+            return "A"
+        if realized_pnl > 0:
+            return "B"
+        if abs(realized_pnl) < 1e-9:
+            return "C"
+        if roi > -0.03:
+            return "D"
+        return "F"
+
+    def _extract_takeaways(self, *, realized_pnl, roi, close_reason, confidence_at_entry, holding_minutes, entry_candidate):
+        tags = []
+        strengths = []
+        weaknesses = []
+        adjustments = []
+
+        p_tp = self._safe_float(entry_candidate.get("p_tp_before_sl"), 0.0)
+        expected_return = self._safe_float(entry_candidate.get("expected_return"), 0.0)
+        edge_score = self._safe_float(entry_candidate.get("edge_score"), 0.0)
+
+        if realized_pnl > 0:
+            tags.append("profitable")
+            strengths.append("The trade finished positive and validated at least part of the entry thesis.")
+        elif realized_pnl < 0:
+            tags.append("loss")
+            weaknesses.append("The trade closed at a loss, so the original thesis did not translate into profitable execution.")
+        else:
+            tags.append("flat")
+            adjustments.append("This was effectively flat. Capital may have been tied up without enough reward.")
+
+        if confidence_at_entry >= 0.7 and realized_pnl < 0:
+            tags.append("overconfidence")
+            weaknesses.append("Entry confidence was high, but the outcome was negative. This is a sign the model was overconfident here.")
+            adjustments.append("Down-weight similar high-confidence setups unless recent win rate improves.")
+        elif confidence_at_entry <= 0.5 and realized_pnl > 0:
+            tags.append("underconfidence")
+            strengths.append("The setup worked despite modest confidence, which suggests similar signals may deserve more respect.")
+
+        if close_reason == "stop_loss":
+            tags.append("stop_loss_hit")
+            weaknesses.append("The position moved against the thesis quickly enough to trigger the stop-loss.")
+            adjustments.append("Be stricter on similar entries with weak edge or late timing.")
+        elif close_reason in {"take_profit_roi", "take_profit_price_move", "take_profit_model_target"}:
+            tags.append("take_profit")
+            strengths.append("The bot captured gains using its take-profit logic instead of letting the trade drift.")
+        elif close_reason == "trailing_stop":
+            tags.append("trailing_stop")
+            strengths.append("The trailing stop protected gains after the trade moved in favor.")
+        elif close_reason == "time_stop":
+            tags.append("time_stop")
+            weaknesses.append("The thesis did not resolve fast enough, so capital stayed tied up until the time stop.")
+            adjustments.append("Prefer faster-resolving setups when the book is already crowded.")
+        elif close_reason == "rl_exit":
+            tags.append("rl_exit")
+            adjustments.append("Review whether the RL exit arrived early enough or left too much on the table.")
+
+        if holding_minutes is not None:
+            if holding_minutes <= 10 and realized_pnl < 0:
+                tags.append("fast_invalidation")
+                weaknesses.append("The trade invalidated quickly, which usually points to poor timing or stale entry context.")
+            elif holding_minutes >= 90 and realized_pnl <= 0:
+                tags.append("capital_drag")
+                weaknesses.append("The trade consumed time and capital without producing enough return.")
+
+        if p_tp >= 0.6 and expected_return > 0 and realized_pnl < 0:
+            tags.append("prediction_miss")
+            weaknesses.append("The pre-trade model metrics looked attractive, but the realized outcome missed that prediction.")
+            adjustments.append("Penalize similar setups until feedback improves.")
+        elif p_tp >= 0.6 and expected_return > 0 and realized_pnl > 0:
+            tags.append("prediction_match")
+            strengths.append("The realized outcome matched the positive pre-trade model signal.")
+
+        if edge_score <= 0 and realized_pnl <= 0:
+            tags.append("weak_edge_confirmed")
+            adjustments.append("Continue blocking or shrinking weak-edge setups; the result confirmed the caution.")
+
+        verdict = "The trade aligned well with the model thesis."
+        if realized_pnl < 0:
+            verdict = "The trade did not validate the entry thesis and should count as negative feedback for similar setups."
+        elif abs(realized_pnl) < 1e-9:
+            verdict = "The trade was mostly neutral and offers limited signal beyond opportunity-cost feedback."
+
+        return {
+            "tags": tags,
+            "strengths": strengths,
+            "weaknesses": weaknesses,
+            "adjustments": adjustments,
+            "verdict": verdict,
+        }
+
+    def _build_markdown_report(self, payload: dict):
+        strengths = payload.get("strengths", []) or []
+        weaknesses = payload.get("weaknesses", []) or []
+        adjustments = payload.get("adjustments", []) or []
+        entry_details = payload.get("entry_details", {}) or {}
+
+        def _lines(items):
+            if not items:
+                return "- None"
+            return "\n".join(f"- {item}" for item in items)
+
+        return "\n".join(
+            [
+                f"# Trade Feedback Report: {payload.get('market')}",
+                "",
+                f"- Grade: `{payload.get('grade')}`",
+                f"- Outcome: `{payload.get('outcome_class')}`",
+                f"- Close reason: `{payload.get('close_reason')}`",
+                f"- Realized PnL: `{payload.get('realized_pnl')}`",
+                f"- ROI: `{payload.get('roi')}`",
+                f"- Holding minutes: `{payload.get('holding_minutes')}`",
+                f"- Entry confidence: `{payload.get('confidence_at_entry')}`",
+                f"- Signal label: `{payload.get('signal_label')}`",
+                f"- Entry model action: `{payload.get('entry_model_action')}`",
+                f"- Predicted p_tp: `{payload.get('entry_p_tp_before_sl')}`",
+                f"- Predicted expected return: `{payload.get('entry_expected_return')}`",
+                f"- Predicted edge score: `{payload.get('entry_edge_score')}`",
+                "",
+                "## Verdict",
+                payload.get("verdict", ""),
+                "",
+                "## Strengths",
+                _lines(strengths),
+                "",
+                "## Weaknesses",
+                _lines(weaknesses),
+                "",
+                "## Adjustments",
+                _lines(adjustments),
+                "",
+                "## Tags",
+                ", ".join(payload.get("learning_tags", []) or []) or "none",
+                "",
+                "## Entry Details",
+                json.dumps(entry_details, indent=2, default=str) if entry_details else "{}",
+            ]
+        )
 
     def _compute_feedback_factors(self, group: pd.DataFrame):
         count = len(group.index)
@@ -245,6 +394,15 @@ class TradeFeedbackLearner:
         if not closed_trades:
             return 0
 
+        existing_reports_df = self._safe_read(self.report_csv)
+        existing_report_ids = set()
+        if not existing_reports_df.empty and "report_id" in existing_reports_df.columns:
+            existing_report_ids = {
+                str(report_id)
+                for report_id in existing_reports_df["report_id"].dropna().astype(str).tolist()
+                if str(report_id).strip()
+            }
+
         report_rows = []
         processed = 0
         for trade in closed_trades:
@@ -275,6 +433,28 @@ class TradeFeedbackLearner:
 
             candidate_ctx, model_ctx = self._lookup_entry_context(trade)
             report_id = self._trade_report_id(trade)
+            if report_id in existing_report_ids:
+                continue
+
+            entry_details = self._safe_json_load(candidate_ctx.get("details_json"), {})
+            confidence_at_entry = self._safe_float(
+                getattr(trade, "confidence_at_entry", candidate_ctx.get("confidence", 0.0)),
+                0.0,
+            )
+            signal_label = (
+                getattr(trade, "signal_label", None)
+                or candidate_ctx.get("model_action")
+                or model_ctx.get("action")
+            )
+            grade = self._grade_trade(realized_pnl, roi)
+            takeaways = self._extract_takeaways(
+                realized_pnl=realized_pnl,
+                roi=roi,
+                close_reason=getattr(trade, "close_reason", None),
+                confidence_at_entry=confidence_at_entry,
+                holding_minutes=holding_minutes,
+                entry_candidate=candidate_ctx,
+            )
             report_payload = {
                 "report_id": report_id,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -282,8 +462,8 @@ class TradeFeedbackLearner:
                 "token_id": getattr(trade, "token_id", None),
                 "condition_id": getattr(trade, "condition_id", None),
                 "outcome_side": getattr(trade, "outcome_side", None),
-                "signal_label": getattr(trade, "signal_label", None),
-                "confidence_at_entry": self._safe_float(getattr(trade, "confidence_at_entry", 0.0), 0.0),
+                "signal_label": signal_label,
+                "confidence_at_entry": confidence_at_entry,
                 "entry_price": entry_price,
                 "exit_price": exit_price,
                 "size_usdc": size_usdc,
@@ -295,16 +475,37 @@ class TradeFeedbackLearner:
                 "realized_pnl": round(realized_pnl, 6),
                 "roi": round(roi, 6),
                 "outcome_class": outcome_class,
+                "grade": grade,
                 "entry_candidate": candidate_ctx,
+                "entry_details": entry_details,
                 "latest_model_decision": model_ctx,
+                "entry_model_action": candidate_ctx.get("model_action"),
+                "entry_market_slug": candidate_ctx.get("market_slug"),
+                "entry_trader_wallet": candidate_ctx.get("trader_wallet"),
+                "entry_p_tp_before_sl": self._safe_float(candidate_ctx.get("p_tp_before_sl"), 0.0),
+                "entry_expected_return": self._safe_float(candidate_ctx.get("expected_return"), 0.0),
+                "entry_edge_score": self._safe_float(candidate_ctx.get("edge_score"), 0.0),
+                "entry_confidence": self._safe_float(candidate_ctx.get("confidence"), confidence_at_entry),
+                "latest_model_action": model_ctx.get("action"),
+                "latest_model_score": self._safe_float(model_ctx.get("score"), 0.0),
                 "prediction_alignment": "correct" if realized_pnl > 0 else "incorrect" if realized_pnl < 0 else "flat",
+                "learning_tags": takeaways.get("tags", []),
+                "strengths": takeaways.get("strengths", []),
+                "weaknesses": takeaways.get("weaknesses", []),
+                "adjustments": takeaways.get("adjustments", []),
+                "verdict": takeaways.get("verdict", ""),
             }
 
             report_file = self.reports_dir / f"{report_id}.json"
+            markdown_file = self.reports_dir / f"{report_id}.md"
             try:
                 report_file.write_text(json.dumps(report_payload, indent=2, default=str), encoding="utf-8")
             except Exception as exc:
                 logging.warning("Failed to write trade feedback report %s: %s", report_id, exc)
+            try:
+                markdown_file.write_text(self._build_markdown_report(report_payload), encoding="utf-8")
+            except Exception as exc:
+                logging.warning("Failed to write markdown trade feedback report %s: %s", report_id, exc)
 
             report_rows.append(
                 {
@@ -327,6 +528,7 @@ class TradeFeedbackLearner:
                     "realized_pnl": report_payload["realized_pnl"],
                     "roi": report_payload["roi"],
                     "outcome_class": report_payload["outcome_class"],
+                    "grade": report_payload["grade"],
                     "prediction_alignment": report_payload["prediction_alignment"],
                     "entry_model_action": candidate_ctx.get("model_action"),
                     "entry_p_tp_before_sl": self._safe_float(candidate_ctx.get("p_tp_before_sl"), 0.0),
@@ -335,8 +537,14 @@ class TradeFeedbackLearner:
                     "entry_confidence": self._safe_float(candidate_ctx.get("confidence"), report_payload["confidence_at_entry"]),
                     "latest_model_action": model_ctx.get("action"),
                     "latest_model_score": self._safe_float(model_ctx.get("score"), 0.0),
+                    "verdict": report_payload["verdict"],
+                    "learning_tags": "|".join(report_payload["learning_tags"]),
+                    "strength_count": len(report_payload["strengths"]),
+                    "weakness_count": len(report_payload["weaknesses"]),
+                    "adjustment_count": len(report_payload["adjustments"]),
                 }
             )
+            existing_report_ids.add(report_id)
             processed += 1
 
         if report_rows:
