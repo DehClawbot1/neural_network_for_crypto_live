@@ -306,7 +306,23 @@ def log_ranked_signal(signal_row):
     append_csv_record(SIGNALS_FILE, record)
 
 
-def choose_action(signal_row, entry_rule: EntryRuleLayer, entry_brain=None, legacy_brain=None, decision_meta=None):
+def choose_action(
+    signal_row,
+    entry_rule: EntryRuleLayer,
+    entry_brain=None,
+    legacy_brain=None,
+    decision_meta=None,
+    precomputed_rule_eval=None,
+    precomputed_rule_allows=None,
+):
+    """Choose a trading action for the given signal row.
+
+    Args:
+        precomputed_rule_eval:   Pre-evaluated result from entry_rule.evaluate().
+                                 If supplied, the function skips a second evaluation
+                                 (eliminates the double-call bug).
+        precomputed_rule_allows: Corresponding bool extracted from precomputed_rule_eval.
+    """
     def _is_truthy(value):
         if isinstance(value, bool):
             return value
@@ -341,8 +357,22 @@ def choose_action(signal_row, entry_rule: EntryRuleLayer, entry_brain=None, lega
             pass
 
     # Apply entry rule as veto even when RL says enter.
-    rule_eval = entry_rule.evaluate(signal_row) if hasattr(entry_rule, "evaluate") else None
-    rule_allows_entry = bool(rule_eval["allow"]) if isinstance(rule_eval, dict) else entry_rule.should_enter(signal_row)
+    # FIX BUG#1: use caller-supplied precomputed evaluation to avoid a second
+    # entry_rule.evaluate() call (which could diverge from the outer-loop copy).
+    if precomputed_rule_eval is not None:
+        rule_eval = precomputed_rule_eval
+        rule_allows_entry = (
+            precomputed_rule_allows
+            if precomputed_rule_allows is not None
+            else (
+                bool(rule_eval["allow"]) if isinstance(rule_eval, dict)
+                else entry_rule.should_enter(signal_row)
+            )
+        )
+    else:
+        rule_eval = entry_rule.evaluate(signal_row) if hasattr(entry_rule, "evaluate") else None
+        rule_allows_entry = bool(rule_eval["allow"]) if isinstance(rule_eval, dict) else entry_rule.should_enter(signal_row)
+
     if action_val in (1, 2) and not rule_allows_entry:
         decision_meta["rule_vetoed_rl_action"] = True
         decision_meta["vetoed_action"] = action_val
@@ -1412,13 +1442,20 @@ def main_loop():
                 final_size_usdc: float | None = None,
                 available_balance: float | None = None,
                 order_id: str | None = None,
+                precomputed_calibrated_edge: float | None = None,
                 **extra,
             ):
                 nonlocal session_failed_entries, session_kill_switch_active, session_kill_switch_reason
 
                 reject_reason_norm = str(reject_reason or "").strip().lower() or None
                 reject_category = _reject_category(reject_reason_norm) if reject_reason_norm else None
-                calibrated_edge = _compute_calibrated_edge(signal_row)
+                # FIX BUG#2: use caller-supplied calibrated_edge when available to
+                # avoid a redundant _compute_calibrated_edge() call.
+                calibrated_edge = (
+                    precomputed_calibrated_edge
+                    if precomputed_calibrated_edge is not None
+                    else _compute_calibrated_edge(signal_row)
+                )
                 payload = {
                     "cycle_id": cycle_id,
                     "candidate_id": f"{cycle_id}:{len(_candidate_decision_rows) + 1}",
@@ -1637,6 +1674,8 @@ def main_loop():
                     )
                     continue
 
+                # FIX BUG#1: evaluate rule once here and pass the result into
+                # choose_action so it does NOT call evaluate() a second time.
                 rule_eval = entry_rule.evaluate(signal_row) if hasattr(entry_rule, "evaluate") else None
                 rule_allows_entry = bool(rule_eval["allow"]) if isinstance(rule_eval, dict) else entry_rule.should_enter(signal_row)
                 _action_meta = {}
@@ -1646,9 +1685,42 @@ def main_loop():
                     entry_brain=entry_brain,
                     legacy_brain=legacy_brain,
                     decision_meta=_action_meta,
+                    precomputed_rule_eval=rule_eval,
+                    precomputed_rule_allows=rule_allows_entry,
                 )
                 if action_val not in [0, 1, 2]:
                     action_val = 0
+
+                # FIX BUG#2 + BUG#4: compute calibrated_edge once here so it can
+                # be reused by both the skip log and _record_candidate_decision
+                # without a second call.  Also do a cheap opportunistic balance
+                # fetch so that IGNORE/veto skip records include available_balance.
+                _pre_calibrated_edge = _compute_calibrated_edge(signal_row)
+                _pre_available_bal: float | None = None
+                if action_val == 0:
+                    # Balance fetch for observability on IGNORE/veto paths only;
+                    # the real fetch (with paper fallbacks) still happens in the
+                    # action_val != 0 block so sizing logic is unchanged.
+                    try:
+                        if order_manager is not None:
+                            _pre_available_bal, _ = order_manager._get_available_balance(
+                                asset_type="COLLATERAL",
+                                use_onchain_fallback=False,
+                            )
+                        elif execution_client is not None and trading_mode != "live":
+                            _pre_available_bal = execution_client.get_available_balance(asset_type="COLLATERAL")
+                    except Exception:
+                        pass
+                    if (_pre_available_bal is None or _pre_available_bal <= 0) and trading_mode == "paper":
+                        try:
+                            _sim_bal = float(os.getenv("SIMULATED_STARTING_BALANCE", "1000"))
+                            _open_cost = sum(
+                                float(getattr(t, "size_usdc", 0) or 0)
+                                for t in trade_manager.get_open_positions()
+                            )
+                            _pre_available_bal = max(0.0, _sim_bal - _open_cost)
+                        except Exception:
+                            pass
 
                 action_map = {0: "IGNORE", 1: "SMALL_BUY", 2: "LARGE_BUY"}
                 try:
@@ -1670,7 +1742,8 @@ def main_loop():
                     logging.warning("Model decision logging failed for %s: %s", token_id, exc)
 
                 if action_val != 0:
-                    calibrated_edge = _compute_calibrated_edge(signal_row)
+                    # FIX BUG#2: reuse pre-computed calibrated_edge (no second call).
+                    calibrated_edge = _pre_calibrated_edge
                     calibrated_required = max(calibration_min_edge, calibration_baseline + calibration_edge_margin)
                     if enable_calibration_gate and calibrated_edge < calibrated_required:
                         _log_candidate_skip(
@@ -1923,6 +1996,8 @@ def main_loop():
                                 available_balance=_available_bal,
                             )
                 else:
+                    # FIX BUG#4: pass available_balance and precomputed_calibrated_edge
+                    # so IGNORE/veto skip records are no longer null for those fields.
                     vetoed_action = _action_meta.get("vetoed_action")
                     if _action_meta.get("rule_vetoed_rl_action"):
                         ignore_reason = "rule_veto"
@@ -1935,6 +2010,8 @@ def main_loop():
                         ignore_reason,
                         gate="model_policy",
                         model_action=log_model_action,
+                        available_balance=round(_pre_available_bal, 6) if _pre_available_bal is not None else None,
+                        precomputed_calibrated_edge=_pre_calibrated_edge,
                         rule_allows_entry=rule_allows_entry,
                         rule_score=rule_eval.get("score") if isinstance(rule_eval, dict) else None,
                         rule_score_threshold=rule_eval.get("score_threshold") if isinstance(rule_eval, dict) else None,
