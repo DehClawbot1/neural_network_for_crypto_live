@@ -59,6 +59,8 @@ class PositionTelemetry:
             token_id = str(row.get("token_id", "") or "").strip()
             entry_price = _safe_float(row.get("entry_price", row.get("avg_entry_price", 0.0)), 0.0)
             current_price = _safe_float(row.get("current_price", entry_price), entry_price)
+            if current_price <= 0 and entry_price > 0:
+                current_price = entry_price
             best_bid = _safe_float(row.get("best_bid", 0.0), 0.0)
             best_ask = _safe_float(row.get("best_ask", 0.0), 0.0)
             spread = _safe_float(row.get("spread", 0.0), 0.0)
@@ -181,7 +183,7 @@ class PositionTelemetry:
         if df.empty:
             return df
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
-        cutoff = pd.Timestamp.utcnow().tz_localize("UTC") - pd.Timedelta(hours=max(1, int(hours)))
+        cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=max(1, int(hours)))
         df = df[df["timestamp"] >= cutoff].copy()
         return df.sort_values(["position_key", "timestamp"])
 
@@ -236,7 +238,7 @@ class PositionTelemetry:
                 runup_from_entry >= runup_activation
                 and drawdown_from_peak >= reversal_drawdown
                 and recent_return_3 <= reversal_recent_drop
-                and slope_norm < 0
+                and (recent_return_1 < 0 or slope_norm < 0)
                 and previous_window_return > 0
             )
             panic_exit_signal = bool(recent_return_1 <= panic_drop_1 or recent_return_3 <= panic_drop_3)

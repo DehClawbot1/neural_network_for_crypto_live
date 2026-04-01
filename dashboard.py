@@ -20,6 +20,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 # ── FIX 1: Use conditional dotenv loading ──
@@ -73,6 +74,8 @@ FILES = {
     "distribution": LOGS / "market_distribution.csv",
     "candidate_decisions": LOGS / "candidate_decisions.csv",
     "candidate_cycle_stats": LOGS / "candidate_cycle_stats.csv",
+    "position_snapshots": LOGS / "position_snapshots.csv",
+    "portfolio_curve": LOGS / "portfolio_equity_curve.csv",
 }
 
 st.set_page_config(page_title="NNC Trading Terminal", page_icon="N", layout="wide", initial_sidebar_state="expanded")
@@ -884,23 +887,193 @@ def render_pnl_summary(positions_df, closed_df):
     c6.metric("Avg Return", ar)
 
 
-def render_positions(positions_df, closed_df):
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown('<div class="sec-title">Open Positions</div>', unsafe_allow_html=True)
-        if positions_df.empty:
-            st.info("No open positions.")
+def _position_key_from_row(row):
+    getter = row.get if hasattr(row, "get") else lambda key, default=None: default
+    position_key = str(getter("position_key", "") or "").strip()
+    if position_key:
+        return position_key
+    token_id = str(getter("token_id", "") or "").strip()
+    condition_id = str(getter("condition_id", "") or "").strip()
+    outcome_side = str(getter("outcome_side", "") or "").strip()
+    if token_id or condition_id:
+        return f"{token_id}|{condition_id}|{outcome_side}"
+    position_id = str(getter("position_id", "") or "").strip()
+    if position_id:
+        return position_id
+    market = str(getter("market", "") or getter("market_title", "") or "").strip()
+    return f"{market}|{outcome_side}"
+
+
+def _prepare_position_history(position_history_df):
+    if position_history_df is None or position_history_df.empty:
+        return pd.DataFrame()
+    df = normalize_dataframe_columns(position_history_df.copy())
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+        df = df[df["timestamp"].notna()].copy()
+    if "position_key" not in df.columns:
+        df["position_key"] = df.apply(_position_key_from_row, axis=1)
+    if "mark_price" not in df.columns and "current_price" in df.columns:
+        df["mark_price"] = df["current_price"]
+    for col in ["mark_price", "current_price", "entry_price", "unrealized_pnl", "market_value", "shares", "drawdown_from_peak", "recent_return_3", "runup_from_entry"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df.sort_values(["position_key", "timestamp"])
+
+
+def _prepare_portfolio_curve(portfolio_curve_df, position_history_df):
+    if portfolio_curve_df is not None and not portfolio_curve_df.empty:
+        df = normalize_dataframe_columns(portfolio_curve_df.copy())
+        if "timestamp" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+            df = df[df["timestamp"].notna()].copy()
+        for col in ["unrealized_pnl", "realized_pnl", "total_pnl", "gross_market_value", "entry_notional", "open_positions"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df.sort_values("timestamp")
+
+    if position_history_df is None or position_history_df.empty or "timestamp" not in position_history_df.columns:
+        return pd.DataFrame()
+    agg = (
+        position_history_df.groupby("timestamp", as_index=False)
+        .agg(
+            open_positions=("position_key", "nunique"),
+            gross_market_value=("market_value", "sum"),
+            unrealized_pnl=("unrealized_pnl", "sum"),
+        )
+        .sort_values("timestamp")
+    )
+    agg["realized_pnl"] = 0.0
+    agg["entry_notional"] = np.nan
+    agg["total_pnl"] = agg["unrealized_pnl"]
+    return agg
+
+
+def render_positions(positions_df, closed_df, position_history_df=None, portfolio_curve_df=None):
+    st.markdown('<div class="sec-title">Open Position Workstation</div>', unsafe_allow_html=True)
+    if positions_df is None or positions_df.empty:
+        st.info("No open positions.")
+    else:
+        pos = normalize_dataframe_columns(positions_df.copy())
+        pos["position_key"] = pos.apply(_position_key_from_row, axis=1)
+        for col in ["entry_price", "current_price", "mark_price", "shares", "market_value", "unrealized_pnl", "confidence", "drawdown_from_peak", "recent_return_3", "runup_from_entry"]:
+            if col in pos.columns:
+                pos[col] = pd.to_numeric(pos[col], errors="coerce")
+
+        hist = _prepare_position_history(position_history_df)
+        curve = _prepare_portfolio_curve(portfolio_curve_df, hist)
+
+        if not curve.empty:
+            fig = make_subplots(specs=[[{"secondary_y": True}]])
+            fig.add_trace(
+                go.Scatter(
+                    x=curve["timestamp"],
+                    y=curve.get("unrealized_pnl", pd.Series(index=curve.index, dtype=float)),
+                    name="Unrealized PnL",
+                    mode="lines",
+                    line=dict(color="#22c55e", width=2.5),
+                    fill="tozeroy",
+                    fillcolor="rgba(34,197,94,0.12)",
+                ),
+                secondary_y=False,
+            )
+            if "gross_market_value" in curve.columns:
+                fig.add_trace(
+                    go.Scatter(
+                        x=curve["timestamp"],
+                        y=curve["gross_market_value"],
+                        name="Gross Market Value",
+                        mode="lines",
+                        line=dict(color="#06b6d4", width=1.8),
+                    ),
+                    secondary_y=True,
+                )
+            fig.update_layout(
+                title="Live Equity Curve",
+                margin=dict(l=20, r=20, t=48, b=20),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+            )
+            fig.update_yaxes(title_text="Unrealized PnL", secondary_y=False)
+            fig.update_yaxes(title_text="Market Value", secondary_y=True)
+            st.plotly_chart(sfig(fig, 320), use_container_width=True)
         else:
-            cs = [c for c in ["market", "outcome_side", "entry_price", "current_price", "shares", "market_value", "unrealized_pnl", "confidence", "status"] if c in positions_df.columns]
-            st.dataframe(ensure_safe(positions_df[cs].tail(20) if cs else positions_df.tail(20)), use_container_width=True, hide_index=True)
-    with c2:
-        st.markdown('<div class="sec-title">Closed Positions</div>', unsafe_allow_html=True)
-        if closed_df.empty:
-            st.info("No closed positions.")
-        else:
-            pc = next((c for c in ["net_realized_pnl", "realized_pnl", "net_pnl"] if c in closed_df.columns), None)
-            cs = [c for c in ["market", "outcome_side", "entry_price", "exit_price", pc, "close_reason", "closed_at"] if c and c in closed_df.columns]
-            st.dataframe(ensure_safe(closed_df[cs].tail(20) if cs else closed_df.tail(20)), use_container_width=True, hide_index=True)
+            st.caption("Live equity curve will appear after position telemetry snapshots accumulate.")
+
+        card_cols = st.columns(2 if len(pos) > 1 else 1)
+        for idx, (_, row) in enumerate(pos.sort_values("unrealized_pnl", ascending=False).iterrows()):
+            market_name = str(row.get("market", row.get("market_title", row.get("token_id", "Unknown"))) or "Unknown")
+            side = str(row.get("outcome_side", "N/A") or "N/A")
+            position_key = str(row.get("position_key", "") or "")
+            row_hist = hist[hist["position_key"].astype(str) == position_key].copy() if not hist.empty else pd.DataFrame()
+            with card_cols[idx % len(card_cols)]:
+                st.markdown(f"**{market_name}**")
+                st.caption(f"{side} | key `{position_key[:24]}`")
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Entry", fmt_num(row.get("entry_price"), 4))
+                m2.metric("Mark", fmt_num(row.get("mark_price", row.get("current_price")), 4))
+                m3.metric("Unrealized", fmt_money(row.get("unrealized_pnl")))
+                m4.metric("Shares", fmt_num(row.get("shares"), 4))
+                s1, s2, s3 = st.columns(3)
+                s1.metric("Run-Up", fmt_pct(row.get("runup_from_entry")))
+                s2.metric("Drawdown", fmt_pct(row.get("drawdown_from_peak")))
+                s3.metric("3-Tick Return", fmt_pct(row.get("recent_return_3")))
+                st.caption(f"Trajectory: {row.get('trajectory_state', 'N/A')} | Mark source: {row.get('mark_source', 'N/A')}")
+
+                if not row_hist.empty and "timestamp" in row_hist.columns:
+                    fig = make_subplots(specs=[[{"secondary_y": True}]])
+                    fig.add_trace(
+                        go.Scatter(
+                            x=row_hist["timestamp"],
+                            y=row_hist["mark_price"],
+                            mode="lines",
+                            name="Price",
+                            line=dict(color="#3b82f6", width=2.3),
+                        ),
+                        secondary_y=False,
+                    )
+                    entry_price = to_float(row.get("entry_price"), default=None)
+                    if entry_price is not None:
+                        fig.add_hline(y=entry_price, line_dash="dash", line_color="#f59e0b", opacity=0.9)
+                    fig.add_trace(
+                        go.Scatter(
+                            x=row_hist["timestamp"],
+                            y=row_hist["unrealized_pnl"],
+                            mode="lines",
+                            name="Unrealized PnL",
+                            line=dict(color="#22c55e", width=1.8),
+                            fill="tozeroy",
+                            fillcolor="rgba(34,197,94,0.10)",
+                        ),
+                        secondary_y=True,
+                    )
+                    fig.update_layout(
+                        title=f"{market_name} Live Path",
+                        margin=dict(l=18, r=18, t=44, b=18),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+                    )
+                    fig.update_yaxes(title_text="Price", secondary_y=False)
+                    fig.update_yaxes(title_text="Unrealized PnL", secondary_y=True)
+                    st.plotly_chart(sfig(fig, 300), use_container_width=True)
+                else:
+                    st.info("Waiting for live trajectory snapshots for this position.")
+
+        with st.expander("Position Blotter"):
+            cs = [
+                c for c in [
+                    "market", "outcome_side", "entry_price", "mark_price", "current_price", "shares",
+                    "market_value", "unrealized_pnl", "trajectory_state", "drawdown_from_peak",
+                    "recent_return_3", "confidence", "status"
+                ] if c in pos.columns
+            ]
+            st.dataframe(ensure_safe(pos[cs] if cs else pos), use_container_width=True, hide_index=True)
+
+    st.markdown('<div class="sec-title">Closed Positions</div>', unsafe_allow_html=True)
+    if closed_df.empty:
+        st.info("No closed positions.")
+    else:
+        pc = next((c for c in ["net_realized_pnl", "realized_pnl", "net_pnl"] if c in closed_df.columns), None)
+        cs = [c for c in ["market", "outcome_side", "entry_price", "exit_price", pc, "close_reason", "closed_at"] if c and c in closed_df.columns]
+        st.dataframe(ensure_safe(closed_df[cs].tail(20) if cs else closed_df.tail(20)), use_container_width=True, hide_index=True)
 
 
 def render_best_trades(closed_df, replay_df):
@@ -1365,6 +1538,8 @@ def main():
     wbt = load("wallet_backtest")
     rgd = load("registry")
     shd = load("shadow")
+    phd = load("position_snapshots")
+    pcd = load("portfolio_curve")
 
     st.sidebar.markdown("**Dashboard Controls**")
     ar = st.sidebar.checkbox("Auto-refresh", False)
@@ -1442,7 +1617,7 @@ def main():
 
     with t3:
         render_pnl_summary(pdf, cdf)
-        render_positions(pdf, cdf)
+        render_positions(pdf, cdf, phd, pcd)
         render_best_trades(cdf, rpd)
         if not edf.empty:
             st.markdown('<div class="sec-title">Episode Log</div>', unsafe_allow_html=True)

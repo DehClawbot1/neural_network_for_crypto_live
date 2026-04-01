@@ -63,6 +63,7 @@ from sentiment_analyzer import SentimentAnalyzer
 from macro_analyzer import MacroAnalyzer
 from onchain_analyzer import OnChainAnalyzer
 from trade_feedback_learner import TradeFeedbackLearner
+from position_telemetry import PositionTelemetry
 try:
     from inference_runtime_guard import (
         reset_cycle as _reset_inference_runtime_guard,
@@ -679,6 +680,7 @@ def main_loop():
     autonomous_monitor = AutonomousMonitor()
     retrainer = Retrainer()
     feedback_learner = TradeFeedbackLearner()
+    position_telemetry = PositionTelemetry()
     previous_markets_df = None
     previous_entry_freeze_active = False
     previous_entry_freeze_reason = None
@@ -1173,6 +1175,8 @@ def main_loop():
     while True:
         try:
             cycle_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+            live_positions_df_for_cycle = pd.DataFrame()
+            trajectory_metrics = {}
             pre_cycle_entry_freeze = False
             pre_cycle_freeze_reason = None
             pre_cycle_freeze_detail = {}
@@ -2312,7 +2316,15 @@ def main_loop():
                 try:
                     live_position_book.rebuild_from_db()
                     reconciled_positions_df = live_position_book.get_enriched_open_positions(scored_df=scored_df)
+                    reconciled_positions_df = position_telemetry.enrich_with_live_marks(
+                        reconciled_positions_df,
+                        orderbook_guard=orderbook_guard,
+                        fallback_price_map=_token_price_map,
+                    )
                     trade_manager.reconcile_live_positions(reconciled_positions_df=reconciled_positions_df)
+                    live_positions_df_for_cycle = live_pnl.enrich_positions(reconciled_positions_df)
+                    position_telemetry.capture_positions(live_positions_df_for_cycle)
+                    trajectory_metrics = position_telemetry.build_trajectory_metrics(live_positions_df_for_cycle)
                 except Exception as exc:
                     logging.warning("Live trade reconciliation failed before management decisions: %s", exc)
             current_open_trades = trade_manager.get_open_positions()
@@ -2366,6 +2378,14 @@ def main_loop():
                         pos_action_val = 3 # HOLD
 
                     pos_action_val = _normalize_position_action(pos_action_val)
+                    trajectory_signal = trajectory_metrics.get(trade_key, {}) if trade_key else {}
+                    pos_dict.update(trajectory_signal)
+                    if pos_action_val == 3 and trajectory_signal.get("panic_exit_signal"):
+                        pos_action_val = 5
+                    elif pos_action_val == 3 and trajectory_signal.get("reversal_exit_signal"):
+                        pos_action_val = 5
+                    elif pos_action_val == 3 and trajectory_signal.get("profit_lock_signal"):
+                        pos_action_val = 4
 
                     pos_action_map = {3: "HOLD", 4: "REDUCE", 5: "EXIT"}
                     action_str = pos_action_map.get(pos_action_val, "HOLD")
@@ -2488,6 +2508,7 @@ def main_loop():
                 datetime.now(timezone.utc),
                 persist_closed=(trading_mode != "live"),
                 predictive_exit_targets=predictive_exit_targets,
+                trajectory_metrics=trajectory_metrics,
             )
             if closed_trades:
                 logging.info("[%s] Processed %s closed trades.", trading_mode.upper(), len(closed_trades))
@@ -2592,7 +2613,30 @@ def main_loop():
             if trading_mode == "live" and live_position_book is not None and live_pnl is not None:
                 live_position_book.rebuild_from_db()
                 open_positions_df_for_status = live_position_book.get_enriched_open_positions(scored_df=scored_df)
+                open_positions_df_for_status = position_telemetry.enrich_with_live_marks(
+                    open_positions_df_for_status,
+                    orderbook_guard=orderbook_guard,
+                    fallback_price_map=_token_price_map if "_token_price_map" in locals() else {},
+                )
                 open_positions_df_for_status = live_pnl.enrich_positions(open_positions_df_for_status)
+                if not open_positions_df_for_status.empty:
+                    try:
+                        position_telemetry.capture_positions(open_positions_df_for_status)
+                        latest_trajectory_metrics = position_telemetry.build_trajectory_metrics(open_positions_df_for_status)
+                        for trade_key, telemetry_row in latest_trajectory_metrics.items():
+                            position_key = telemetry_row.get("position_key")
+                            if not position_key:
+                                continue
+                            mask = open_positions_df_for_status["position_id"].astype(str).eq(str(position_key)) if "position_id" in open_positions_df_for_status.columns else pd.Series(False, index=open_positions_df_for_status.index)
+                            if not mask.any() and "position_key" in open_positions_df_for_status.columns:
+                                mask = open_positions_df_for_status["position_key"].astype(str).eq(str(position_key))
+                            if mask.any():
+                                open_positions_df_for_status.loc[mask, "trajectory_state"] = telemetry_row.get("trajectory_state")
+                                open_positions_df_for_status.loc[mask, "drawdown_from_peak"] = telemetry_row.get("drawdown_from_peak")
+                                open_positions_df_for_status.loc[mask, "recent_return_3"] = telemetry_row.get("recent_return_3")
+                                open_positions_df_for_status.loc[mask, "runup_from_entry"] = telemetry_row.get("runup_from_entry")
+                    except Exception as exc:
+                        logging.warning("Position telemetry capture failed at status stage: %s", exc)
                 pnl_summary = live_pnl.summarize_portfolio(open_positions_df_for_status)
                 autonomous_monitor.write_heartbeat(
                     "trade_manager",
