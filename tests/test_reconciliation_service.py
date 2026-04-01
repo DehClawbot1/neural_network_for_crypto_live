@@ -146,6 +146,35 @@ def test_sync_orders_and_fills_mirrors_remote_fills_to_csv(tmp_path):
     assert fills_df.iloc[0]["fill_source"] == "exchange_sync"
 
 
+def test_sync_orders_and_fills_mirrors_remote_orders_to_csv(tmp_path):
+    client = MagicMock()
+    client.get_open_orders.return_value = [
+        {
+            "id": "order-1",
+            "token_id": "tok-1",
+            "condition_id": "cond-1",
+            "outcome_side": "Yes",
+            "side": "BUY",
+            "price": 0.45,
+            "size": 3,
+            "status": "OPEN",
+            "created_at": "2026-04-01T10:00:00+00:00",
+        }
+    ]
+    client.get_trades.return_value = []
+
+    service = ReconciliationService(execution_client=client, logs_dir=tmp_path)
+    summary = service.sync_orders_and_fills()
+
+    orders_df = pd.read_csv(tmp_path / "live_orders.csv")
+    assert summary["orders"] == 1
+    assert summary["order_csv_rows_added"] == 1
+    assert len(orders_df) == 1
+    assert orders_df.iloc[0]["order_id"] == "order-1"
+    assert orders_df.iloc[0]["condition_id"] == "cond-1"
+    assert orders_df.iloc[0]["order_source"] == "exchange_sync"
+
+
 def test_backfill_live_fills_csv_from_db_is_idempotent(tmp_path):
     service = ReconciliationService(execution_client=MagicMock(), logs_dir=tmp_path)
     service.db.execute(
@@ -162,3 +191,32 @@ def test_backfill_live_fills_csv_from_db_is_idempotent(tmp_path):
     assert len(fills_df) == 1
     assert fills_df.iloc[0]["fill_id"] == "fill-1"
     assert fills_df.iloc[0]["fill_source"] == "db_backfill"
+
+
+def test_backfill_live_orders_csv_updates_existing_row_status(tmp_path):
+    pd.DataFrame(
+        [
+            {
+                "timestamp": "2026-04-01T10:00:00+00:00",
+                "order_id": "order-1",
+                "status": "SUBMITTED",
+                "idempotency_key": "keep-me",
+            }
+        ]
+    ).to_csv(tmp_path / "live_orders.csv", index=False)
+
+    service = ReconciliationService(execution_client=MagicMock(), logs_dir=tmp_path)
+    service.db.execute(
+        "INSERT OR REPLACE INTO orders (order_id, token_id, condition_id, outcome_side, order_side, price, size, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("order-1", "tok-1", "cond-1", "Yes", "BUY", 0.55, 2.0, "FILLED", "2026-04-01T10:00:00+00:00"),
+    )
+
+    first_result = service.backfill_live_orders_csv_from_db(update_existing=True)
+    second_result = service.backfill_live_orders_csv_from_db(update_existing=True)
+
+    orders_df = pd.read_csv(tmp_path / "live_orders.csv")
+    assert first_result["added"] == 0
+    assert first_result["updated"] >= 1
+    assert second_result["added"] == 0
+    assert orders_df.iloc[0]["status"] == "FILLED"
+    assert orders_df.iloc[0]["idempotency_key"] == "keep-me"

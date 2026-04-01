@@ -10,6 +10,34 @@ from db import Database
 
 
 class ReconciliationService:
+    ORDER_CSV_COLUMNS = [
+        "timestamp",
+        "order_id",
+        "idempotency_key",
+        "token_id",
+        "condition_id",
+        "outcome_side",
+        "order_side",
+        "price",
+        "size",
+        "size_usdc",
+        "order_size_shares",
+        "order_type",
+        "post_only",
+        "execution_style",
+        "status",
+        "orderbook_ok",
+        "bid_levels",
+        "ask_levels",
+        "tradable",
+        "quoted_price",
+        "quoted_spread",
+        "updated_at",
+        "fill_price",
+        "fill_size",
+        "created_at",
+        "order_source",
+    ]
     FILL_CSV_COLUMNS = [
         "timestamp",
         "trade_id",
@@ -123,6 +151,139 @@ class ReconciliationService:
                     ids.add(value)
         return ids
 
+    def _extract_order_ids_from_frame(self, frame: pd.DataFrame):
+        ids = set()
+        if frame is None or frame.empty or "order_id" not in frame.columns:
+            return ids
+        for value in frame["order_id"].dropna().astype(str):
+            value = value.strip()
+            if value and value.lower() not in {"nan", "none"}:
+                ids.add(value)
+        return ids
+
+    def _normalize_live_order_csv_row(self, order_row, order_source="exchange_sync"):
+        created_at = order_row.get("created_at") or order_row.get("timestamp") or datetime.now(timezone.utc).isoformat()
+        try:
+            price = float(order_row.get("price") or 0.0)
+        except Exception:
+            price = 0.0
+        try:
+            shares = float(order_row.get("size") or order_row.get("order_size_shares") or 0.0)
+        except Exception:
+            shares = 0.0
+        return {
+            "timestamp": order_row.get("timestamp") or created_at,
+            "order_id": order_row.get("order_id"),
+            "idempotency_key": order_row.get("idempotency_key"),
+            "token_id": order_row.get("token_id"),
+            "condition_id": order_row.get("condition_id"),
+            "outcome_side": order_row.get("outcome_side"),
+            "order_side": order_row.get("order_side"),
+            "price": price,
+            "size": shares,
+            "size_usdc": order_row.get("size_usdc") if order_row.get("size_usdc") is not None else shares * price,
+            "order_size_shares": order_row.get("order_size_shares") if order_row.get("order_size_shares") is not None else shares,
+            "order_type": order_row.get("order_type"),
+            "post_only": order_row.get("post_only"),
+            "execution_style": order_row.get("execution_style"),
+            "status": order_row.get("status"),
+            "orderbook_ok": order_row.get("orderbook_ok"),
+            "bid_levels": order_row.get("bid_levels"),
+            "ask_levels": order_row.get("ask_levels"),
+            "tradable": order_row.get("tradable"),
+            "quoted_price": order_row.get("quoted_price"),
+            "quoted_spread": order_row.get("quoted_spread"),
+            "updated_at": order_row.get("updated_at") or created_at,
+            "fill_price": order_row.get("fill_price"),
+            "fill_size": order_row.get("fill_size"),
+            "created_at": created_at,
+            "order_source": order_row.get("order_source") or order_source,
+        }
+
+    def _merge_live_order_rows(self, order_rows, update_existing=True):
+        path = self.logs_dir / "live_orders.csv"
+        existing = self._safe_read_csv("live_orders.csv")
+        ordered_cols = list(existing.columns)
+        for column in self.ORDER_CSV_COLUMNS:
+            if column not in ordered_cols:
+                ordered_cols.append(column)
+
+        if existing.empty:
+            existing = pd.DataFrame(columns=ordered_cols)
+        else:
+            existing = existing.reindex(columns=ordered_cols)
+
+        if "order_id" not in existing.columns:
+            existing["order_id"] = pd.Series(dtype=str)
+
+        existing_order_ids = self._extract_order_ids_from_frame(existing)
+        appended_rows = []
+        updated_rows = 0
+
+        for raw_row in order_rows:
+            normalized = self._normalize_live_order_csv_row(raw_row, order_source=raw_row.get("order_source") or "exchange_sync")
+            order_id = str(normalized.get("order_id") or "").strip()
+            if not order_id:
+                continue
+            if order_id in existing_order_ids:
+                if update_existing:
+                    mask = existing["order_id"].fillna("").astype(str) == order_id
+                    if mask.any():
+                        for column in ["status", "updated_at", "created_at"]:
+                            if column in existing.columns:
+                                existing[column] = existing[column].astype(object)
+                                existing.loc[mask, column] = normalized.get(column)
+                        if "order_source" in existing.columns:
+                            existing["order_source"] = existing["order_source"].astype(object)
+                            source_mask = mask & (
+                                existing["order_source"].isna()
+                                | existing["order_source"].astype(str).str.strip().isin(["", "nan", "None"])
+                            )
+                            existing.loc[source_mask, "order_source"] = normalized.get("order_source")
+                        for column in ["token_id", "condition_id", "outcome_side", "order_side", "price"]:
+                            if column in existing.columns:
+                                if column != "price":
+                                    existing[column] = existing[column].astype(object)
+                                existing.loc[mask & existing[column].isna(), column] = normalized.get(column)
+                        updated_rows += int(mask.sum())
+                continue
+            appended_rows.append(normalized)
+            existing_order_ids.add(order_id)
+
+        if appended_rows:
+            append_df = pd.DataFrame(appended_rows).reindex(columns=ordered_cols)
+            existing = append_df.copy() if existing.empty else pd.concat([existing, append_df], ignore_index=True)
+
+        if appended_rows or updated_rows:
+            existing.to_csv(path, index=False)
+
+        return {"added": len(appended_rows), "updated": updated_rows}
+
+    def backfill_live_orders_csv_from_db(self, update_existing=True):
+        try:
+            db_rows = self.db.query_all(
+                """
+                SELECT order_id, token_id, condition_id, outcome_side, order_side, price, size, status, created_at
+                FROM orders
+                WHERE order_id IS NOT NULL
+                ORDER BY COALESCE(created_at, ''), order_id
+                """
+            )
+        except Exception:
+            db_rows = []
+
+        order_rows = []
+        for row in db_rows:
+            order_id = str(row.get("order_id") or "").strip()
+            if not order_id:
+                continue
+            order_source = "db_backfill"
+            if order_id.lower().startswith("dust_clear_"):
+                order_source = "dust_clear"
+            order_rows.append(self._normalize_live_order_csv_row(row, order_source=order_source))
+
+        return self._merge_live_order_rows(order_rows, update_existing=update_existing)
+
     def _normalize_live_fill_csv_row(self, fill_row, fill_source="exchange_sync"):
         filled_at = fill_row.get("filled_at") or fill_row.get("timestamp") or datetime.now(timezone.utc).isoformat()
         fill_id = str(fill_row.get("fill_id") or fill_row.get("trade_id") or "").strip()
@@ -175,7 +336,7 @@ class ReconciliationService:
 
         existing = existing.reindex(columns=ordered_cols)
         append_df = append_df.reindex(columns=ordered_cols)
-        merged = pd.concat([existing, append_df], ignore_index=True)
+        merged = append_df.copy() if existing.empty else pd.concat([existing, append_df], ignore_index=True)
 
         if "fill_id" in merged.columns:
             dedupe_key = merged["fill_id"].fillna("")
@@ -221,6 +382,8 @@ class ReconciliationService:
     def sync_orders_and_fills(self):
         """Sync exchange orders and fills into the local SQLite database."""
         synced_orders = 0
+        synced_order_csv_rows = 0
+        synced_order_csv_updates = 0
         synced_fills = 0
         synced_fill_csv_rows = 0
         known_order_ids = set()
@@ -243,6 +406,7 @@ class ReconciliationService:
 
         try:
             orders_payload = self.execution_client.get_open_orders()
+            order_rows_to_mirror = []
             for raw_order in self._extract_items(orders_payload):
                 order = self._normalize_order(raw_order)
                 if order is None:
@@ -263,6 +427,12 @@ class ReconciliationService:
                 )
                 synced_orders += 1
                 known_order_ids.add(order["order_id"])
+                order_rows_to_mirror.append(
+                    self._normalize_live_order_csv_row(order, order_source="exchange_sync")
+                )
+            order_csv_result = self._merge_live_order_rows(order_rows_to_mirror, update_existing=True)
+            synced_order_csv_rows = int(order_csv_result.get("added", 0))
+            synced_order_csv_updates = int(order_csv_result.get("updated", 0))
         except Exception:
             pass
         
@@ -276,6 +446,13 @@ class ReconciliationService:
                 else:
                     self.db.execute("UPDATE orders SET status = 'CANCELED' WHERE status = 'OPEN'")
                 if hasattr(self.db.conn, "commit"): self.db.conn.commit()
+        except Exception:
+            pass
+
+        try:
+            order_backfill_result = self.backfill_live_orders_csv_from_db(update_existing=True)
+            synced_order_csv_rows += int(order_backfill_result.get("added", 0))
+            synced_order_csv_updates += int(order_backfill_result.get("updated", 0))
         except Exception:
             pass
 
@@ -326,7 +503,13 @@ class ReconciliationService:
         except Exception:
             pass
 
-        return {"orders": synced_orders, "fills": synced_fills, "fill_csv_rows_added": synced_fill_csv_rows}
+        return {
+            "orders": synced_orders,
+            "order_csv_rows_added": synced_order_csv_rows,
+            "order_csv_rows_updated": synced_order_csv_updates,
+            "fills": synced_fills,
+            "fill_csv_rows_added": synced_fill_csv_rows,
+        }
 
     def reconcile(self):
         """

@@ -36,6 +36,10 @@ class OrderManager:
         self.risk = LiveRiskManager(db=self.db)
 
     def _append(self, path: Path, row: dict):
+        row = dict(row)
+        if path.name == "live_orders.csv":
+            row.setdefault("order_source", "order_manager")
+            row.setdefault("created_at", row.get("timestamp"))
         row_df = pd.DataFrame([row])
         if not path.exists():
             row_df.to_csv(path, index=False)

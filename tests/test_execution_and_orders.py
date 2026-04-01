@@ -34,6 +34,8 @@ def test_order_manager_submit_success(mock_execution_client, tmp_path):
     assert response["orderID"] == "test-order-123"
     assert row["status"] == "SUBMITTED"
     assert row["size"] == 100
+    saved = pd.read_csv(tmp_path / "live_orders.csv")
+    assert saved.iloc[-1]["order_source"] == "order_manager"
 
 
 def test_order_manager_insufficient_funds(mock_execution_client, tmp_path):
