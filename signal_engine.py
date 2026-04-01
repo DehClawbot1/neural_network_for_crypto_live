@@ -6,6 +6,16 @@ import pandas as pd
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 
+def _safe_float(value, default=0.0):
+    try:
+        num = float(value)
+    except Exception:
+        return float(default)
+    if not np.isfinite(num):
+        return float(default)
+    return float(num)
+
+
 class SignalEngine:
     """
     Safer signal scorer.
@@ -24,13 +34,13 @@ class SignalEngine:
     }
 
     def score_row(self, row: dict):
-        whale_pressure = float(row.get("whale_pressure", 0.5) or 0.5)
-        market_structure_score = float(row.get("market_structure_score", 0.5) or 0.5)
-        volatility_risk = float(row.get("volatility_risk", 0.5) or 0.5)
-        time_decay_score = float(row.get("time_decay_score", 0.5) or 0.5)
-        p_tp = float(row.get("p_tp_before_sl", 0.0) or 0.0)
-        expected_return = float(row.get("expected_return", 0.0) or 0.0)
-        edge_score = float(row.get("edge_score", 0.0) or 0.0)
+        whale_pressure = float(np.clip(_safe_float(row.get("whale_pressure", 0.5), default=0.5), 0.0, 1.0))
+        market_structure_score = float(np.clip(_safe_float(row.get("market_structure_score", 0.5), default=0.5), 0.0, 1.0))
+        volatility_risk = float(np.clip(_safe_float(row.get("volatility_risk", 0.5), default=0.5), 0.0, 1.0))
+        time_decay_score = float(np.clip(_safe_float(row.get("time_decay_score", 0.5), default=0.5), 0.0, 1.0))
+        p_tp = float(np.clip(_safe_float(row.get("p_tp_before_sl", 0.0), default=0.0), 0.0, 1.0))
+        expected_return = _safe_float(row.get("expected_return", 0.0), default=0.0)
+        edge_score = _safe_float(row.get("edge_score"), default=p_tp * expected_return)
 
         heuristic_confidence = (
             whale_pressure * 0.40
@@ -47,7 +57,9 @@ class SignalEngine:
         )
 
         confidence = float(np.clip((heuristic_confidence * 0.45) + (model_confidence * 0.55), 0.0, 1.0))
-        if expected_return == 0.0 and p_tp == 0.0: confidence = heuristic_confidence # BUG FIX 4: Restore 100% heuristic weight if AI is offline
+        if expected_return == 0.0 and p_tp == 0.0:
+            confidence = heuristic_confidence  # BUG FIX 4: Restore 100% heuristic weight if AI is offline
+        confidence = float(np.clip(_safe_float(confidence, default=0.0), 0.0, 1.0))
 
         # If the model says the trade is weak, do not let the heuristic alone escalate it.
         if expected_return <= 0 or edge_score <= 0 or p_tp < 0.52:
@@ -74,12 +86,12 @@ class SignalEngine:
 
     def _build_reason(self, row: dict, confidence: float):
         return (
-            f"p_tp={float(row.get('p_tp_before_sl', 0.0) or 0.0):.2f}, "
-            f"expected_return={float(row.get('expected_return', 0.0) or 0.0):.4f}, "
-            f"edge_score={float(row.get('edge_score', 0.0) or 0.0):.4f}, "
-            f"whale_pressure={float(row.get('whale_pressure', 0.5) or 0.5):.2f}, "
-            f"market_structure={float(row.get('market_structure_score', 0.5) or 0.5):.2f}, "
-            f"confidence={confidence:.2f}"
+            f"p_tp={_safe_float(row.get('p_tp_before_sl', 0.0), default=0.0):.2f}, "
+            f"expected_return={_safe_float(row.get('expected_return', 0.0), default=0.0):.4f}, "
+            f"edge_score={_safe_float(row.get('edge_score', 0.0), default=0.0):.4f}, "
+            f"whale_pressure={_safe_float(row.get('whale_pressure', 0.5), default=0.5):.2f}, "
+            f"market_structure={_safe_float(row.get('market_structure_score', 0.5), default=0.5):.2f}, "
+            f"confidence={_safe_float(confidence, default=0.0):.2f}"
         )
 
     def score_features(self, features_df: pd.DataFrame):

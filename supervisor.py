@@ -42,7 +42,7 @@ from stage2_temporal_inference import Stage2TemporalInference
 from ops_state_sync import sync_ops_state_to_db
 from stage3_hybrid import Stage3HybridScorer
 from config import TradingConfig
-from strategy_layers import EntryRuleLayer
+from strategy_layers import EntryRuleLayer, PredictionLayer
 from rl_entry_inference import EntryRLInference
 from rl_position_inference import PositionRLInference
 from rl_observation_schemas import prepare_entry_observation, prepare_position_observation
@@ -418,14 +418,16 @@ def choose_action(
     # Optional safety valve: if RL keeps returning HOLD, allow rule fallback.
     # This prevents "stuck forever" behavior when RL is stale or overly conservative.
     allow_rule_fallback_with_rl_hold = os.getenv("ALLOW_RULE_FALLBACK_WITH_RL_HOLD", "true").strip().lower() in {"1", "true", "yes", "on"}
-    rl_hold_min_confidence = float(os.getenv("RL_HOLD_FALLBACK_MIN_CONFIDENCE", "0.25") or 0.25)
+    rl_hold_min_confidence = float(os.getenv("RL_HOLD_FALLBACK_MIN_CONFIDENCE", "0.15") or 0.15)
     if (entry_brain is not None or legacy_brain is not None) and allow_rule_fallback_with_rl_hold:
-        try:
-            confidence = float(signal_row.get("confidence", 0.0) or 0.0)
-        except Exception:
-            confidence = 0.0
+        confidence = _safe_float(signal_row.get("confidence", 0.0), default=float("nan"))
+        if not np.isfinite(confidence) or confidence <= 0.0:
+            confidence = _safe_float(PredictionLayer.select_signal_score(signal_row), default=0.0)
         if confidence >= rl_hold_min_confidence and entry_rule.should_enter(signal_row):
-            edge_score = float(signal_row.get("edge_score", 0.0) or 0.0)
+            expected_return = _safe_float(signal_row.get("expected_return", 0.0), default=0.0)
+            if expected_return <= 0:
+                return 0
+            edge_score = _safe_float(signal_row.get("edge_score", 0.0), default=0.0)
             return 2 if edge_score >= 0.04 else 1
 
     # FIX V5: If RL models are loaded and fallback is disabled / conditions not met, keep HOLD.
@@ -740,24 +742,19 @@ def main_loop():
             return signals_df
         work = signals_df.copy()
         observed_iso = str(observed_ts)
+        if "source_signal_timestamp" not in work.columns:
+            work["source_signal_timestamp"] = work.get("signal_observed_at", work.get("timestamp"))
+        if "source_market_timestamp" not in work.columns:
+            work["source_market_timestamp"] = work.get("market_data_timestamp", work.get("timestamp"))
         if "last_trade_timestamp" not in work.columns:
             work["last_trade_timestamp"] = work.get("timestamp")
         else:
             work["last_trade_timestamp"] = work["last_trade_timestamp"].where(
                 work["last_trade_timestamp"].notna(), work.get("timestamp")
             )
-        if "signal_observed_at" not in work.columns:
-            work["signal_observed_at"] = observed_iso
-        else:
-            work["signal_observed_at"] = work["signal_observed_at"].where(
-                work["signal_observed_at"].notna(), observed_iso
-            )
-        if "market_data_timestamp" not in work.columns:
-            work["market_data_timestamp"] = observed_iso
-        else:
-            work["market_data_timestamp"] = work["market_data_timestamp"].where(
-                work["market_data_timestamp"].notna(), observed_iso
-            )
+        # Use cycle observation time for freshness gates; keep source timestamps separately.
+        work["signal_observed_at"] = observed_iso
+        work["market_data_timestamp"] = observed_iso
         return work
 
     def _coerce_confidence(value, default=0.5):
@@ -1423,7 +1420,7 @@ def main_loop():
             for rank, (_, ranked_row) in enumerate(scored_df.head(top_n).iterrows(), start=1):
                 summary_line = (
                     f"{rank}. {ranked_row.get('signal_label')} | "
-                    f"confidence={float(ranked_row.get('confidence', 0.0)):.2f} | "
+                    f"confidence={_safe_float(ranked_row.get('confidence', PredictionLayer.select_signal_score(ranked_row)), default=0.0):.2f} | "
                     f"market={ranked_row.get('market_title')} | "
                     f"side={ranked_row.get('side')}"
                 )
@@ -1795,7 +1792,7 @@ def main_loop():
                             signal_row.get("condition_id"),
                             signal_row.get("outcome_side", signal_row.get("side")),
                             entry_model_name,
-                            float(signal_row.get("confidence", 0.0) or 0.0),
+                            _safe_float(signal_row.get("confidence", 0.0), default=0.0),
                             action_map.get(action_val, "UNKNOWN"),
                             build_feature_snapshot(signal_row),
                             entry_model_artifact,
@@ -1820,7 +1817,7 @@ def main_loop():
                             calibrated_required=round(calibrated_required, 8),
                         )
                         continue
-                    confidence = float(signal_row.get("confidence", 0.0) or 0.0)
+                    confidence = _safe_float(signal_row.get("confidence", 0.0), default=0.0)
 
                     # ── Get balance (with paper mode fallback) ──
                     _available_bal = 0.0

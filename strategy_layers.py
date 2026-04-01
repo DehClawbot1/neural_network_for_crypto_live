@@ -88,18 +88,22 @@ class EntryRuleLayer:
         liquidity_raw = _finite_float(row.get("liquidity", row.get("market_liquidity")), default=None)
         liquidity_score = _finite_float(row.get("liquidity_score"), default=None)
 
-        if liquidity_raw is not None:
+        has_raw_liquidity = liquidity_raw is not None and liquidity_raw > 0
+        has_liquidity_score = liquidity_score is not None and liquidity_score > 0
+
+        if has_raw_liquidity:
             liquidity_value = liquidity_raw
             liquidity_threshold = self.min_liquidity
             liquidity_metric = "liquidity"
             liquidity_ok = liquidity_raw >= self.min_liquidity
-        elif liquidity_score is not None:
+        elif has_liquidity_score:
             liquidity_value = liquidity_score
             liquidity_threshold = self.min_liquidity_score
             liquidity_metric = "liquidity_score"
             liquidity_ok = liquidity_score >= self.min_liquidity_score
         else:
-            # If liquidity features are absent, defer hard filtering to orderbook guards.
+            # If liquidity features are missing or encoded as non-positive placeholders,
+            # defer hard filtering to orderbook guards.
             liquidity_value = None
             liquidity_threshold = None
             liquidity_metric = "missing"

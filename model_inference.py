@@ -94,10 +94,13 @@ class ModelInference:
                 x_reg = self._prepare_matrix(reg_saved if isinstance(reg_saved, dict) else {"features": getattr(reg, "feature_names_in_", [])}, out)
                 if x_reg is not None:
                     preds = reg.predict(x_reg)
-                    out["expected_return"] = pd.Series(np.array(preds).ravel(), index=out.index) # BUG FIX 7: Support 2D (N,1) regressor arrays.astype(float).replace([np.inf, -np.inf], 0.0).fillna(0.0)
+                    pred_series = pd.Series(np.array(preds).ravel(), index=out.index)
+                    out["expected_return"] = pd.to_numeric(pred_series, errors="coerce").replace([np.inf, -np.inf], 0.0).fillna(0.0)
             except Exception as exc:
                 _report_inference_error("model_inference.regressor", exc, context="expected_return_zero_fallback")
                 out["expected_return"] = 0.0
 
-        out["edge_score"] = out["p_tp_before_sl"].astype(float) * out["expected_return"].astype(float)
+        p_tp = pd.to_numeric(out["p_tp_before_sl"], errors="coerce").replace([np.inf, -np.inf], 0.0).fillna(0.0)
+        exp_ret = pd.to_numeric(out["expected_return"], errors="coerce").replace([np.inf, -np.inf], 0.0).fillna(0.0)
+        out["edge_score"] = p_tp * exp_ret
         return out
