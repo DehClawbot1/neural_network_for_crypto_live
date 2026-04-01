@@ -1,45 +1,97 @@
+import math
+
+
+def _finite_float(value, default=None):
+    try:
+        num = float(value)
+    except Exception:
+        return default
+    if not math.isfinite(num):
+        return default
+    return num
+
+
 class PredictionLayer:
     """Placeholder interface for model outputs such as expected return or P(TP before SL)."""
 
     @staticmethod
     def select_signal_score(row: dict) -> float:
-        # FIX: Use confidence as primary score for entry gating.
-        # expected_return can be negative (the model predicting loss),
-        # but confidence (0.0-1.0) is the right metric for entry filtering.
-        # The entry rule asks "should we enter?" not "what's the expected P&L?"
-        confidence = float(row.get("confidence", 0.0) or 0.0)
+        # Confidence remains the primary gate score when finite.
+        confidence = _finite_float(row.get("confidence", 0.0), default=0.0)
         if confidence > 0:
             return confidence
 
-        # Fallback: use p_tp if available and positive
-        p_tp = float(row.get("p_tp_before_sl", row.get("tp_before_sl_prob", 0.0)) or 0.0)
+        # Fallback: use p_tp if available and positive.
+        p_tp = _finite_float(row.get("p_tp_before_sl", row.get("tp_before_sl_prob", 0.0)), default=0.0)
         if p_tp > 0:
             return p_tp
 
-        # Last resort: use expected_return only if positive
-        er = float(row.get("expected_return", 0.0) or 0.0)
+        # Last resort: expected return only if positive.
+        er = _finite_float(row.get("expected_return", 0.0), default=0.0)
         return max(er, 0.0)
 
 
 class EntryRuleLayer:
     """Entry filter separate from raw model prediction."""
 
-    # ── FIX: Relaxed from 0.62/0.03/1000 to 0.45/0.08/100
-    #    Polymarket BTC markets typically have:
-    #      - spreads of 0.03-0.10 (3-10%)
-    #      - liquidity from 100-50000
-    #      - model scores starting around 0.45-0.60 before convergence
-    #    The old thresholds blocked 100% of signals for 10+ hours.
-    def __init__(self, min_score=0.25, max_spread=0.20, min_liquidity=5):
+    def __init__(self, min_score=0.25, max_spread=0.20, min_liquidity=5, min_liquidity_score=0.05):
         self.min_score = min_score
         self.max_spread = max_spread
         self.min_liquidity = min_liquidity
+        self.min_liquidity_score = min_liquidity_score
+
+    def evaluate(self, row: dict) -> dict:
+        score = PredictionLayer.select_signal_score(row)
+
+        spread = _finite_float(row.get("spread"), default=None)
+        if spread is None:
+            best_bid = _finite_float(row.get("best_bid"), default=None)
+            best_ask = _finite_float(row.get("best_ask"), default=None)
+            if best_bid is not None and best_ask is not None and best_ask >= best_bid:
+                spread = best_ask - best_bid
+            else:
+                spread = 0.0
+
+        liquidity_raw = _finite_float(row.get("liquidity", row.get("market_liquidity")), default=None)
+        liquidity_score = _finite_float(row.get("liquidity_score"), default=None)
+
+        if liquidity_raw is not None:
+            liquidity_value = liquidity_raw
+            liquidity_threshold = self.min_liquidity
+            liquidity_metric = "liquidity"
+            liquidity_ok = liquidity_raw >= self.min_liquidity
+        elif liquidity_score is not None:
+            liquidity_value = liquidity_score
+            liquidity_threshold = self.min_liquidity_score
+            liquidity_metric = "liquidity_score"
+            liquidity_ok = liquidity_score >= self.min_liquidity_score
+        else:
+            # If liquidity features are absent, defer hard filtering to orderbook guards.
+            liquidity_value = None
+            liquidity_threshold = None
+            liquidity_metric = "missing"
+            liquidity_ok = True
+
+        score_ok = score >= self.min_score
+        spread_ok = spread <= self.max_spread
+        allow = score_ok and spread_ok and liquidity_ok
+
+        return {
+            "allow": allow,
+            "score": score,
+            "score_threshold": self.min_score,
+            "score_ok": score_ok,
+            "spread": spread,
+            "spread_threshold": self.max_spread,
+            "spread_ok": spread_ok,
+            "liquidity_value": liquidity_value,
+            "liquidity_threshold": liquidity_threshold,
+            "liquidity_metric": liquidity_metric,
+            "liquidity_ok": liquidity_ok,
+        }
 
     def should_enter(self, row: dict) -> bool:
-        score = PredictionLayer.select_signal_score(row)
-        spread = float(row.get("spread", 0.0) or 0.0)
-        liquidity = float(row.get("liquidity", row.get("market_liquidity", 0.0)) or 0.0)
-        return score >= self.min_score and spread <= self.max_spread and liquidity >= self.min_liquidity
+        return self.evaluate(row).get("allow", False)
 
 
 class ExitRuleLayer:

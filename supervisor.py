@@ -190,9 +190,12 @@ def _is_truthy(value) -> bool:
 
 def _safe_float(value, default=0.0):
     try:
-        return float(value)
+        num = float(value)
     except Exception:
         return float(default)
+    if not np.isfinite(num):
+        return float(default)
+    return num
 
 
 def _parse_timestamp_utc(value):
@@ -303,7 +306,7 @@ def log_ranked_signal(signal_row):
     append_csv_record(SIGNALS_FILE, record)
 
 
-def choose_action(signal_row, entry_rule: EntryRuleLayer, entry_brain=None, legacy_brain=None):
+def choose_action(signal_row, entry_rule: EntryRuleLayer, entry_brain=None, legacy_brain=None, decision_meta=None):
     def _is_truthy(value):
         if isinstance(value, bool):
             return value
@@ -311,6 +314,11 @@ def choose_action(signal_row, entry_rule: EntryRuleLayer, entry_brain=None, lega
             return float(value) != 0.0
         text = str(value or "").strip().lower()
         return text in {"1", "true", "yes", "on"}
+
+    if decision_meta is None:
+        decision_meta = {}
+    decision_meta["rule_vetoed_rl_action"] = False
+    decision_meta["vetoed_action"] = None
 
     action_val = 0
     force_candidate = (
@@ -332,10 +340,31 @@ def choose_action(signal_row, entry_rule: EntryRuleLayer, entry_brain=None, lega
         except Exception:
             pass
 
-    # FIX H7: Apply entry rule as VETO even when RL says enter
-    if action_val in (1, 2) and not entry_rule.should_enter(signal_row):
-        logging.info("Entry rule vetoed RL action=%d for %s", action_val,
-                     signal_row.get("market_title", signal_row.get("market", "unknown")))
+    # Apply entry rule as veto even when RL says enter.
+    rule_eval = entry_rule.evaluate(signal_row) if hasattr(entry_rule, "evaluate") else None
+    rule_allows_entry = bool(rule_eval["allow"]) if isinstance(rule_eval, dict) else entry_rule.should_enter(signal_row)
+    if action_val in (1, 2) and not rule_allows_entry:
+        decision_meta["rule_vetoed_rl_action"] = True
+        decision_meta["vetoed_action"] = action_val
+        if isinstance(rule_eval, dict):
+            logging.info(
+                "Entry rule vetoed RL action=%d for %s (score=%.4f/%.4f spread=%.4f/%.4f liquidity[%s]=%s/%s)",
+                action_val,
+                signal_row.get("market_title", signal_row.get("market", "unknown")),
+                float(rule_eval.get("score", 0.0) or 0.0),
+                float(rule_eval.get("score_threshold", 0.0) or 0.0),
+                float(rule_eval.get("spread", 0.0) or 0.0),
+                float(rule_eval.get("spread_threshold", 0.0) or 0.0),
+                rule_eval.get("liquidity_metric"),
+                rule_eval.get("liquidity_value"),
+                rule_eval.get("liquidity_threshold"),
+            )
+        else:
+            logging.info(
+                "Entry rule vetoed RL action=%d for %s",
+                action_val,
+                signal_row.get("market_title", signal_row.get("market", "unknown")),
+            )
         return 0
     if action_val != 0:
         return action_val
@@ -1586,12 +1615,15 @@ def main_loop():
                     )
                     continue
 
-                rule_allows_entry = entry_rule.should_enter(signal_row)
+                rule_eval = entry_rule.evaluate(signal_row) if hasattr(entry_rule, "evaluate") else None
+                rule_allows_entry = bool(rule_eval["allow"]) if isinstance(rule_eval, dict) else entry_rule.should_enter(signal_row)
+                _action_meta = {}
                 action_val = choose_action(
                     signal_row,
                     entry_rule,
                     entry_brain=entry_brain,
                     legacy_brain=legacy_brain,
+                    decision_meta=_action_meta,
                 )
                 if action_val not in [0, 1, 2]:
                     action_val = 0
@@ -1869,12 +1901,28 @@ def main_loop():
                                 available_balance=_available_bal,
                             )
                 else:
-                    ignore_reason = "rule_veto" if not rule_allows_entry else "model_action_ignore"
+                    vetoed_action = _action_meta.get("vetoed_action")
+                    if _action_meta.get("rule_vetoed_rl_action"):
+                        ignore_reason = "rule_veto"
+                        log_model_action = action_map.get(vetoed_action, action_map.get(action_val, "UNKNOWN"))
+                    else:
+                        ignore_reason = "model_action_ignore_rule_blocked" if not rule_allows_entry else "model_action_ignore"
+                        log_model_action = action_map.get(action_val, "UNKNOWN")
                     _log_candidate_skip(
                         signal_row,
                         ignore_reason,
                         gate="model_policy",
-                        model_action=action_map.get(action_val, "UNKNOWN"),
+                        model_action=log_model_action,
+                        rule_allows_entry=rule_allows_entry,
+                        rule_score=rule_eval.get("score") if isinstance(rule_eval, dict) else None,
+                        rule_score_threshold=rule_eval.get("score_threshold") if isinstance(rule_eval, dict) else None,
+                        rule_spread=rule_eval.get("spread") if isinstance(rule_eval, dict) else None,
+                        rule_spread_threshold=rule_eval.get("spread_threshold") if isinstance(rule_eval, dict) else None,
+                        rule_liquidity_metric=rule_eval.get("liquidity_metric") if isinstance(rule_eval, dict) else None,
+                        rule_liquidity_value=rule_eval.get("liquidity_value") if isinstance(rule_eval, dict) else None,
+                        rule_liquidity_threshold=rule_eval.get("liquidity_threshold") if isinstance(rule_eval, dict) else None,
+                        rule_vetoed_rl_action=bool(_action_meta.get("rule_vetoed_rl_action")),
+                        rule_vetoed_action=vetoed_action,
                     )
 
             if _candidate_skip_counts:
