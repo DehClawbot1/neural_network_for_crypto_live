@@ -710,6 +710,69 @@ def main_loop():
             return f"{token_id}|{condition_id}|{outcome_side}"
         return f"{market}|{outcome_side}" if market and outcome_side else None
 
+    def _extract_open_market_universe(markets_df: pd.DataFrame):
+        open_token_ids: set[str] = set()
+        open_condition_ids: set[str] = set()
+        open_market_slugs: set[str] = set()
+        if markets_df is None or markets_df.empty:
+            return open_token_ids, open_condition_ids, open_market_slugs
+
+        def _add_token(value):
+            tok = normalize_token_id(value)
+            if tok:
+                open_token_ids.add(str(tok))
+
+        for _, market_row in markets_df.iterrows():
+            row = market_row.to_dict()
+            closed_flag = _is_truthy(row.get("closed"))
+            active_raw = row.get("active")
+            active_flag = True if active_raw is None or (isinstance(active_raw, float) and np.isnan(active_raw)) else _is_truthy(active_raw)
+            if closed_flag or not active_flag:
+                continue
+            end_raw = row.get("end_date", row.get("endDate"))
+            if end_raw is not None and not (isinstance(end_raw, float) and np.isnan(end_raw)):
+                end_ts = pd.to_datetime(end_raw, utc=True, errors="coerce")
+                if pd.notna(end_ts) and end_ts <= pd.Timestamp.now(tz="UTC"):
+                    continue
+
+            cond = str(row.get("condition_id") or "").strip().lower()
+            if cond and cond != "nan":
+                open_condition_ids.add(cond)
+
+            slug = str(row.get("slug") or row.get("market_slug") or "").strip().lower()
+            if slug and slug != "nan":
+                open_market_slugs.add(slug)
+
+            _add_token(row.get("yes_token_id"))
+            _add_token(row.get("no_token_id"))
+            _add_token(row.get("token_id"))
+
+            raw_ids = row.get("clob_token_ids")
+            if raw_ids is None:
+                continue
+            if isinstance(raw_ids, float) and np.isnan(raw_ids):
+                continue
+
+            if isinstance(raw_ids, (list, tuple, set)):
+                token_candidates = list(raw_ids)
+            else:
+                raw_text = str(raw_ids).strip()
+                if not raw_text or raw_text.lower() == "nan":
+                    continue
+                if raw_text.startswith("[") and raw_text.endswith("]"):
+                    try:
+                        parsed = json.loads(raw_text)
+                    except Exception:
+                        parsed = [x.strip().strip("'\"") for x in raw_text.strip("[]").split(",") if x.strip()]
+                    token_candidates = list(parsed) if isinstance(parsed, (list, tuple, set)) else [parsed]
+                else:
+                    token_candidates = [raw_text]
+
+            for tok in token_candidates:
+                _add_token(tok)
+
+        return open_token_ids, open_condition_ids, open_market_slugs
+
     def _dedupe_signals_df(signals_df: pd.DataFrame):
         if signals_df is None or signals_df.empty:
             return signals_df
@@ -1407,6 +1470,15 @@ def main_loop():
             sort_cols = [c for c in ["risk_adjusted_ev", "entry_ev", "execution_quality_score", "edge_score", "p_tp_before_sl", "confidence", "normalized_trade_size"] if c in scored_df.columns]
             scored_df = scored_df.sort_values(by=sort_cols, ascending=[False] * len(sort_cols))
             calibration_baseline = _load_calibration_baseline() if enable_calibration_gate else calibration_min_edge
+            open_token_ids, open_condition_ids, open_market_slugs = _extract_open_market_universe(markets_df)
+            if open_market_slugs:
+                logging.info(
+                    "Open market universe this cycle: markets=%d tokens=%d",
+                    len(open_market_slugs),
+                    len(open_token_ids),
+                )
+            else:
+                logging.warning("Open market universe is empty this cycle; skipping candidate entries.")
 
             # Suppress duplicate entries / repeated token spam
             if "token_id" in scored_df.columns:
@@ -1491,6 +1563,7 @@ def main_loop():
                 "fills_received": 0,
             }
             _candidate_decision_rows = []
+            _orderbook_unavailable_tokens = set()
 
             def _record_candidate_decision(
                 signal_row: dict,
@@ -1704,10 +1777,42 @@ def main_loop():
                     )
                     continue
 
+                signal_condition_id = str(signal_row.get("condition_id") or "").strip().lower()
+                signal_slug = str(signal_row.get("market_slug") or "").strip().lower()
+                if not open_market_slugs:
+                    _log_candidate_skip(
+                        signal_row,
+                        "no_open_market_universe",
+                        gate="market_universe",
+                    )
+                    continue
+                in_open_universe = (
+                    (token_id in open_token_ids)
+                    or (signal_condition_id and signal_condition_id in open_condition_ids)
+                    or (signal_slug and signal_slug in open_market_slugs)
+                )
+                if not in_open_universe:
+                    _log_candidate_skip(
+                        signal_row,
+                        "token_not_in_open_market_universe",
+                        gate="market_universe",
+                        open_market_count=len(open_market_slugs),
+                        open_token_count=len(open_token_ids),
+                    )
+                    continue
+
                 # FIX: Check dynamic active_trades to prevent Triple-Buy duplicates in the same loop
                 if market_key in active_trade_keys or market_key in trade_manager.active_trades:
                     logging.info("Prevented duplicate entry: Trade already open for %s.", market_key)
                     _log_candidate_skip(signal_row, "duplicate_active_trade", gate="dedupe", market_key=market_key)
+                    continue
+                if token_id in _orderbook_unavailable_tokens:
+                    _log_candidate_skip(
+                        signal_row,
+                        "orderbook_not_available_cached",
+                        gate="liquidity",
+                        token_id_cached=True,
+                    )
                     continue
                 if trading_mode == "live" and live_entry_freeze:
                     logging.warning(
@@ -1871,6 +1976,8 @@ def main_loop():
                         )
                         if not ob_check["tradable"]:
                             logging.info("OrderBookGuard BLOCKED %s: %s", token_id[:16], ob_check["reason"])
+                            if ob_check.get("reason") == "orderbook_not_available":
+                                _orderbook_unavailable_tokens.add(token_id)
                             _log_candidate_skip(
                                 signal_row,
                                 "no_liquidity",
