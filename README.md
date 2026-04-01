@@ -18,6 +18,18 @@ Per cycle, the bot now syncs in this order:
 
 This prevents opening new trades while state is out-of-sync and reduces ghost trades.
 
+## Intelligence & Market Context Engine
+The bot evaluates trades not just by copying wallets, but by measuring deep macroeconomic contexts across 5 pillars before entering a trade.
+
+1. **Macro & Liquidity (Pillar 1):** Tracks traditional finance proxies (DXY, 10Y Yields, S&P 500) via `yfinance` to gauge capital liquidity.
+2. **On-Chain Fundamentals (Pillar 2):** Tracks Bitcoin Hash Rate via CoinMetrics.
+3. **Technical Analysis (Pillar 3):** Fetches live Binance Klines to compute structural trend biases (200 SMA, 21 EMA).
+4. **Sentiment & Derivatives (Pillar 4):** Reads Fear & Greed index and tracks Binance Perpetual Funding Rates to detect overheated leverage (vulnerable to squeezes).
+5. **Order Flow & Taker Imbalance (Pillar 5):** Synthesizes completely autonomous trading signals simply by spotting massive asymmetric volume flows in Polymarket orderbooks (`order_flow_analyzer.py`).
+
+**Active Market Hunting:**
+The `EntryRuleLayer` dynamically shifts its AI confidence requirements based on the macro trend score. If the market is completely bullish, it lowers the entry threshold to "gobble up" longs. If the market is flashing *Overheated Long*, it triggers a hard veto block to protect capital.
+
 ## Position Management
 
 - Max concurrent live positions: `TradingConfig.MAX_CONCURRENT_POSITIONS` (default `5`)

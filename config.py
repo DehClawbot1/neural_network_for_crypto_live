@@ -29,23 +29,23 @@ class TradingConfig:
     # Hard per-trade fail-safe cap (absolute USD) to prevent runaway bet sizes.
     HARD_MAX_BET_USDC = 250.0
     # Keep part of wallet untouched so bot cannot deploy 100% capital.
-    CAPITAL_RESERVE_PCT = 0.20
+    CAPITAL_RESERVE_PCT = 0.05  # Reduced from 0.20 to allow more trades
     # Minimum dynamic sizing component (as % of tradable balance), capped below.
     MIN_BET_DYNAMIC_PCT = 0.002
     MAX_DYNAMIC_MIN_BET_USDC = 5.0
-    HIGH_CONFIDENCE_BET_PCT = 0.08
-    MEDIUM_CONFIDENCE_BET_PCT = 0.05
+    HIGH_CONFIDENCE_BET_PCT = 0.15 # Increased
+    MEDIUM_CONFIDENCE_BET_PCT = 0.10 # Increased
     LOW_CONFIDENCE_BET_PCT = 0.04
 
     # Execution mode
     USE_MARKET_ORDERS = True
 
     # User requested limit: manage up to 5 simultaneous positions independently
-    MAX_CONCURRENT_POSITIONS = 5
+    MAX_CONCURRENT_POSITIONS = 20
 
     # Set to 5 per requirements
     TIME_STOP_MINUTES = 120
-    MAX_TOTAL_EXPOSURE_PCT = 0.85
+    MAX_TOTAL_EXPOSURE_PCT = 0.95
 
     # py-clob-client balance compatibility flag
     BALANCE_IS_MICRODOLLARS = True

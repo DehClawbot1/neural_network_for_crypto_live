@@ -41,7 +41,40 @@ class EntryRuleLayer:
         self.min_liquidity_score = min_liquidity_score
 
     def evaluate(self, row: dict) -> dict:
+        import logging
+        
         score = PredictionLayer.select_signal_score(row)
+        
+        # --- MACRO MOOD HUNTING LOGIC ---
+        dynamic_min_score = self.min_score
+        target_side = str(row.get("outcome_side", row.get("side", "UNKNOWN"))).upper()
+        
+        # 1. Protect against Long Squeezes
+        is_overheated_long = row.get("is_overheated_long", False)
+        macro_veto = False
+        if is_overheated_long and target_side == "YES":
+            macro_veto = True
+            logging.warning(f"StrategyLayer: VETO! Market is Overheated Long. Blocking YES bet on {row.get('market_slug', 'market')}.")
+            
+        # 2. Aggressive Hunting (Trend Following)
+        trend_score = _finite_float(row.get("trend_score", 0.5), default=0.5)
+        fgi_value = row.get("fgi_value", 50)
+        
+        if trend_score > 0.75 and fgi_value >= 60:
+            # Huge Bullish Conviction: Lower threshold for YES, raise for NO
+            if target_side == "YES":
+                dynamic_min_score = max(0.10, self.min_score - 0.15)
+                # logging.info(f"StrategyLayer: HUNT MODE. Lowering YES threshold to {dynamic_min_score:.2f}")
+            elif target_side == "NO":
+                dynamic_min_score = min(0.95, self.min_score + 0.15)
+                
+        elif trend_score < 0.25 and fgi_value <= 40:
+            # Huge Bearish Conviction: Lower threshold for NO, raise for YES
+            if target_side == "NO":
+                dynamic_min_score = max(0.10, self.min_score - 0.15)
+            elif target_side == "YES":
+                dynamic_min_score = min(0.95, self.min_score + 0.15)
+        # --------------------------------
 
         spread = _finite_float(row.get("spread"), default=None)
         if spread is None:
@@ -72,14 +105,14 @@ class EntryRuleLayer:
             liquidity_metric = "missing"
             liquidity_ok = True
 
-        score_ok = score >= self.min_score
+        score_ok = score >= dynamic_min_score
         spread_ok = spread <= self.max_spread
-        allow = score_ok and spread_ok and liquidity_ok
+        allow = score_ok and spread_ok and liquidity_ok and not macro_veto
 
         return {
             "allow": allow,
             "score": score,
-            "score_threshold": self.min_score,
+            "score_threshold": dynamic_min_score,
             "score_ok": score_ok,
             "spread": spread,
             "spread_threshold": self.max_spread,
@@ -88,6 +121,7 @@ class EntryRuleLayer:
             "liquidity_threshold": liquidity_threshold,
             "liquidity_metric": liquidity_metric,
             "liquidity_ok": liquidity_ok,
+            "macro_veto": macro_veto,
         }
 
     def should_enter(self, row: dict) -> bool:

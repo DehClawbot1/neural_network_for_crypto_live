@@ -55,6 +55,11 @@ from db import Database
 from money_manager import MoneyManager
 from orderbook_guard import OrderBookGuard
 from token_utils import normalize_token_id
+from order_flow_analyzer import OrderFlowAnalyzer
+from technical_analyzer import TechnicalAnalyzer
+from sentiment_analyzer import SentimentAnalyzer
+from macro_analyzer import MacroAnalyzer
+from onchain_analyzer import OnChainAnalyzer
 try:
     from inference_runtime_guard import (
         reset_cycle as _reset_inference_runtime_guard,
@@ -302,6 +307,12 @@ def log_ranked_signal(signal_row):
         "market_structure_score": signal_row.get("market_structure_score"),
         "volatility_risk": signal_row.get("volatility_risk"),
         "time_decay_score": signal_row.get("time_decay_score"),
+        "market_structure": signal_row.get("market_structure", "UNKNOWN"),
+        "trend_score": signal_row.get("trend_score", 0.5),
+        "fgi_value": signal_row.get("fgi_value", 50),
+        "fgi_status": signal_row.get("fgi_status", "Neutral"),
+        "btc_funding_rate": signal_row.get("btc_funding_rate", 0.0),
+        "is_overheated_long": signal_row.get("is_overheated_long", False),
     }
     append_csv_record(SIGNALS_FILE, record)
 
@@ -611,10 +622,15 @@ def main_loop():
     stage1_inference = Stage1Inference()
     stage2_inference = Stage2TemporalInference()
     hybrid_scorer = Stage3HybridScorer()
-    entry_min_score = _env_float("ENTRY_MIN_SCORE", 0.25)
-    entry_max_spread = _env_float("ENTRY_MAX_SPREAD", 0.20)
-    entry_min_liquidity = _env_float("ENTRY_MIN_LIQUIDITY", 5.0)
-    entry_min_liquidity_score = _env_float("ENTRY_MIN_LIQUIDITY_SCORE", 0.05)
+    order_flow_analyzer = OrderFlowAnalyzer(min_usd_volume=500.0, volume_imbalance_threshold=0.75, min_trades_count=3)
+    technical_analyzer = TechnicalAnalyzer()
+    sentiment_analyzer = SentimentAnalyzer()
+    macro_analyzer = MacroAnalyzer()
+    onchain_analyzer = OnChainAnalyzer()
+    entry_min_score = _env_float("ENTRY_MIN_SCORE", 0.15)
+    entry_max_spread = _env_float("ENTRY_MAX_SPREAD", 0.30)
+    entry_min_liquidity = _env_float("ENTRY_MIN_LIQUIDITY", 1.0)
+    entry_min_liquidity_score = _env_float("ENTRY_MIN_LIQUIDITY_SCORE", 0.01)
     entry_rule = EntryRuleLayer(
         min_score=entry_min_score,
         max_spread=entry_max_spread,
@@ -1185,11 +1201,33 @@ def main_loop():
                 signals_df = pd.DataFrame()
             else:
                 signals_df = run_scraper_cycle()
+                
+                # O-Flow Analysis: Generate synthetic signals from raw volume + liquidity
+                order_flow_signals_df = order_flow_analyzer.analyze(signals_df, markets_df)
+                if not order_flow_signals_df.empty:
+                    if signals_df is not None and not signals_df.empty:
+                        signals_df = pd.concat([signals_df, order_flow_signals_df], ignore_index=True)
+                    else:
+                        signals_df = order_flow_signals_df
+                        
                 signals_df = _dedupe_signals_df(signals_df)
             signals_df, markets_df = _inject_always_on_signal(signals_df, markets_df)
             signals_df = _dedupe_signals_df(signals_df)
             cycle_observed_iso = datetime.now(timezone.utc).isoformat()
             signals_df = _annotate_signal_freshness(signals_df, cycle_observed_iso)
+            
+            # --- PILLARS 1-4: The Unified Macro Footprint ---
+            ta_context = technical_analyzer.analyze()
+            sent_context = sentiment_analyzer.analyze()
+            mach_context = macro_analyzer.analyze()
+            onc_context = onchain_analyzer.analyze()
+            
+            macro_context = {**ta_context, **sent_context, **mach_context, **onc_context}
+            if not signals_df.empty:
+                for k, v in macro_context.items():
+                    signals_df[k] = v
+            # --------------------------------------------------
+            
             if always_on_enabled and always_on_only and signals_df is not None and not signals_df.empty:
                 # Keep ALWAYS_ON_ONLY robust when rotating BTC 5m slugs change every round.
                 # Prefer synthetic pinned signals; fall back to slug filtering only if needed.
@@ -2439,7 +2477,7 @@ def main_loop():
             break
         except Exception as e:
             autonomous_monitor.write_failure("supervisor", str(e))
-            logging.error(f"Critical error in main loop: {e}. Auto-restarting in 60 seconds...")
+            logging.error(f"Critical error in main loop: {e}. Relaxing for 60 seconds to respect API limits (Memory state is completely preserved).")
             time.sleep(60)
 
 
