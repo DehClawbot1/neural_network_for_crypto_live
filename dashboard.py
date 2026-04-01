@@ -1164,29 +1164,65 @@ def render_shadow(shadow_df):
     st.markdown('<div class="sec-title">Shadow Execution</div>', unsafe_allow_html=True)
     st.caption("Shadow intents, slippage tax, DOA vetoes, and realized post-signal outcomes.")
     if shadow_df.empty:
-        st.info("No shadow data yet.")
+        bundle_candidates = sorted((WEIGHTS).glob("meta_model_bundle_*.pkl"))
+        raw_candidates_path = LOGS / "raw_candidates.csv"
+        signals_path = FILES["signals"]
+        diagnostic_rows = [
+            {
+                "artifact": "shadow_results.csv",
+                "present": "Yes" if FILES["shadow"].exists() else "No",
+                "latest_seen": fmt_ts(path_mtime(FILES["shadow"])),
+                "note": "Shadow audit log consumed by this tab",
+            },
+            {
+                "artifact": "meta_model_bundle_*.pkl",
+                "present": "Yes" if bundle_candidates else "No",
+                "latest_seen": fmt_ts(max([path_mtime(p) for p in bundle_candidates], default=None)),
+                "note": "Shadow meta-model used for intent scoring",
+            },
+            {
+                "artifact": "raw_candidates.csv",
+                "present": "Yes" if raw_candidates_path.exists() else "No",
+                "latest_seen": fmt_ts(path_mtime(raw_candidates_path)),
+                "note": "Upstream feature source for shadow intent rows",
+            },
+            {
+                "artifact": "signals.csv",
+                "present": "Yes" if signals_path.exists() else "No",
+                "latest_seen": fmt_ts(path_mtime(signals_path)),
+                "note": "Signal ranking feed",
+            },
+        ]
+        st.warning("Shadow audit log is empty. The producer was not writing rows yet, or it is still warming up.")
+        st.dataframe(ensure_safe(pd.DataFrame(diagnostic_rows)), use_container_width=True, hide_index=True)
+        st.caption(
+            "Shadow logging now imputes missing meta-model features, skips duplicate intents, and resolves pending rows each cycle. "
+            "Refresh after the supervisor runs another cycle."
+        )
         return
     res = shadow_df[shadow_df.get("outcome", pd.Series()) != "PENDING"] if "outcome" in shadow_df.columns else pd.DataFrame()
     doa = shadow_df[shadow_df.get("outcome", pd.Series()) == "DOA"] if "outcome" in shadow_df.columns else pd.DataFrame()
+    blocked = shadow_df[shadow_df.get("outcome", pd.Series()) == "FEATURE_BLOCKED"] if "outcome" in shadow_df.columns else pd.DataFrame()
     tp = float((res["outcome"] == "TP").mean()) if not res.empty and "outcome" in res.columns else 0.0
     asl = float(pd.to_numeric(shadow_df.get("entry_slippage_bps"), errors="coerce").dropna().mean()) if "entry_slippage_bps" in shadow_df.columns else 0.0
     aev = float(pd.to_numeric(shadow_df.get("ev_adj"), errors="coerce").dropna().mean()) if "ev_adj" in shadow_df.columns else 0.0
     amp = float(pd.to_numeric(shadow_df.get("meta_prob"), errors="coerce").dropna().mean()) if "meta_prob" in shadow_df.columns else 0.0
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Shadow Intents", len(shadow_df))
     c2.metric("Resolved", len(res))
     c3.metric("DOA / Vetoed", len(doa))
     c4.metric("TP Rate", fmt_pct(tp))
-    c5, c6, c7 = st.columns(3)
-    c5.metric("Avg Slippage (bps)", f"{0.0 if pd.isna(asl) else asl:.1f}") # BUG FIX 10
-    c6.metric("Avg EV_adj", f"{0.0 if pd.isna(aev) else aev:+.2%}")
-    c7.metric("Avg Meta Prob", f"{0.0 if pd.isna(amp) else amp:.2%}")
+    c5.metric("Feature Blocked", len(blocked))
+    c6, c7, c8 = st.columns(3)
+    c6.metric("Avg Slippage (bps)", f"{0.0 if pd.isna(asl) else asl:.1f}") # BUG FIX 10
+    c7.metric("Avg EV_adj", f"{0.0 if pd.isna(aev) else aev:+.2%}")
+    c8.metric("Avg Meta Prob", f"{0.0 if pd.isna(amp) else amp:.2%}")
     if "outcome" in shadow_df.columns:
         oc = shadow_df["outcome"].value_counts().reset_index()
         oc.columns = ["Outcome", "Count"]
         fig = px.bar(oc, x="Outcome", y="Count", color_discrete_sequence=COLORS)
         st.plotly_chart(sfig(fig, 260).update_layout(title="Shadow Outcome Mix"), use_container_width=True)
-    cs = [c for c in ["timestamp", "market_title", "meta_prob", "entry_slippage_bps", "expected_slip_bps", "ev_adj", "outcome", "realized_return", "trades_in_window"] if c in shadow_df.columns]
+    cs = [c for c in ["timestamp", "market_title", "meta_prob", "entry_slippage_bps", "expected_slip_bps", "ev_adj", "outcome", "feature_status", "imputed_feature_count", "missing_feature_count", "realized_return", "trades_in_window"] if c in shadow_df.columns]
     st.dataframe(ensure_safe(shadow_df[cs].tail(100)), use_container_width=True, hide_index=True)
 
 

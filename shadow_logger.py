@@ -27,11 +27,16 @@ class ShadowLogger:
     def log_entry(self, signal_dict, features_df):
         if features_df is None or features_df.empty:
             return None
-        missing = [f for f in self.features if f not in features_df.columns]
+        working = features_df.copy()
+        missing = [f for f in self.features if f not in working.columns]
         if missing:
-            logging.warning("ShadowLogger: missing model features for live scoring: %s", missing[:10])
-            return None
-        X = features_df[self.features].copy()
+            logging.warning("ShadowLogger: imputing missing model features for live scoring: %s", missing[:10])
+            for feature_name in missing:
+                if feature_name == "recent_yes_ratio_5":
+                    working[feature_name] = 0.5
+                else:
+                    working[feature_name] = 0.0
+        X = working[self.features].copy()
         meta_prob = float(self.model.predict_proba(X)[:, 1][0])
         shadow_row = {
             "timestamp": datetime.now(timezone.utc).isoformat(),

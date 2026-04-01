@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] Shad
 
 
 class ResilientCLOBClient:
-    def __init__(self, max_retries=5, base_delay=2, base_url="https://clob.polymarket.com"):
+    def __init__(self, max_retries=5, base_delay=2, base_url="https://data-api.polymarket.com"):
         self.max_retries = max_retries
         self.base_delay = base_delay
         self.trades_url = f"{base_url}/trades"
@@ -25,11 +25,31 @@ class ResilientCLOBClient:
         retries = 0
         while retries < self.max_retries:
             try:
-                params = {"market": str(token_id), "after": int(after_ts), "limit": int(limit)}
-                response = requests.get(self.trades_url, params=params, timeout=10)
-                if response.status_code == 200:
+                page_limit = max(1, min(int(limit), 500))
+                page = 0
+                results = []
+                while len(results) < int(limit) and page < 5:
+                    params = {
+                        "market": str(token_id),
+                        "limit": page_limit,
+                        "offset": page * page_limit,
+                    }
+                    response = requests.get(self.trades_url, params=params, timeout=10)
+                    if response.status_code != 200:
+                        break
                     data = response.json()
-                    return data if isinstance(data, list) else []
+                    page_items = data if isinstance(data, list) else data.get("history", []) if isinstance(data, dict) else []
+                    if not page_items:
+                        break
+                    results.extend(page_items)
+                    page += 1
+                    oldest_ts = min((int(item.get("timestamp", 0) or 0) for item in page_items), default=0)
+                    if oldest_ts and oldest_ts <= int(after_ts):
+                        break
+                if results:
+                    return [item for item in results if int(item.get("timestamp", 0) or 0) >= int(after_ts)]
+                if response.status_code == 200:
+                    return []
                 if response.status_code == 429 or 500 <= response.status_code < 600:
                     retries += 1
                     sleep_time = (self.base_delay * (2 ** (retries - 1))) + random.uniform(0, 1)
@@ -57,7 +77,7 @@ class ShadowPurgatory:
         self.model = bundle["model"]
         self.feature_cols = bundle["features"]
         self.autofill_missing_lags = str(os.getenv("SHADOW_AUTOFILL_MISSING_LAGS", "true")).strip().lower() in {"1", "true", "yes", "on"}
-        self.disable_when_missing = str(os.getenv("SHADOW_DISABLE_ON_MISSING_FEATURES", "true")).strip().lower() in {"1", "true", "yes", "on"}
+        self.disable_when_missing = str(os.getenv("SHADOW_DISABLE_ON_MISSING_FEATURES", "false")).strip().lower() in {"1", "true", "yes", "on"}
         self.missing_warning_cooldown_sec = int(os.getenv("SHADOW_MISSING_WARNING_COOLDOWN_SEC", "300") or 300)
         self._last_missing_warning_ts = 0.0
         self._last_missing_signature = None
@@ -80,7 +100,7 @@ class ShadowPurgatory:
             bucket_df = df[
                 (df["meta_prob"] >= meta_prob - 0.05)
                 & (df["meta_prob"] <= meta_prob + 0.05)
-                & (df["outcome"] != "PENDING")
+                & (~df["outcome"].isin(["PENDING", "FEATURE_BLOCKED"]))
             ].tail(window)
             if bucket_df.empty:
                 return 20.0
@@ -126,24 +146,121 @@ class ShadowPurgatory:
         frame[feature_name] = 0.0
         return True
 
+    def _neutral_feature_value(self, frame: pd.DataFrame, feature_name: str):
+        if feature_name in frame.columns:
+            series = pd.to_numeric(frame[feature_name], errors="coerce").dropna()
+            if not series.empty:
+                return float(series.iloc[0])
+        lower_name = feature_name.lower()
+        if feature_name == "recent_yes_ratio_5":
+            return 0.5
+        if "winrate" in lower_name or "precision" in lower_name or "ratio" in lower_name:
+            return 0.5
+        if "alpha" in lower_name:
+            return 0.0
+        if "count" in lower_name:
+            return 0.0
+        if "size" in lower_name:
+            if "entry_price" in frame.columns:
+                maybe_price = pd.to_numeric(frame["entry_price"], errors="coerce").dropna()
+                if not maybe_price.empty and feature_name == "wallet_avg_size_30d":
+                    return float(maybe_price.iloc[0])
+            return 0.0
+        if "spread" in lower_name:
+            return 0.0
+        return 0.0
+
+    def _impute_missing_feature(self, frame: pd.DataFrame, feature_name: str):
+        if self._autofill_lag_feature(frame, feature_name):
+            return True
+        for alias in ["entry_price", "current_price", "price", "market_last_trade_price", "best_ask", "best_bid"]:
+            if feature_name == alias and alias in frame.columns:
+                return True
+        frame[feature_name] = self._neutral_feature_value(frame, feature_name)
+        return True
+
     def _prepare_features_for_model(self, features_df: pd.DataFrame):
         prepared = features_df.copy()
-        if self.autofill_missing_lags:
-            for feature_name in self.feature_cols:
-                if feature_name in prepared.columns:
-                    continue
-                self._autofill_lag_feature(prepared, feature_name)
+        imputed = []
+        for feature_name in self.feature_cols:
+            if feature_name in prepared.columns:
+                continue
+            if "_lag_" in feature_name and not self.autofill_missing_lags:
+                continue
+            if self._impute_missing_feature(prepared, feature_name):
+                imputed.append(feature_name)
         missing = [f for f in self.feature_cols if f not in prepared.columns]
-        return prepared, missing
+        return prepared, missing, imputed
+
+    def _intent_exists(self, timestamp, token_id, market_slug, trader_wallet):
+        if not self.log_path.exists():
+            return False
+        try:
+            with self.lock:
+                df = pd.read_csv(self.log_path, engine="python", on_bad_lines="skip")
+            if df.empty:
+                return False
+            mask = pd.Series([True] * len(df))
+            for col, value in {
+                "timestamp": timestamp,
+                "token_id": token_id,
+                "market_slug": market_slug,
+                "trader_wallet": trader_wallet,
+            }.items():
+                if col not in df.columns:
+                    return False
+                if value is None or str(value).strip() == "":
+                    return False
+                mask = mask & (df[col].astype(str) == str(value))
+            return bool(mask.any())
+        except Exception:
+            return False
+
+    def _write_shadow_row(self, row: dict):
+        with self.lock:
+            pd.DataFrame([row]).to_csv(self.log_path, mode="a", header=not self.log_path.exists(), index=False)
+
+    def _write_feature_blocked_row(self, signal, missing, imputed):
+        row = {
+            "timestamp": signal.get("timestamp"),
+            "market_title": signal.get("market_title", signal.get("market", "Unknown")),
+            "market_slug": signal.get("market_slug"),
+            "token_id": signal.get("token_id"),
+            "trader_wallet": signal.get("trader_wallet", signal.get("wallet_copied")),
+            "scraper_price": float(signal.get("price", signal.get("entry_price", 0.0)) or 0.0),
+            "shadow_entry_price": float(signal.get("price", signal.get("entry_price", 0.0)) or 0.0),
+            "entry_slippage_bps": 0,
+            "entry_delay_sec": 0,
+            "meta_prob": None,
+            "expected_slip_bps": None,
+            "ev_adj": None,
+            "outcome": "FEATURE_BLOCKED",
+            "realized_return": 0.0,
+            "trades_in_window": 0,
+            "feature_status": "missing_unrecoverable",
+            "imputed_feature_count": len(imputed),
+            "imputed_features": "|".join(imputed),
+            "missing_feature_count": len(missing),
+            "missing_features": "|".join(missing),
+        }
+        self._write_shadow_row(row)
 
     def log_intent(self, signal, features_df):
         try:
             if features_df is None or features_df.empty:
                 return 0.0
-            prepared_df, missing = self._prepare_features_for_model(features_df)
+            prepared_df, missing, imputed = self._prepare_features_for_model(features_df)
+            if self._intent_exists(
+                signal.get("timestamp"),
+                signal.get("token_id"),
+                signal.get("market_slug"),
+                signal.get("trader_wallet", signal.get("wallet_copied")),
+            ):
+                return 0.0
             if missing:
                 self._warn_missing_features(missing)
                 if self.disable_when_missing:
+                    self._write_feature_blocked_row(signal, missing, imputed)
                     return 0.0
                 for feature_name in missing:
                     prepared_df[feature_name] = 0.0
@@ -180,9 +297,13 @@ class ShadowPurgatory:
                 "outcome": "DOA" if is_doa else "PENDING",
                 "realized_return": 0.0,
                 "trades_in_window": 0,
+                "feature_status": "imputed" if imputed else "native",
+                "imputed_feature_count": len(imputed),
+                "imputed_features": "|".join(imputed),
+                "missing_feature_count": len(missing),
+                "missing_features": "|".join(missing),
             }
-            with self.lock:
-                pd.DataFrame([new_row]).to_csv(self.log_path, mode="a", header=not self.log_path.exists(), index=False)
+            self._write_shadow_row(new_row)
             if is_doa:
                 logging.warning("🚫 VETO (DOA): %s | EV_adj: %.2f%% | Exp Slip: %sbps", new_row["market_title"], ev_adj * 100, expected_slip_bps)
                 return 0.0

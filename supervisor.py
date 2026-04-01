@@ -1488,6 +1488,14 @@ def main_loop():
             if scored_df is not None: scored_df = scored_df.loc[:, ~scored_df.columns.duplicated()].copy()
             if scored_df is not None and not scored_df.empty: scored_df = scored_df.loc[:, ~scored_df.columns.duplicated()]
 
+            if shadow_purgatory is not None:
+                try:
+                    shadow_purgatory.resolve_purgatory()
+                    autonomous_monitor.write_heartbeat("shadow_audit", status="ok", message="shadow_purgatory_resolved")
+                except Exception as exc:
+                    logging.warning("Shadow purgatory resolve failed: %s", exc)
+                    autonomous_monitor.write_heartbeat("shadow_audit", status="warn", message="shadow_purgatory_resolve_failed", extra={"error": str(exc)})
+
             if shadow_purgatory is not None and not scored_df.empty:
                 merge_keys = [c for c in ["token_id", "timestamp", "trader_wallet", "market_slug", "market_title"] if c in scored_df.columns and c in inferred_df.columns]
                 if merge_keys:
