@@ -319,6 +319,8 @@ class TradeManager:
                 close_reason = "trajectory_panic_exit"
             elif close_reason is None and bool(trajectory_signal.get("reversal_exit_signal")):
                 close_reason = "trajectory_reversal_exit"
+            elif close_reason is None and roi > 0 and bool(trajectory_signal.get("liquidity_stress_signal")):
+                close_reason = "trajectory_liquidity_stress"
             elif close_reason is None and roi > 0 and bool(trajectory_signal.get("profit_lock_signal")):
                 close_reason = "trajectory_profit_lock"
             elif close_reason is None and (entry_price - current_price) >= exit_thresholds["sl_delta"]:

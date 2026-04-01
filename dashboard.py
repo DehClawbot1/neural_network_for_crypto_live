@@ -949,6 +949,102 @@ def _prepare_portfolio_curve(portfolio_curve_df, position_history_df):
     return agg
 
 
+def _merge_latest_position_context(positions_df, position_history_df):
+    if positions_df is None or positions_df.empty or position_history_df is None or position_history_df.empty:
+        return positions_df
+    latest = (
+        position_history_df.sort_values("timestamp")
+        .groupby("position_key", as_index=False)
+        .tail(1)
+        .copy()
+    )
+    keep = [
+        "position_key",
+        "mark_price",
+        "best_bid",
+        "best_ask",
+        "spread",
+        "mid_price",
+        "spread_pct",
+        "mark_source",
+        "trajectory_state",
+        "drawdown_from_peak",
+        "recent_return_3",
+        "runup_from_entry",
+        "volatility_short",
+        "fallback_ratio",
+    ]
+    keep = [c for c in keep if c in latest.columns]
+    if not keep:
+        return positions_df
+    merged = positions_df.merge(latest[keep], on="position_key", how="left", suffixes=("", "_hist"))
+    for col in keep:
+        hist_col = f"{col}_hist"
+        if hist_col not in merged.columns:
+            continue
+        if col not in merged.columns:
+            merged[col] = merged[hist_col]
+        else:
+            merged[col] = merged[col].where(merged[col].notna(), merged[hist_col])
+        merged.drop(columns=[hist_col], inplace=True)
+    return merged
+
+
+def _history_bucket_freq(history_df):
+    if history_df is None or history_df.empty or "timestamp" not in history_df.columns:
+        return "15s"
+    ts = pd.to_datetime(history_df["timestamp"], errors="coerce", utc=True).dropna()
+    if ts.empty:
+        return "15s"
+    span_seconds = max(float((ts.max() - ts.min()).total_seconds()), 0.0)
+    if span_seconds <= 180:
+        return "10s"
+    if span_seconds <= 900:
+        return "30s"
+    return "1min"
+
+
+def _prepare_position_candles(position_history_df):
+    if position_history_df is None or position_history_df.empty or "timestamp" not in position_history_df.columns:
+        return pd.DataFrame()
+    work = position_history_df.copy()
+    work["timestamp"] = pd.to_datetime(work["timestamp"], errors="coerce", utc=True)
+    work = work[work["timestamp"].notna()].copy()
+    if work.empty:
+        return work
+    for col in ["mark_price", "unrealized_pnl", "best_bid", "best_ask", "spread", "spread_pct"]:
+        if col in work.columns:
+            work[col] = pd.to_numeric(work[col], errors="coerce")
+    work = work.dropna(subset=["mark_price"]).sort_values("timestamp").set_index("timestamp")
+    if work.empty:
+        return pd.DataFrame()
+    freq = _history_bucket_freq(work.reset_index())
+    ohlc = work["mark_price"].resample(freq).ohlc().dropna(how="all")
+    if ohlc.empty:
+        return pd.DataFrame()
+    for col in ["unrealized_pnl", "best_bid", "best_ask", "spread", "spread_pct"]:
+        if col in work.columns:
+            ohlc[col] = work[col].resample(freq).last()
+    return ohlc.reset_index()
+
+
+def _trajectory_badge(state):
+    palette = {
+        "trend_up": ("Trend Up", "#14532d", "#dcfce7"),
+        "trend_down": ("Trend Down", "#7f1d1d", "#fee2e2"),
+        "profit_lock": ("Profit Lock", "#92400e", "#fef3c7"),
+        "reversal_exit": ("Reversal Risk", "#991b1b", "#fee2e2"),
+        "panic_exit": ("Panic Exit", "#7f1d1d", "#fecaca"),
+        "liquidity_stress": ("Liquidity Stress", "#78350f", "#fde68a"),
+        "stable": ("Stable", "#1e3a8a", "#dbeafe"),
+    }
+    label, fg, bg = palette.get(str(state or "stable"), ("Stable", "#1e3a8a", "#dbeafe"))
+    return (
+        f"<span style='display:inline-block;padding:4px 10px;border-radius:999px;"
+        f"font-size:0.8rem;font-weight:700;color:{fg};background:{bg};'>{label}</span>"
+    )
+
+
 def render_positions(positions_df, closed_df, position_history_df=None, portfolio_curve_df=None):
     st.markdown('<div class="sec-title">Open Position Workstation</div>', unsafe_allow_html=True)
     if positions_df is None or positions_df.empty:
@@ -956,12 +1052,46 @@ def render_positions(positions_df, closed_df, position_history_df=None, portfoli
     else:
         pos = normalize_dataframe_columns(positions_df.copy())
         pos["position_key"] = pos.apply(_position_key_from_row, axis=1)
-        for col in ["entry_price", "current_price", "mark_price", "shares", "market_value", "unrealized_pnl", "confidence", "drawdown_from_peak", "recent_return_3", "runup_from_entry"]:
+        hist = _prepare_position_history(position_history_df)
+        curve = _prepare_portfolio_curve(portfolio_curve_df, hist)
+        pos = _merge_latest_position_context(pos, hist)
+        for col in [
+            "entry_price",
+            "current_price",
+            "mark_price",
+            "best_bid",
+            "best_ask",
+            "spread",
+            "spread_pct",
+            "shares",
+            "market_value",
+            "unrealized_pnl",
+            "confidence",
+            "drawdown_from_peak",
+            "recent_return_3",
+            "runup_from_entry",
+            "volatility_short",
+            "fallback_ratio",
+        ]:
             if col in pos.columns:
                 pos[col] = pd.to_numeric(pos[col], errors="coerce")
 
-        hist = _prepare_position_history(position_history_df)
-        curve = _prepare_portfolio_curve(portfolio_curve_df, hist)
+        st.caption("Live active positions are polled every 5 seconds while the supervisor has open trades.")
+        radar_1, radar_2, radar_3, radar_4 = st.columns(4)
+        radar_1.metric("Tracked", int(len(pos)))
+        radar_2.metric("Profit Lock", int((pos.get("trajectory_state", pd.Series(dtype=str)).astype(str) == "profit_lock").sum()))
+        radar_3.metric(
+            "Exit Risk",
+            int(
+                pos.get("trajectory_state", pd.Series(dtype=str)).astype(str).isin(
+                    ["reversal_exit", "panic_exit"]
+                ).sum()
+            ),
+        )
+        radar_4.metric(
+            "Quote Stress",
+            int((pos.get("trajectory_state", pd.Series(dtype=str)).astype(str) == "liquidity_stress").sum()),
+        )
 
         if not curve.empty:
             fig = make_subplots(specs=[[{"secondary_y": True}]])
@@ -1005,55 +1135,139 @@ def render_positions(positions_df, closed_df, position_history_df=None, portfoli
             side = str(row.get("outcome_side", "N/A") or "N/A")
             position_key = str(row.get("position_key", "") or "")
             row_hist = hist[hist["position_key"].astype(str) == position_key].copy() if not hist.empty else pd.DataFrame()
+            candles = _prepare_position_candles(row_hist)
             with card_cols[idx % len(card_cols)]:
                 st.markdown(f"**{market_name}**")
-                st.caption(f"{side} | key `{position_key[:24]}`")
+                st.markdown(_trajectory_badge(row.get("trajectory_state", "stable")), unsafe_allow_html=True)
+                st.caption(f"{side} | key `{position_key[:24]}` | mark source `{row.get('mark_source', 'N/A')}`")
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Entry", fmt_num(row.get("entry_price"), 4))
                 m2.metric("Mark", fmt_num(row.get("mark_price", row.get("current_price")), 4))
                 m3.metric("Unrealized", fmt_money(row.get("unrealized_pnl")))
                 m4.metric("Shares", fmt_num(row.get("shares"), 4))
-                s1, s2, s3 = st.columns(3)
+                s1, s2, s3, s4 = st.columns(4)
                 s1.metric("Run-Up", fmt_pct(row.get("runup_from_entry")))
                 s2.metric("Drawdown", fmt_pct(row.get("drawdown_from_peak")))
                 s3.metric("3-Tick Return", fmt_pct(row.get("recent_return_3")))
-                st.caption(f"Trajectory: {row.get('trajectory_state', 'N/A')} | Mark source: {row.get('mark_source', 'N/A')}")
+                s4.metric("Volatility", fmt_pct(row.get("volatility_short")))
+
+                q1, q2, q3, q4 = st.columns(4)
+                q1.metric("Best Bid", fmt_num(row.get("best_bid"), 4))
+                q2.metric("Best Ask", fmt_num(row.get("best_ask"), 4))
+                q3.metric("Spread %", fmt_pct(row.get("spread_pct")))
+                q4.metric("Fallback", fmt_pct(row.get("fallback_ratio")))
 
                 if not row_hist.empty and "timestamp" in row_hist.columns:
-                    fig = make_subplots(specs=[[{"secondary_y": True}]])
-                    fig.add_trace(
-                        go.Scatter(
-                            x=row_hist["timestamp"],
-                            y=row_hist["mark_price"],
-                            mode="lines",
-                            name="Price",
-                            line=dict(color="#3b82f6", width=2.3),
-                        ),
-                        secondary_y=False,
+                    fig = make_subplots(
+                        rows=2,
+                        cols=1,
+                        shared_xaxes=True,
+                        vertical_spacing=0.08,
+                        row_heights=[0.72, 0.28],
+                        specs=[[{"secondary_y": True}], [{"secondary_y": True}]],
                     )
+                    if not candles.empty and {"open", "high", "low", "close"}.issubset(candles.columns):
+                        fig.add_trace(
+                            go.Candlestick(
+                                x=candles["timestamp"],
+                                open=candles["open"],
+                                high=candles["high"],
+                                low=candles["low"],
+                                close=candles["close"],
+                                name="Micro Candles",
+                                increasing_line_color="#22c55e",
+                                decreasing_line_color="#ef4444",
+                                whiskerwidth=0.5,
+                            ),
+                            row=1,
+                            col=1,
+                            secondary_y=False,
+                        )
+                    else:
+                        fig.add_trace(
+                            go.Scatter(
+                                x=row_hist["timestamp"],
+                                y=row_hist["mark_price"],
+                                mode="lines",
+                                name="Price",
+                                line=dict(color="#3b82f6", width=2.3),
+                            ),
+                            row=1,
+                            col=1,
+                            secondary_y=False,
+                        )
                     entry_price = to_float(row.get("entry_price"), default=None)
                     if entry_price is not None:
-                        fig.add_hline(y=entry_price, line_dash="dash", line_color="#f59e0b", opacity=0.9)
+                        fig.add_hline(y=entry_price, line_dash="dash", line_color="#f59e0b", opacity=0.9, row=1, col=1)
+                    pnl_source = candles if not candles.empty and "unrealized_pnl" in candles.columns else row_hist
                     fig.add_trace(
                         go.Scatter(
-                            x=row_hist["timestamp"],
-                            y=row_hist["unrealized_pnl"],
+                            x=pnl_source["timestamp"],
+                            y=pnl_source["unrealized_pnl"],
                             mode="lines",
                             name="Unrealized PnL",
                             line=dict(color="#22c55e", width=1.8),
                             fill="tozeroy",
                             fillcolor="rgba(34,197,94,0.10)",
                         ),
+                        row=1,
+                        col=1,
                         secondary_y=True,
                     )
+                    quote_source = candles if not candles.empty else row_hist
+                    if "best_bid" in quote_source.columns and quote_source["best_bid"].notna().any():
+                        fig.add_trace(
+                            go.Scatter(
+                                x=quote_source["timestamp"],
+                                y=quote_source["best_bid"],
+                                mode="lines",
+                                name="Best Bid",
+                                line=dict(color="#38bdf8", width=1.4),
+                            ),
+                            row=2,
+                            col=1,
+                            secondary_y=False,
+                        )
+                    if "best_ask" in quote_source.columns and quote_source["best_ask"].notna().any():
+                        fig.add_trace(
+                            go.Scatter(
+                                x=quote_source["timestamp"],
+                                y=quote_source["best_ask"],
+                                mode="lines",
+                                name="Best Ask",
+                                line=dict(color="#fb7185", width=1.4),
+                            ),
+                            row=2,
+                            col=1,
+                            secondary_y=False,
+                        )
+                    if "spread_pct" in quote_source.columns and pd.to_numeric(quote_source["spread_pct"], errors="coerce").notna().any():
+                        fig.add_trace(
+                            go.Scatter(
+                                x=quote_source["timestamp"],
+                                y=pd.to_numeric(quote_source["spread_pct"], errors="coerce") * 100.0,
+                                mode="lines",
+                                name="Spread %",
+                                line=dict(color="#f59e0b", width=1.6),
+                                fill="tozeroy",
+                                fillcolor="rgba(245,158,11,0.10)",
+                            ),
+                            row=2,
+                            col=1,
+                            secondary_y=True,
+                        )
                     fig.update_layout(
-                        title=f"{market_name} Live Path",
+                        title=f"{market_name} Live Terminal",
                         margin=dict(l=18, r=18, t=44, b=18),
                         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+                        xaxis_rangeslider_visible=False,
                     )
-                    fig.update_yaxes(title_text="Price", secondary_y=False)
-                    fig.update_yaxes(title_text="Unrealized PnL", secondary_y=True)
-                    st.plotly_chart(sfig(fig, 300), use_container_width=True)
+                    fig.update_yaxes(title_text="Price", row=1, col=1, secondary_y=False)
+                    fig.update_yaxes(title_text="Unrealized PnL", row=1, col=1, secondary_y=True)
+                    fig.update_yaxes(title_text="Quotes", row=2, col=1, secondary_y=False)
+                    fig.update_yaxes(title_text="Spread %", row=2, col=1, secondary_y=True)
+                    fig.update_xaxes(rangeslider_visible=False, row=1, col=1)
+                    st.plotly_chart(sfig(fig, 360), use_container_width=True)
                 else:
                     st.info("Waiting for live trajectory snapshots for this position.")
 

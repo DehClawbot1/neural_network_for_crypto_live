@@ -2384,6 +2384,8 @@ def main_loop():
                         pos_action_val = 5
                     elif pos_action_val == 3 and trajectory_signal.get("reversal_exit_signal"):
                         pos_action_val = 5
+                    elif pos_action_val == 3 and trajectory_signal.get("liquidity_stress_signal") and unrealized_pnl > 0:
+                        pos_action_val = 4
                     elif pos_action_val == 3 and trajectory_signal.get("profit_lock_signal"):
                         pos_action_val = 4
 

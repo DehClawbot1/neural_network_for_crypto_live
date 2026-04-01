@@ -96,6 +96,8 @@ class PositionTelemetry:
             shares = _safe_float(row.get("shares", 0.0), 0.0)
             market_value = shares * current_price
             unrealized_pnl = shares * (current_price - entry_price)
+            mid_price = ((best_bid + best_ask) / 2.0) if best_bid > 0 and best_ask > 0 else current_price
+            spread_pct = (spread / mid_price) if mid_price > 0 and spread > 0 else 0.0
 
             df.at[idx, "entry_price"] = entry_price
             df.at[idx, "current_price"] = current_price
@@ -103,6 +105,8 @@ class PositionTelemetry:
             df.at[idx, "best_bid"] = best_bid if best_bid > 0 else np.nan
             df.at[idx, "best_ask"] = best_ask if best_ask > 0 else np.nan
             df.at[idx, "spread"] = spread if spread > 0 else max(best_ask - best_bid, 0.0)
+            df.at[idx, "mid_price"] = mid_price if mid_price > 0 else np.nan
+            df.at[idx, "spread_pct"] = spread_pct if spread_pct > 0 else 0.0
             df.at[idx, "market_value"] = market_value
             df.at[idx, "unrealized_pnl"] = unrealized_pnl
             df.at[idx, "mark_source"] = mark_source
@@ -140,6 +144,8 @@ class PositionTelemetry:
             "best_bid",
             "best_ask",
             "spread",
+            "mid_price",
+            "spread_pct",
             "shares",
             "market_value",
             "realized_pnl",
@@ -205,6 +211,8 @@ class PositionTelemetry:
         panic_drop_1 = _safe_float(os.getenv("POSITION_PANIC_DROP_1", "-0.018"), -0.018)
         panic_drop_3 = _safe_float(os.getenv("POSITION_PANIC_DROP_3", "-0.025"), -0.025)
         runup_activation = _safe_float(os.getenv("POSITION_RUNUP_ACTIVATION", "0.015"), 0.015)
+        spread_stress_pct = _safe_float(os.getenv("POSITION_SPREAD_STRESS_PCT", "0.040"), 0.040)
+        fallback_stress_ratio = _safe_float(os.getenv("POSITION_FALLBACK_STRESS_RATIO", "0.50"), 0.50)
 
         metrics = {}
         for position_key, group in snapshots.groupby("position_key"):
@@ -228,6 +236,20 @@ class PositionTelemetry:
             else:
                 slope_norm = 0.0
 
+            if "spread_pct" in work.columns:
+                spread_series = pd.to_numeric(work["spread_pct"], errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            else:
+                bid_source = work["best_bid"] if "best_bid" in work.columns else pd.Series(0.0, index=work.index)
+                ask_source = work["best_ask"] if "best_ask" in work.columns else pd.Series(0.0, index=work.index)
+                bid_series = pd.to_numeric(bid_source, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+                ask_series = pd.to_numeric(ask_source, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+                mid_series = ((bid_series + ask_series) / 2.0).replace(0.0, np.nan)
+                spread_series = ((ask_series - bid_series) / mid_series).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            latest_spread_pct = float(spread_series.iloc[-1]) if len(spread_series) else 0.0
+            volatility_short = float(prices.pct_change().replace([np.inf, -np.inf], np.nan).dropna().std() or 0.0)
+            mark_sources = work.get("mark_source", pd.Series(dtype=str)).astype(str).str.strip().str.lower()
+            fallback_ratio = float((mark_sources != "orderbook_best_bid").mean()) if len(mark_sources) else 0.0
+
             profit_lock_signal = bool(
                 current_price > entry_price
                 and drawdown_from_peak >= profit_guard_drawdown
@@ -242,12 +264,18 @@ class PositionTelemetry:
                 and previous_window_return > 0
             )
             panic_exit_signal = bool(recent_return_1 <= panic_drop_1 or recent_return_3 <= panic_drop_3)
+            liquidity_stress_signal = bool(
+                latest_spread_pct >= spread_stress_pct
+                or fallback_ratio >= fallback_stress_ratio
+            )
 
             trajectory_state = "stable"
             if panic_exit_signal:
                 trajectory_state = "panic_exit"
             elif reversal_exit_signal:
                 trajectory_state = "reversal_exit"
+            elif liquidity_stress_signal:
+                trajectory_state = "liquidity_stress"
             elif profit_lock_signal:
                 trajectory_state = "profit_lock"
             elif recent_return_1 > 0 and slope_norm > 0:
@@ -267,8 +295,12 @@ class PositionTelemetry:
                 "recent_return_3": round(recent_return_3, 6),
                 "previous_window_return": round(previous_window_return, 6),
                 "slope_short": round(float(slope_norm), 6),
+                "volatility_short": round(volatility_short, 6),
+                "spread_pct": round(latest_spread_pct, 6),
+                "fallback_ratio": round(fallback_ratio, 6),
                 "profit_lock_signal": profit_lock_signal,
                 "reversal_exit_signal": reversal_exit_signal,
                 "panic_exit_signal": panic_exit_signal,
+                "liquidity_stress_signal": liquidity_stress_signal,
             }
         return metrics
