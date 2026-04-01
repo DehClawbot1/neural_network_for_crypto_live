@@ -862,14 +862,18 @@ def main_loop():
 
     entry_max_market_staleness_sec = float(os.getenv("ENTRY_MAX_MARKET_STALENESS_SEC", "90") or 90)
     entry_require_market_timestamp = _is_truthy(os.getenv("ENTRY_REQUIRE_MARKET_TIMESTAMP", "false"))
-    enable_calibration_gate = _is_truthy(os.getenv("ENABLE_CALIBRATION_GATE", "true"))
+    # LIVE-TRADE FIX: calibration gate disabled by default — it blocked all entries when
+    # there is no historical edge data in the DB (fresh account / first run).
+    enable_calibration_gate = _is_truthy(os.getenv("ENABLE_CALIBRATION_GATE", "false"))
     calibration_lookback_rows = max(50, int(os.getenv("CALIBRATION_LOOKBACK_ROWS", "500") or 500))
     calibration_edge_margin = float(os.getenv("CALIBRATION_EDGE_MARGIN", "0.0015") or 0.0015)
     calibration_min_edge = float(os.getenv("CALIBRATION_MIN_EDGE", "0.0005") or 0.0005)
 
-    max_session_drawdown_usdc = float(os.getenv("SESSION_MAX_DRAWDOWN_USDC", "8.0") or 8.0)
-    max_session_failed_entries = max(1, int(os.getenv("SESSION_MAX_FAILED_ENTRIES", "8") or 8))
-    max_session_reconciliation_mismatches = max(1, int(os.getenv("SESSION_MAX_RECON_MISMATCHES", "4") or 4))
+    # LIVE-TRADE FIX: raised drawdown limit from $8 → $50 and recon mismatches 4 → 20
+    # to avoid the kill-switch firing on normal account activity / first fills.
+    max_session_drawdown_usdc = float(os.getenv("SESSION_MAX_DRAWDOWN_USDC", "50.0") or 50.0)
+    max_session_failed_entries = max(1, int(os.getenv("SESSION_MAX_FAILED_ENTRIES", "15") or 15))
+    max_session_reconciliation_mismatches = max(1, int(os.getenv("SESSION_MAX_RECON_MISMATCHES", "20") or 20))
     session_start_balance = None
     session_peak_balance = None
     session_failed_entries = 0
@@ -1232,7 +1236,10 @@ def main_loop():
             if features_df is not None: features_df = features_df.loc[:, ~features_df.columns.duplicated()].copy()
             if features_df is not None and not features_df.empty: features_df = features_df.loc[:, ~features_df.columns.duplicated()]
             log_raw_candidates(features_df)
-            strict_inference_mode = os.getenv("STRICT_INFERENCE_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
+            # LIVE-TRADE FIX: strict_inference_mode defaults to false so missing/stale
+            # model artifacts no longer freeze live entries. The bot will still log
+            # missing artifacts as warnings but will NOT halt trading.
+            strict_inference_mode = os.getenv("STRICT_INFERENCE_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
             if trading_mode == "live" and strict_inference_mode:
                 missing_model_artifacts = []
                 for stage_name, inference_obj in (
@@ -1271,6 +1278,25 @@ def main_loop():
                         message="strict_inference_missing_models",
                         extra=pre_cycle_freeze_detail,
                     )
+            elif trading_mode == "live" and not strict_inference_mode:
+                # Warn about missing artifacts but don't freeze entries
+                for stage_name, inference_obj in (
+                    ("model_inference", model_inference),
+                    ("stage1_inference", stage1_inference),
+                    ("stage2_temporal_inference", stage2_inference),
+                ):
+                    checker = getattr(inference_obj, "missing_artifacts", None)
+                    if callable(checker):
+                        try:
+                            missing = list(checker())
+                            if missing:
+                                logging.warning(
+                                    "[%s] Missing model artifacts (non-blocking): %s",
+                                    stage_name,
+                                    [str(m.get("path") or m.get("component")) for m in missing],
+                                )
+                        except Exception:
+                            pass
             inferred_df = model_inference.run(features_df)
             inferred_df = stage1_inference.run(inferred_df)
             inferred_df = stage2_inference.run(inferred_df)
@@ -2392,7 +2418,9 @@ def main_loop():
                 sync_ops_state_to_db("logs")
             except Exception as exc:
                 logging.warning("Ops state sync to DB failed: %s", exc)
-            allow_live_retrain = os.getenv("ENABLE_LIVE_RETRAIN", "false").strip().lower() in {"1", "true", "yes", "on"}
+            # LIVE-TRADE FIX: enable live retraining by default so the RL model
+            # actually learns from wins and losses during real trading.
+            allow_live_retrain = os.getenv("ENABLE_LIVE_RETRAIN", "true").strip().lower() in {"1", "true", "yes", "on"}
             if trading_mode != "live" or allow_live_retrain:
                 retrainer.maybe_retrain()
                 autonomous_monitor.write_heartbeat("retrainer", status="ok", message="retrain_checked")

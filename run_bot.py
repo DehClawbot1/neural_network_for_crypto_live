@@ -1,4 +1,4 @@
-﻿import os
+import os
 import sys
 import logging
 from pathlib import Path
@@ -265,10 +265,13 @@ def start_supervisor():
     apply_supervisor_ui_patch(supervisor_module)
     print("[5/5] Starting supervisor...")
     print("[+] Status: RUNNING")
-    print("[+] Expected behavior:")
-    print("    - fetch public BTC-related market/account activity")
-    print("    - rank paper-trading opportunities")
-    print("    - simulate paper trades")
+    print("[+] Expected behavior (LIVE MODE):")
+    print("    - fetch BTC-related market / account activity")
+    print("    - score opportunities through the signal + inference pipeline")
+    print("    - submit REAL LIVE orders via Polymarket CLOB API")
+    print("    - wait for fill confirmation before registering a position")
+    print("    - manage open positions and exit via RL / rule-based decisions")
+    print("    - retrain RL model from closed trade outcomes")
     print("    - write execution and episode logs")
     print("    - sleep 60 seconds and repeat")
     print("\n[+] Open the dashboard in another terminal with:")
