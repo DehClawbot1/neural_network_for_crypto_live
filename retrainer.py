@@ -62,6 +62,18 @@ class Retrainer:
         except Exception:
             return float(default)
 
+    def _env_float(self, name, default):
+        raw = os.getenv(name)
+        if raw is None or str(raw).strip() == "":
+            return float(default)
+        return self._safe_float(raw, default)
+
+    def _env_int(self, name, default):
+        raw = os.getenv(name)
+        if raw is None or str(raw).strip() == "":
+            return int(default)
+        return int(self._safe_float(raw, default))
+
     def _load_state_payload(self):
         if not self.state_file.exists():
             return {}
@@ -96,6 +108,99 @@ class Retrainer:
                 }
             ]
         ).to_csv(self.status_csv, index=False)
+
+    def _profit_factor_from_pnl(self, pnl_series):
+        pnl = pd.to_numeric(pnl_series, errors="coerce").dropna()
+        if pnl.empty:
+            return 0.0
+        gross_profit = float(pnl[pnl > 0].sum())
+        gross_loss = abs(float(pnl[pnl < 0].sum()))
+        if gross_loss <= 0:
+            return gross_profit if gross_profit > 0 else 0.0
+        return gross_profit / gross_loss
+
+    def _build_live_validation_summary(self):
+        closed_df = self._safe_read(self.closed_file)
+        summary = {
+            "live_closed_trades": 0,
+            "live_win_rate": 0.0,
+            "live_average_pnl": 0.0,
+            "live_profit_factor": 0.0,
+            "live_validation_window": 0,
+        }
+        if closed_df.empty:
+            return summary
+
+        work = closed_df.copy()
+        if "is_reconciliation_close" in work.columns:
+            recon = work["is_reconciliation_close"].astype(str).str.strip().str.lower()
+            work = work[~recon.isin({"true", "1", "yes"})]
+        if "close_reason" in work.columns:
+            reason = work["close_reason"].astype(str).str.strip().str.lower()
+            work = work[reason != "external_manual_close"]
+        if work.empty:
+            return summary
+
+        if "closed_at" in work.columns:
+            work["closed_at"] = pd.to_datetime(work["closed_at"], errors="coerce", utc=True)
+            work = work.sort_values("closed_at")
+
+        lookback = max(1, self._env_int("PROMOTION_LIVE_LOOKBACK_TRADES", 200))
+        work = work.tail(lookback).copy()
+
+        pnl_column = "net_realized_pnl" if "net_realized_pnl" in work.columns else "realized_pnl"
+        pnl = pd.to_numeric(work.get(pnl_column), errors="coerce").dropna()
+        if pnl.empty:
+            return summary
+
+        summary["live_closed_trades"] = int(len(pnl))
+        summary["live_validation_window"] = int(lookback)
+        summary["live_win_rate"] = float((pnl > 0).mean())
+        summary["live_average_pnl"] = float(pnl.mean())
+        summary["live_profit_factor"] = float(self._profit_factor_from_pnl(pnl))
+        return summary
+
+    def _evaluate_promotion_quality_gates(self, candidate_row):
+        live_summary = self._build_live_validation_summary()
+        candidate_row.update(live_summary)
+
+        min_profit_factor = self._env_float("PROMOTION_MIN_PROFIT_FACTOR", 1.05)
+        min_average_pnl = self._env_float("PROMOTION_MIN_AVERAGE_PNL", 0.0)
+        min_live_closed_trades = max(1, self._env_int("PROMOTION_MIN_LIVE_CLOSED_TRADES", 25))
+        min_live_profit_factor = self._env_float("PROMOTION_MIN_LIVE_PROFIT_FACTOR", 1.00)
+        min_live_average_pnl = self._env_float("PROMOTION_MIN_LIVE_AVERAGE_PNL", 0.0)
+
+        failures = []
+        candidate_profit_factor = self._safe_float(candidate_row.get("profit_factor"), 0.0)
+        candidate_average_pnl = self._safe_float(candidate_row.get("average_pnl"), 0.0)
+        if candidate_profit_factor < min_profit_factor:
+            failures.append(
+                f"profit_factor {candidate_profit_factor:.3f} < required {min_profit_factor:.3f}"
+            )
+        if candidate_average_pnl <= min_average_pnl:
+            failures.append(
+                f"average_pnl {candidate_average_pnl:.4f} <= required {min_average_pnl:.4f}"
+            )
+
+        live_closed_trades = int(candidate_row.get("live_closed_trades", 0) or 0)
+        live_profit_factor = self._safe_float(candidate_row.get("live_profit_factor"), 0.0)
+        live_average_pnl = self._safe_float(candidate_row.get("live_average_pnl"), 0.0)
+        if live_closed_trades < min_live_closed_trades:
+            failures.append(
+                f"live_closed_trades {live_closed_trades} < required {min_live_closed_trades}"
+            )
+        if live_profit_factor < min_live_profit_factor:
+            failures.append(
+                f"live_profit_factor {live_profit_factor:.3f} < required {min_live_profit_factor:.3f}"
+            )
+        if live_average_pnl <= min_live_average_pnl:
+            failures.append(
+                f"live_average_pnl {live_average_pnl:.4f} <= required {min_live_average_pnl:.4f}"
+            )
+
+        candidate_row["promotion_gate_passed"] = not failures
+        candidate_row["promotion_gate_failures"] = " | ".join(failures)
+        return not failures, failures
 
     def _normalize_registry(self, registry: pd.DataFrame):
         if registry is None or registry.empty:
@@ -142,6 +247,9 @@ class Retrainer:
             "test_accuracy": self._safe_float(candidate.get("test_accuracy"), 0.0),
             "promoted_at": pd.Timestamp.utcnow().isoformat(),
         }
+        gates_passed, failures = self._evaluate_promotion_quality_gates(row)
+        row["live_validation_passed"] = gates_passed
+        row["live_validation_failures"] = " | ".join(failures)
         return row, champion, None
 
     def _candidate_beats_champion(self, candidate_row, champion):
@@ -253,6 +361,12 @@ class Retrainer:
         if candidate_row is None:
             promoted = False
             message = error_message
+        elif not bool(candidate_row.get("promotion_gate_passed", False)):
+            promoted = False
+            message = (
+                "Candidate failed promotion quality gates: "
+                f"{candidate_row.get('promotion_gate_failures') or 'unknown gate failure'}"
+            )
         elif not self._candidate_beats_champion(candidate_row, champion):
             promoted = False
             message = "Candidate did not beat champion on promotion metrics."
