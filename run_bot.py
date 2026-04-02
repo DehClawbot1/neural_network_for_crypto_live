@@ -47,7 +47,7 @@ RESEARCH_ARTIFACTS = [
     LOGS_DIR / "backtest_summary.csv",
     LOGS_DIR / "path_replay_backtest.csv",
 ]
-DEFAULT_RESEARCH_REFRESH_MAX_AGE_MINUTES = 240
+DEFAULT_RESEARCH_REFRESH_MAX_AGE_MINUTES = 30
 
 
 def is_interactive():
