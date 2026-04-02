@@ -175,6 +175,50 @@ def test_sync_orders_and_fills_mirrors_remote_orders_to_csv(tmp_path):
     assert orders_df.iloc[0]["order_source"] == "exchange_sync"
 
 
+def test_reconcile_uses_recent_exchange_synced_fill_history_as_remote_window(tmp_path):
+    client = MagicMock()
+    client.get_open_orders.return_value = []
+    client.get_trades.return_value = []
+
+    synced_fill_id = "trade-from-history"
+    now_iso = pd.Timestamp.now(tz="UTC").isoformat()
+
+    pd.DataFrame(
+        [
+            {
+                "timestamp": now_iso,
+                "trade_id": synced_fill_id,
+                "order_id": "order-1",
+                "token_id": "tok-1",
+                "condition_id": "cond-1",
+                "outcome_side": "Yes",
+                "side": "BUY",
+                "price": 0.45,
+                "size": 3,
+                "filled_at": now_iso,
+                "fill_id": synced_fill_id,
+                "fill_source": "exchange_sync",
+            }
+        ]
+    ).to_csv(tmp_path / "live_fills.csv", index=False)
+
+    service = ReconciliationService(execution_client=client, logs_dir=tmp_path)
+    service.db.execute(
+        "INSERT OR REPLACE INTO orders (order_id, token_id, condition_id, outcome_side, order_side, price, size, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("order-1", "tok-1", "cond-1", "Yes", "BUY", 0.45, 3.0, "FILLED", now_iso),
+    )
+    service.db.execute(
+        "INSERT OR REPLACE INTO fills (fill_id, order_id, token_id, condition_id, outcome_side, side, price, size, filled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (synced_fill_id, "order-1", "tok-1", "cond-1", "Yes", "BUY", 0.45, 3.0, now_iso),
+    )
+
+    report, _, remote_trades_df = service.reconcile()
+
+    assert report["missing_remote_trades"] == []
+    assert report["remote_trade_history_rows"] == 1
+    assert synced_fill_id in set(remote_trades_df["fill_id"].astype(str).tolist())
+
+
 def test_backfill_live_fills_csv_from_db_is_idempotent(tmp_path):
     service = ReconciliationService(execution_client=MagicMock(), logs_dir=tmp_path)
     service.db.execute(

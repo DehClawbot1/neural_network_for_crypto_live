@@ -161,6 +161,63 @@ class ReconciliationService:
                 ids.add(value)
         return ids
 
+    def _load_recent_remote_trade_history(self, cutoff, known_order_ids=None, tracked_tokens=None):
+        known_order_ids = known_order_ids or set()
+        tracked_tokens = tracked_tokens or set()
+        fills_df = self._safe_read_csv("live_fills.csv")
+        if fills_df.empty:
+            return []
+
+        work = fills_df.copy()
+        if "fill_source" in work.columns:
+            allowed_sources = {"exchange_sync", "external_sync"}
+            source_mask = work["fill_source"].fillna("").astype(str).str.strip().str.lower().isin(allowed_sources)
+            work = work[source_mask]
+        if work.empty:
+            return []
+
+        remote_history = []
+        for _, row in work.iterrows():
+            trade = self._normalize_trade(row.to_dict())
+            if trade is None:
+                continue
+            ts = self._parse_timestamp(trade.get("filled_at"))
+            if ts is not None and not pd.isna(ts) and ts < cutoff:
+                continue
+            oid = str(trade.get("order_id") or "").strip()
+            tid = str(trade.get("token_id") or "").strip()
+            if known_order_ids and oid and oid in known_order_ids:
+                remote_history.append(trade)
+                continue
+            if tracked_tokens and tid and tid in tracked_tokens:
+                remote_history.append(trade)
+                continue
+            if not known_order_ids and not tracked_tokens:
+                remote_history.append(trade)
+        return remote_history
+
+    def _merge_remote_trade_windows(self, *trade_lists):
+        merged = {}
+        for trades in trade_lists:
+            for trade in trades or []:
+                if not isinstance(trade, dict):
+                    continue
+                fill_id = str(trade.get("fill_id") or "").strip()
+                if not fill_id:
+                    continue
+                existing = merged.get(fill_id)
+                if existing is None:
+                    merged[fill_id] = trade
+                    continue
+                # Prefer the richer / fresher record when duplicates exist.
+                existing_ts = self._parse_timestamp(existing.get("filled_at"))
+                trade_ts = self._parse_timestamp(trade.get("filled_at"))
+                if existing_ts is None or pd.isna(existing_ts):
+                    merged[fill_id] = trade
+                elif trade_ts is not None and not pd.isna(trade_ts) and trade_ts >= existing_ts:
+                    merged[fill_id] = trade
+        return list(merged.values())
+
     def _normalize_live_order_csv_row(self, order_row, order_source="exchange_sync"):
         created_at = order_row.get("created_at") or order_row.get("timestamp") or datetime.now(timezone.utc).isoformat()
         try:
@@ -543,8 +600,10 @@ class ReconciliationService:
         remote_trades = [self._normalize_trade(t) for t in remote_trades_raw]
         remote_trades = [t for t in remote_trades if t is not None]
 
-        # Compare only a recent window to avoid permanent mismatches from historical/stale fills.
-        lookback_hours = max(1, int(os.getenv("RECONCILIATION_LOOKBACK_HOURS", "24") or 24))
+        # Compare against a deeper recent window so fills that already mirrored via
+        # exchange sync don't keep surfacing as soft drift when the direct trades
+        # endpoint is briefly shallower than local history.
+        lookback_hours = max(1, int(os.getenv("RECONCILIATION_LOOKBACK_HOURS", "72") or 72))
         cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=lookback_hours)
 
         remote_orders_df = pd.DataFrame(remote_orders)
@@ -562,6 +621,13 @@ class ReconciliationService:
             tracked_tokens = {str(r.get("token_id") or "").strip() for r in rows if str(r.get("token_id") or "").strip()}
         except Exception:
             tracked_tokens = set()
+
+        history_remote_trades = self._load_recent_remote_trade_history(
+            cutoff,
+            known_order_ids=known_order_ids,
+            tracked_tokens=tracked_tokens,
+        )
+        remote_trades = self._merge_remote_trade_windows(remote_trades, history_remote_trades)
 
         filtered_remote_trades = []
         for trade in remote_trades:
@@ -640,6 +706,7 @@ class ReconciliationService:
             "local_fill_rows": len(local_fills),
             "remote_open_orders": len(remote_orders),
             "remote_trades": len(remote_trades),
+            "remote_trade_history_rows": len(history_remote_trades),
             "missing_remote_orders": missing_remote_orders,
             "missing_local_orders": missing_local_orders,
             "missing_remote_trades": missing_remote_trades,
