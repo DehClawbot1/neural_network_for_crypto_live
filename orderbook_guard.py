@@ -90,7 +90,12 @@ class OrderBookGuard:
             book = client.get_order_book(str(token_id))
             return book
         except Exception as exc:
-            logging.warning("OrderBookGuard: Failed to fetch book for %s: %s", str(token_id), exc)
+            # 404 = no orderbook for this token (resolved/inactive market) — expected, not a warning
+            _is_404 = "404" in str(exc) or "No orderbook exists" in str(exc)
+            if _is_404:
+                logging.debug("OrderBookGuard: No orderbook for %s (404 — market likely inactive)", str(token_id))
+            else:
+                logging.warning("OrderBookGuard: Failed to fetch book for %s: %s", str(token_id), exc)
             return None
 
     def _fetch_midpoint(self, token_id):
@@ -244,7 +249,7 @@ class OrderBookGuard:
             return check
         if not analysis["book_available"]:
             check["reason"] = "orderbook_not_available"
-            logging.warning("OrderBookGuard: BLOCKED %s — no order book found", str(token_id))
+            logging.info("OrderBookGuard: BLOCKED %s — no order book found", str(token_id))
             return check
 
         # Gate 2: Must have bids AND asks

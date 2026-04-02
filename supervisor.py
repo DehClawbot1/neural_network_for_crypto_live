@@ -676,6 +676,10 @@ def main_loop():
     trade_manager = TradeManager(logs_dir="logs")
     trade_manager.exec_client = execution_client
     orderbook_guard = OrderBookGuard(max_spread=0.20, min_bid_depth=1, min_ask_depth=1)
+    # Persistent cross-cycle cache: token_id -> time.monotonic() of when we last confirmed no orderbook.
+    # Avoids redundant 404 API hits every cycle for inactive/resolved markets.
+    _ob_no_book_cache: dict = {}  # {token_id: monotonic_timestamp}
+    _OB_NO_BOOK_TTL = 1800.0   # 30 minutes — re-check expired markets occasionally
     _money_mgr = MoneyManager()
     autonomous_monitor = AutonomousMonitor()
     retrainer = Retrainer()
@@ -1617,7 +1621,11 @@ def main_loop():
                 "fills_received": 0,
             }
             _candidate_decision_rows = []
-            _orderbook_unavailable_tokens = set()
+            # Seed per-cycle unavailable set from persistent cache (skip API calls for known-404 tokens)
+            import time as _time
+            _now_mono = _time.monotonic()
+            _ob_no_book_cache = {k: v for k, v in _ob_no_book_cache.items() if _now_mono - v < _OB_NO_BOOK_TTL}
+            _orderbook_unavailable_tokens = set(_ob_no_book_cache.keys())
 
             def _record_candidate_decision(
                 signal_row: dict,
@@ -1848,11 +1856,41 @@ def main_loop():
                         gate="market_universe",
                     )
                     continue
-                in_open_universe = (
-                    (token_id in open_token_ids)
-                    or (signal_condition_id and signal_condition_id in open_condition_ids)
-                    or (signal_slug and signal_slug in open_market_slugs)
-                )
+                signal_has_token = bool(token_id)
+                if signal_has_token:
+                    # Token ID is present: require it to be explicitly in the open set.
+                    # Do NOT allow slug/condition_id to rescue a dead token — that's the
+                    # leak that lets resolved-market tokens reach the orderbook guard.
+                    in_open_universe = token_id in open_token_ids
+                    if not in_open_universe:
+                        # Fallback: check if condition_id or slug is open AND the token_id
+                        # is one of that market's clob_token_ids in markets_df.
+                        # This handles the (rare) case where the scraper saw an older snapshot
+                        # and the token_id was not yet added to open_token_ids this cycle.
+                        slug_or_cond_open = (
+                            (signal_condition_id and signal_condition_id in open_condition_ids)
+                            or (signal_slug and signal_slug in open_market_slugs)
+                        )
+                        if slug_or_cond_open:
+                            # Accept it — the parent market is open, likely a snapshot lag.
+                            in_open_universe = True
+                            logging.debug(
+                                "Universe fallback: token_id %s not in open_token_ids but "
+                                "slug/condition_id is open (snapshot lag?) — allowing",
+                                token_id[:16] if len(token_id) > 16 else token_id,
+                            )
+                        else:
+                            logging.debug(
+                                "Universe gap: token_id %s has no open slug/condition_id either "
+                                "— dead market candidate",
+                                token_id[:16] if len(token_id) > 16 else token_id,
+                            )
+                else:
+                    # No token_id on signal: fall back to slug/condition_id only.
+                    in_open_universe = (
+                        (signal_condition_id and signal_condition_id in open_condition_ids)
+                        or (signal_slug and signal_slug in open_market_slugs)
+                    )
                 if not in_open_universe:
                     _log_candidate_skip(
                         signal_row,
@@ -2041,6 +2079,7 @@ def main_loop():
                             ob_reason = str(ob_check.get("reason") or "").strip().lower()
                             if ob_reason == "orderbook_not_available":
                                 _orderbook_unavailable_tokens.add(token_id)
+                                _ob_no_book_cache[token_id] = _time.monotonic()  # persist across cycles
                             _log_candidate_skip(
                                 signal_row,
                                 "orderbook_not_available" if ob_reason == "orderbook_not_available" else "no_liquidity",

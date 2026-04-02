@@ -199,6 +199,7 @@ def fetch_markets_by_slug_prefix(prefix: str, limit: int = 500, max_offset: int 
 
 
 def save_market_snapshot(markets_df, logs_dir="logs"):
+    import os as _os
     if markets_df is None or markets_df.empty:
         return
 
@@ -216,11 +217,23 @@ def save_market_snapshot(markets_df, logs_dir="logs"):
     merged = pd.concat([existing, markets_df], ignore_index=True)
     if "timestamp" in merged.columns:
         merged["timestamp"] = pd.to_datetime(merged["timestamp"], utc=True, errors="coerce")
+        # Purge rows older than TTL — prevents stale resolved-market token IDs
+        # from persisting in the scraper's market universe indefinitely.
+        try:
+            ttl_hours = max(1, int(_os.getenv("MARKET_SNAPSHOT_TTL_HOURS", "48")))
+            cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=ttl_hours)
+            mask = merged["timestamp"].isna() | (merged["timestamp"] >= cutoff)
+            dropped = int((~mask).sum())
+            merged = merged[mask]
+            if dropped > 0:
+                logging.info("Market snapshot: purged %d stale rows older than %dh", dropped, ttl_hours)
+        except Exception as _exc:
+            logging.debug("Market snapshot TTL purge skipped: %s", _exc)
     dedupe_cols = [c for c in ["market_id", "condition_id", "slug"] if c in merged.columns] # BUG FIX 2: Stop deduplicating on timestamp
     if dedupe_cols:
         merged = merged.drop_duplicates(subset=dedupe_cols, keep="last")
     merged.to_csv(output_file, index=False)
-    logging.info("Saved deduplicated market snapshot to %s", output_file)
+    logging.info("Saved deduplicated market snapshot to %s (%d rows)", output_file, len(merged))
 
 
 if __name__ == "__main__":
