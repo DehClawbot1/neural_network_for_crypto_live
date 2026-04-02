@@ -38,15 +38,27 @@ class SignalEngine:
         market_structure_score = float(np.clip(_safe_float(row.get("market_structure_score", 0.5), default=0.5), 0.0, 1.0))
         volatility_risk = float(np.clip(_safe_float(row.get("volatility_risk", 0.5), default=0.5), 0.0, 1.0))
         time_decay_score = float(np.clip(_safe_float(row.get("time_decay_score", 0.5), default=0.5), 0.0, 1.0))
+        network_activity_score = float(np.clip(_safe_float(row.get("btc_network_activity_score", 0.5), default=0.5), 0.0, 1.0))
+        network_stress_score = float(np.clip(_safe_float(row.get("btc_network_stress_score", 0.5), default=0.5), 0.0, 1.0))
         p_tp = float(np.clip(_safe_float(row.get("p_tp_before_sl", 0.0), default=0.0), 0.0, 1.0))
         expected_return = _safe_float(row.get("expected_return", 0.0), default=0.0)
         edge_score = _safe_float(row.get("edge_score"), default=p_tp * expected_return)
+
+        network_regime_bonus = 0.0
+        if network_activity_score >= 0.55:
+            network_regime_bonus += 0.03
+        if network_stress_score >= 0.65 and whale_pressure >= 0.58 and market_structure_score >= 0.50:
+            network_regime_bonus += 0.04
+        elif network_stress_score <= 0.20:
+            network_regime_bonus -= 0.02
 
         heuristic_confidence = (
             whale_pressure * 0.40
             + market_structure_score * 0.35
             + (1.0 - volatility_risk) * 0.15
             + (1.0 - time_decay_score) * 0.10
+            + network_activity_score * 0.03
+            + network_regime_bonus
         )
         model_confidence = np.clip(
             (p_tp * 0.70)
@@ -91,6 +103,7 @@ class SignalEngine:
             f"edge_score={_safe_float(row.get('edge_score', 0.0), default=0.0):.4f}, "
             f"whale_pressure={_safe_float(row.get('whale_pressure', 0.5), default=0.5):.2f}, "
             f"market_structure={_safe_float(row.get('market_structure_score', 0.5), default=0.5):.2f}, "
+            f"network_stress={_safe_float(row.get('btc_network_stress_score', 0.5), default=0.5):.2f}, "
             f"confidence={_safe_float(confidence, default=0.0):.2f}"
         )
 

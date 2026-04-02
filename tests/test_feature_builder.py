@@ -44,6 +44,45 @@ class TestFeatureLogic(unittest.TestCase):
         self.assertLessEqual(norm_size, 1.0)
         self.assertGreaterEqual(norm_size, 0.0)
 
+    def test_build_feature_row_preserves_open_source_btc_monitoring(self):
+        builder = FeatureBuilder()
+        signal = {
+            "trader_wallet": "0xwhale3",
+            "size": 500,
+            "price": 0.61,
+            "timestamp": "2026-04-02T03:00:00Z",
+            "outcome_side": "UP",
+            "btc_fee_pressure_score": 0.82,
+            "btc_mempool_congestion_score": 0.67,
+            "btc_network_activity_score": 0.74,
+            "btc_network_stress_score": 0.71,
+            "btc_fee_fastest_satvb": 12,
+            "btc_fee_hour_satvb": 7,
+            "btc_difficulty_change_pct": 4.4,
+            "btc_mempool_tx_count": 245000,
+            "btc_mempool_vsize": 14000000,
+            "onchain_network_health": "BUSY",
+        }
+        market = {
+            "condition_id": "cond_1",
+            "yes_token_id": "1",
+            "no_token_id": "2",
+            "best_bid": 0.60,
+            "best_ask": 0.62,
+            "liquidity": 25000,
+            "volume": 90000,
+            "last_trade_price": 0.605,
+        }
+
+        row = builder.build_feature_row(signal, market)
+
+        self.assertEqual(row["btc_fee_pressure_score"], 0.82)
+        self.assertEqual(row["btc_mempool_congestion_score"], 0.67)
+        self.assertEqual(row["btc_network_activity_score"], 0.74)
+        self.assertEqual(row["btc_network_stress_score"], 0.71)
+        self.assertEqual(row["btc_fee_fastest_satvb"], 12.0)
+        self.assertEqual(row["onchain_network_health"], "BUSY")
+
 
 if __name__ == "__main__":
     unittest.main()

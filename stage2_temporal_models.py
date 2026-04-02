@@ -110,7 +110,18 @@ class Stage2TemporalModels:
             if picked:
                 base_features.append(picked)
         lag_features = [c for c in df.columns if "_lag_" in c]
-        context_features = [c for c in ["recent_token_activity_5", "recent_yes_ratio_5"] if c in df.columns]
+        context_features = [
+            c
+            for c in [
+                "recent_token_activity_5",
+                "recent_yes_ratio_5",
+                "btc_fee_pressure_score",
+                "btc_mempool_congestion_score",
+                "btc_network_activity_score",
+                "btc_network_stress_score",
+            ]
+            if c in df.columns
+        ]
         feature_cols = base_features + lag_features + context_features
         if not feature_cols:
             return pd.DataFrame()

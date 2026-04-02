@@ -674,6 +674,7 @@ class LivePositionBook:
                         new_status = "CLOSED"
                 except Exception:
                     new_status = "OPEN"
+                row["status"] = new_status
                 cursor.execute(
                     "UPDATE live_positions SET shares = ?, status = ?, updated_at = ? WHERE position_key = ?",
                     (available_shares, new_status, now, row.get("position_key")),
@@ -681,7 +682,9 @@ class LivePositionBook:
                 mutated = True
             else:
                 row["shares"] = local_shares
-            verified_rows.append(row)
+                row["status"] = "OPEN"
+            if str(row.get("status") or "").upper() == "OPEN":
+                verified_rows.append(row)
 
         if mutated:
             self.db.conn.commit()

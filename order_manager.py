@@ -10,7 +10,7 @@ import pandas as pd
 
 from balance_normalization import normalize_allowance_balance
 from execution_client import ExecutionClient
-from live_risk_manager import LiveRiskManager
+from live_risk_manager import LiveRiskManager, RiskDecision
 from db import Database
 
 try:
@@ -382,7 +382,7 @@ class OrderManager:
         logging.info("Market order submitted: token=%s amount=$%.2f order_id=%s", token_id, amount, order_id)
         return row, response
 
-    def submit_entry(self, token_id, price, size, side="BUY", condition_id=None, outcome_side=None, spread=None, open_orders=0, daily_pnl=0.0, order_type="GTC", post_only=False, execution_style="maker"):
+    def submit_entry(self, token_id, price, size, side="BUY", condition_id=None, outcome_side=None, spread=None, open_orders=0, daily_pnl=0.0, order_type="GTC", post_only=False, execution_style="maker", bypass_risk_checks=False):
         normalized_side = str(side).upper()
         try:
             price = float(price)
@@ -416,7 +416,11 @@ class OrderManager:
             order_size_shares = self._round_down_shares(requested_size)
             notional_usdc = order_size_shares * float(price)
 
-        decision = self.risk.pre_trade_check(token_id=token_id, price=price, size=notional_usdc, spread=spread, open_orders=open_orders, daily_pnl=daily_pnl)
+        decision = (
+            RiskDecision(True, "risk_checks_bypassed")
+            if bool(bypass_risk_checks)
+            else self.risk.pre_trade_check(token_id=token_id, price=price, size=notional_usdc, spread=spread, open_orders=open_orders, daily_pnl=daily_pnl)
+        )
         idempotency_key = f"{token_id}|{condition_id}|{side}|{size}|{round(float(price), 4)}"
         existing = self.list_orders()
         if not existing.empty and "idempotency_key" in existing.columns:
@@ -708,6 +712,7 @@ class OrderManager:
                 "filled_at": datetime.now(timezone.utc).isoformat(),
             }
             self._update_order_status(str(order_id), "FILLED", fill_price=fill_payload["price"], fill_size=fill_payload["size"])
+            self.risk.record_successful_order()
             return {"filled": True, "response": fill_payload, "order_status": {"status": "FILLED", "id": str(order_id)}, "synthetic": True}
 
         deadline = time.time() + float(timeout_seconds)
@@ -802,6 +807,7 @@ class OrderManager:
                     "filled_at": fill_event_time,
                 }
                 self._update_order_status(order_id, "FILLED", fill_price=fill_payload["price"], fill_size=fill_payload["size"])
+                self.risk.record_successful_order()
                 self.record_fill(fill_payload)
                 return {"filled": True, "response": fill_payload, "order_status": last_response}
             if status in ["CANCELED", "FAILED", "REJECTED"]:

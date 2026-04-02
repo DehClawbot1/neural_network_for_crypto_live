@@ -563,6 +563,115 @@ class TradeManager:
         row["lifecycle_source"] = "trade_manager_closed"
         return row
 
+    def _ledger_presence_key(self, row: dict) -> str:
+        token_id = str(row.get("token_id") or "").strip()
+        condition_id = str(row.get("condition_id") or "").strip()
+        outcome_side = str(row.get("outcome_side") or "").strip()
+        if token_id or condition_id or outcome_side:
+            return f"{token_id}|{condition_id}|{outcome_side}"
+        return str(row.get("position_id") or "").strip()
+
+    def _closed_row_fingerprint(self, row: dict) -> str:
+        close_fingerprint = str(row.get("close_fingerprint") or "").strip()
+        if close_fingerprint:
+            return close_fingerprint
+        return "|".join(
+            [
+                str(row.get("token_id", "") or ""),
+                str(row.get("condition_id", "") or ""),
+                str(row.get("outcome_side", "") or ""),
+                str(row.get("opened_at", "") or ""),
+                str(row.get("close_reason", "") or ""),
+                f"{float(row.get('entry_price', 0.0) or 0.0):.6f}",
+                f"{float(row.get('exit_price', row.get('current_price', 0.0)) or 0.0):.6f}",
+                f"{float(row.get('shares', 0.0) or 0.0):.6f}",
+            ]
+        )
+
+    def _append_closed_rows(self, rows: List[dict]):
+        if not rows:
+            return 0
+        existing_fingerprints = set()
+        existing_df = pd.DataFrame()
+        if self.closed_file.exists():
+            try:
+                existing_df = pd.read_csv(self.closed_file, engine="python", on_bad_lines="skip")
+                if not existing_df.empty and "close_fingerprint" in existing_df.columns:
+                    existing_fingerprints = {
+                        str(value)
+                        for value in existing_df["close_fingerprint"].dropna().astype(str).tolist()
+                        if str(value).strip()
+                    }
+            except Exception:
+                existing_fingerprints = set()
+
+        deduped_rows = []
+        for row in rows:
+            row = dict(row)
+            row["close_fingerprint"] = self._closed_row_fingerprint(row)
+            if row["close_fingerprint"] in existing_fingerprints:
+                continue
+            deduped_rows.append(row)
+            existing_fingerprints.add(row["close_fingerprint"])
+
+        if not deduped_rows:
+            return 0
+
+        append_df = pd.DataFrame(deduped_rows)
+        ordered_cols = list(existing_df.columns)
+        for column in append_df.columns:
+            if column not in ordered_cols:
+                ordered_cols.append(column)
+        existing_df = existing_df.reindex(columns=ordered_cols)
+        append_df = append_df.reindex(columns=ordered_cols)
+        merged = append_df.copy() if existing_df.empty else pd.concat([existing_df, append_df], ignore_index=True)
+        merged.to_csv(self.closed_file, index=False)
+        self._upsert_position_rows_to_db(deduped_rows)
+        return len(deduped_rows)
+
+    def _close_absent_ledger_positions(self, open_snapshot_df: pd.DataFrame | None, close_reason: str = "external_manual_close") -> int:
+        open_snapshot_df = open_snapshot_df if open_snapshot_df is not None else pd.DataFrame()
+        snapshot_keys = set()
+        if not open_snapshot_df.empty:
+            for _, row in open_snapshot_df.iterrows():
+                key = self._ledger_presence_key(row.to_dict())
+                if key:
+                    snapshot_keys.add(key)
+
+        open_rows = self.db.query_all(
+            """
+            SELECT
+                position_id, market, market_title, token_id, condition_id, outcome_side, order_side,
+                status, entry_price, current_price, size_usdc, shares, market_value, realized_pnl,
+                net_realized_pnl, unrealized_pnl, confidence, confidence_at_entry, signal_label,
+                close_reason, exit_price, close_fingerprint, is_reconciliation_close, lifecycle_source,
+                opened_at, closed_at
+            FROM positions
+            WHERE UPPER(COALESCE(status, '')) = 'OPEN'
+            """
+        )
+        if not open_rows:
+            return 0
+
+        now = datetime.now(timezone.utc).isoformat()
+        rows_to_close = []
+        for row in open_rows:
+            presence_key = self._ledger_presence_key(row)
+            if presence_key in snapshot_keys:
+                continue
+            closed_row = dict(row)
+            closed_row["status"] = "CLOSED"
+            closed_row["close_reason"] = close_reason
+            closed_row["closed_at"] = now
+            closed_row["exit_price"] = row.get("exit_price") if row.get("exit_price") is not None else row.get("current_price", row.get("entry_price"))
+            closed_row["current_price"] = row.get("current_price", row.get("entry_price"))
+            closed_row["is_reconciliation_close"] = True
+            closed_row["lifecycle_source"] = "trade_manager_reconciled_closed"
+            closed_row["close_fingerprint"] = self._closed_row_fingerprint(closed_row)
+            rows_to_close.append(closed_row)
+
+        return self._append_closed_rows(rows_to_close)
+
     def _upsert_position_rows_to_db(self, rows: List[dict]):
         for row in rows or []:
             self.db.execute(
@@ -707,6 +816,7 @@ class TradeManager:
         if reconciled_positions_df is not None:
             out_df = self._normalize_reconciled_positions_for_csv(reconciled_positions_df)
             out_df.to_csv(self.positions_file, index=False)
+            self._close_absent_ledger_positions(out_df, close_reason="external_manual_close")
             self._upsert_position_rows_to_db(out_df.to_dict("records"))
             return
 
@@ -723,47 +833,10 @@ class TradeManager:
     def _append_closed_trades(self, closed_trades: List[TradeLifecycle]):
         if not closed_trades:
             return
-        existing_fingerprints = set()
-        existing_df = pd.DataFrame()
-        if self.closed_file.exists():
-            try:
-                existing_df = pd.read_csv(self.closed_file, engine="python", on_bad_lines="skip")
-                if not existing_df.empty and "close_fingerprint" in existing_df.columns:
-                    existing_fingerprints = {
-                        str(value)
-                        for value in existing_df["close_fingerprint"].dropna().astype(str).tolist()
-                        if str(value).strip()
-                    }
-            except Exception:
-                existing_fingerprints = set()
-
         rows = []
         for trade in closed_trades:
-            close_fingerprint = self._closed_trade_fingerprint(trade)
-            if close_fingerprint in existing_fingerprints:
-                logger.info(
-                    "Skipping duplicate closed-trade persistence for %s (%s).",
-                    str(getattr(trade, "token_id", "") or "")[:16],
-                    getattr(trade, "close_reason", None),
-                )
-                continue
-            row = self._build_closed_trade_row(trade)
-            rows.append(row)
-            existing_fingerprints.add(close_fingerprint)
-
-        if not rows:
-            return
-
-        append_df = pd.DataFrame(rows)
-        ordered_cols = list(existing_df.columns)
-        for column in append_df.columns:
-            if column not in ordered_cols:
-                ordered_cols.append(column)
-        existing_df = existing_df.reindex(columns=ordered_cols)
-        append_df = append_df.reindex(columns=ordered_cols)
-        merged = append_df.copy() if existing_df.empty else pd.concat([existing_df, append_df], ignore_index=True)
-        merged.to_csv(self.closed_file, index=False)
-        self._upsert_position_rows_to_db(rows)
+            rows.append(self._build_closed_trade_row(trade))
+        self._append_closed_rows(rows)
 
     def backfill_closed_positions_db_from_csv(self):
         if not self.closed_file.exists():

@@ -177,6 +177,10 @@ class FeatureBuilder:
         market_structure_score = _clip01((signal_price * 0.2) + (liquidity_score * 0.3) + (volume_score * 0.25) + (probability_momentum * 0.25))
         volatility_risk = volatility_score
         time_decay_score = _clip01(1.0 - time_left)
+        btc_fee_pressure_score = _clip01(_safe_float(signal.get("btc_fee_pressure_score", 0.5), 0.5))
+        btc_mempool_congestion_score = _clip01(_safe_float(signal.get("btc_mempool_congestion_score", 0.5), 0.5))
+        btc_network_activity_score = _clip01(_safe_float(signal.get("btc_network_activity_score", 0.5), 0.5))
+        btc_network_stress_score = _clip01(_safe_float(signal.get("btc_network_stress_score", 0.5), 0.5))
 
         outcome_side = str(signal.get("outcome_side", signal.get("side", ""))).upper()
         token_id = normalize_token_id(signal.get("token_id"))
@@ -230,6 +234,16 @@ class FeatureBuilder:
             "market_timestamp": market_row.get("timestamp"),
             "probability_momentum": probability_momentum,
             "volatility_score": volatility_score,
+            "btc_fee_fastest_satvb": _safe_float(signal.get("btc_fee_fastest_satvb"), np.nan),
+            "btc_fee_hour_satvb": _safe_float(signal.get("btc_fee_hour_satvb"), np.nan),
+            "btc_difficulty_change_pct": _safe_float(signal.get("btc_difficulty_change_pct"), np.nan),
+            "btc_mempool_tx_count": _safe_float(signal.get("btc_mempool_tx_count"), np.nan),
+            "btc_mempool_vsize": _safe_float(signal.get("btc_mempool_vsize"), np.nan),
+            "btc_fee_pressure_score": btc_fee_pressure_score,
+            "btc_mempool_congestion_score": btc_mempool_congestion_score,
+            "btc_network_activity_score": btc_network_activity_score,
+            "btc_network_stress_score": btc_network_stress_score,
+            "onchain_network_health": signal.get("onchain_network_health", "UNKNOWN"),
             "whale_consensus_score": whale_consensus_score,
             # grouped sub-scores
             "whale_pressure": whale_pressure,

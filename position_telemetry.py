@@ -343,7 +343,10 @@ class PositionTelemetry:
             "spread_pct",
         ]:
             if col not in df.columns:
-                df[col] = np.nan
+                if col == "trajectory_state":
+                    df[col] = pd.Series([None] * len(df), dtype="object")
+                else:
+                    df[col] = np.nan
 
         for idx, row in df.iterrows():
             trade_key = f"{str(row.get('token_id', '') or '').strip()}|{str(row.get('condition_id', '') or '').strip()}|{str(row.get('outcome_side', '') or '').strip()}"

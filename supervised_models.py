@@ -30,6 +30,10 @@ class SupervisedModels:
         "wallet_signal_precision_tp",
         "whale_pressure",
         "market_structure_score",
+        "btc_fee_pressure_score",
+        "btc_mempool_congestion_score",
+        "btc_network_activity_score",
+        "btc_network_stress_score",
     ]
 
     def __init__(self, logs_dir="logs", weights_dir="weights"):

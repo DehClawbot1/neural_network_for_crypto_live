@@ -588,9 +588,8 @@ def minutes_since_last_entry(db) -> float | None:
 # Prevents Polymarket IP Bans during 5-second fast-polling
 _orig_run_scraper_cycle = run_scraper_cycle
 _orig_fetch_btc_markets = fetch_btc_markets
-_last_market_fetch_time = 0
 _last_scraper_time = 0
-_cached_open_markets = pd.DataFrame()
+_open_market_cache = {}
 
 def safe_run_scraper_cycle(*args, **kwargs):
     global _last_scraper_time
@@ -610,20 +609,25 @@ def safe_run_scraper_cycle(*args, **kwargs):
     return out
 
 def safe_fetch_btc_markets(limit=1000, closed=False, max_offset=0):
-    global _last_market_fetch_time, _cached_open_markets
+    global _open_market_cache
     import time
     import pandas as pd
     cache_ttl = max(1, int(os.getenv("MARKET_CACHE_TTL_SECONDS", "55")))
-    
-    # Cache only open-markets snapshots, independent of scraper throttling.
-    if not closed and time.time() - _last_market_fetch_time < cache_ttl:
-        if not _cached_open_markets.empty:
-            return _cached_open_markets
-            
+
+    # Cache open snapshots by request shape so deeper scans are not silently
+    # downgraded to a shallower cached page-0 result.
+    cache_key = (int(limit), int(max_offset or 0))
+    if not closed:
+        now_ts = time.time()
+        cached = _open_market_cache.get(cache_key)
+        if cached is not None and (now_ts - float(cached.get("ts", 0.0))) < cache_ttl:
+            cached_df = cached.get("df")
+            if isinstance(cached_df, pd.DataFrame) and not cached_df.empty:
+                return cached_df
+
     res = _orig_fetch_btc_markets(limit=limit, closed=closed, max_offset=max_offset)
     if not closed and not res.empty:
-        _cached_open_markets = res
-        _last_market_fetch_time = time.time()
+        _open_market_cache[cache_key] = {"ts": time.time(), "df": res}
     return res
 
 run_scraper_cycle = safe_run_scraper_cycle
@@ -1029,6 +1033,7 @@ def main_loop():
             logging.warning("Failed to persist always-on slug state (%s): %s", resolved_slug, exc)
 
     entry_max_market_staleness_sec = float(os.getenv("ENTRY_MAX_MARKET_STALENESS_SEC", "90") or 90)
+    entry_cycle_staleness_grace_sec = float(os.getenv("ENTRY_CYCLE_STALENESS_GRACE_SEC", "300") or 300)
     entry_require_market_timestamp = _is_truthy(os.getenv("ENTRY_REQUIRE_MARKET_TIMESTAMP", "false"))
     # LIVE-TRADE FIX: calibration gate disabled by default — it blocked all entries when
     # there is no historical edge data in the DB (fresh account / first run).
@@ -1048,6 +1053,27 @@ def main_loop():
     session_reconciliation_mismatch_count = 0
     session_kill_switch_active = False
     session_kill_switch_reason = None
+
+    def _classify_precycle_reconciliation_report(recon_report: dict) -> dict:
+        report = recon_report or {}
+        hard_mismatch_counts = {
+            "missing_remote_orders": len(report.get("missing_remote_orders", [])),
+            "missing_local_orders": len(report.get("missing_local_orders", [])),
+            "missing_local_trades": len(report.get("missing_local_trades", [])),
+            "order_mismatches": len(report.get("order_mismatches", [])),
+        }
+        soft_mismatch_counts = {
+            "missing_remote_trades": len(report.get("missing_remote_trades", [])),
+        }
+        hard_mismatch_count = sum(hard_mismatch_counts.values())
+        soft_mismatch_count = sum(soft_mismatch_counts.values())
+        return {
+            "hard_mismatch_count": hard_mismatch_count,
+            "soft_mismatch_count": soft_mismatch_count,
+            "freeze_entries": hard_mismatch_count > 0,
+            "hard_mismatch_counts": hard_mismatch_counts,
+            "soft_mismatch_counts": soft_mismatch_counts,
+        }
 
     def _compute_calibrated_edge(signal_row: dict):
         p_tp = _safe_float(signal_row.get("p_tp_before_sl", signal_row.get("confidence", 0.0)), default=0.0)
@@ -1292,14 +1318,10 @@ def main_loop():
                     trade_manager.reconcile_live_positions(reconciled_positions_df=pre_positions_df)
 
                     recon_report, _, _ = reconciliation_service.reconcile()
-                    mismatch_count = (
-                        len(recon_report.get("missing_remote_orders", []))
-                        + len(recon_report.get("missing_local_orders", []))
-                        + len(recon_report.get("missing_remote_trades", []))
-                        + len(recon_report.get("missing_local_trades", []))
-                        + len(recon_report.get("order_mismatches", []))
-                    )
-                    if mismatch_count > 0:
+                    recon_classification = _classify_precycle_reconciliation_report(recon_report)
+                    hard_mismatch_count = recon_classification["hard_mismatch_count"]
+                    soft_mismatch_count = recon_classification["soft_mismatch_count"]
+                    if hard_mismatch_count > 0:
                         session_reconciliation_mismatch_count += 1
                         if (
                             session_reconciliation_mismatch_count >= max_session_reconciliation_mismatches
@@ -1313,20 +1335,41 @@ def main_loop():
                         pre_cycle_entry_freeze = True
                         pre_cycle_freeze_reason = "precycle_reconciliation_mismatch"
                         pre_cycle_freeze_detail = {
-                            "mismatch_count": mismatch_count,
+                            "mismatch_count": hard_mismatch_count + soft_mismatch_count,
+                            "hard_mismatch_count": hard_mismatch_count,
+                            "soft_mismatch_count": soft_mismatch_count,
                             "missing_remote_orders": recon_report.get("missing_remote_orders", []),
                             "missing_local_orders": recon_report.get("missing_local_orders", []),
                             "missing_remote_trades": recon_report.get("missing_remote_trades", []),
                             "missing_local_trades": recon_report.get("missing_local_trades", []),
+                            "order_mismatches": recon_report.get("order_mismatches", []),
                         }
                         logging.error(
-                            "Pre-cycle reconciliation mismatch detected. Freezing new entries for this cycle: %s",
+                            "Pre-cycle hard reconciliation mismatch detected. Freezing new entries for this cycle: %s",
                             pre_cycle_freeze_detail,
                         )
                         autonomous_monitor.write_heartbeat(
                             "reconciliation",
                             status="error",
                             message="precycle_reconciliation_mismatch",
+                            extra=pre_cycle_freeze_detail,
+                        )
+                    elif soft_mismatch_count > 0:
+                        session_reconciliation_mismatch_count = 0
+                        pre_cycle_freeze_detail = {
+                            "mismatch_count": soft_mismatch_count,
+                            "hard_mismatch_count": hard_mismatch_count,
+                            "soft_mismatch_count": soft_mismatch_count,
+                            "missing_remote_trades": recon_report.get("missing_remote_trades", []),
+                        }
+                        logging.warning(
+                            "Pre-cycle soft reconciliation drift detected. Continuing without entry freeze: %s",
+                            pre_cycle_freeze_detail,
+                        )
+                        autonomous_monitor.write_heartbeat(
+                            "reconciliation",
+                            status="warn",
+                            message="precycle_reconciliation_soft_drift",
                             extra=pre_cycle_freeze_detail,
                         )
                     else:
@@ -1404,16 +1447,40 @@ def main_loop():
             autonomous_monitor.write_heartbeat("signal_engine", status="ok", message="signals_scraped", extra={"rows": len(signals_df) if signals_df is not None else 0})
 
             if signals_df is not None and not signals_df.empty and "market_slug" in signals_df.columns:
-                scraped_slugs = set(signals_df["market_slug"].dropna().astype(str).unique())
+                scraped_slugs = {
+                    str(slug).strip().lower()
+                    for slug in signals_df["market_slug"].dropna().astype(str).unique()
+                    if str(slug).strip()
+                }
                 scraped_slugs.discard("")
-                known_slugs = set(markets_df["slug"].dropna().astype(str).unique()) if markets_df is not None and not markets_df.empty and "slug" in markets_df.columns else set()
+                known_slugs = (
+                    {
+                        str(slug).strip().lower()
+                        for slug in markets_df["slug"].dropna().astype(str).unique()
+                        if str(slug).strip()
+                    }
+                    if markets_df is not None and not markets_df.empty and "slug" in markets_df.columns
+                    else set()
+                )
                 missing_slugs = scraped_slugs - known_slugs
                 if missing_slugs:
                     logging.info("Universe Gap: %s slugs missing. Synchronizing...", len(missing_slugs))
-                    missing_df = fetch_btc_markets(closed=False)
+                    missing_df = fetch_markets_by_slugs(sorted(missing_slugs))
                     if missing_df is not None and not missing_df.empty:
                         markets_df = pd.concat([markets_df, missing_df], ignore_index=True).drop_duplicates(subset=["slug"])
                         if markets_df is not None and not markets_df.empty: markets_df = markets_df.loc[:, ~markets_df.columns.duplicated()]
+                        recovered_slugs = {
+                            str(slug).strip().lower()
+                            for slug in missing_df["slug"].dropna().astype(str).unique()
+                            if str(slug).strip()
+                        } if "slug" in missing_df.columns else set()
+                        logging.info(
+                            "Universe sync recovered %s/%s missing slugs.",
+                            len(recovered_slugs),
+                            len(missing_slugs),
+                        )
+                    else:
+                        logging.warning("Universe sync could not recover any of %s missing slugs.", len(missing_slugs))
             save_market_snapshot(markets_df)
 
             if signals_df.empty:
@@ -1628,16 +1695,252 @@ def main_loop():
                 )
 
             # 4A. Candidate-entry path for new signals
-            current_active_trades = trade_manager.get_open_positions()
-            active_trade_keys = {
-                _trade_key_from_signal({
-                    "token_id": trade.token_id,
-                    "condition_id": trade.condition_id,
-                    "market_title": trade.market,
-                    "outcome_side": trade.outcome_side,
-                })
-                for trade in current_active_trades if trade.market or trade.token_id
-            }
+            current_active_trades = []
+            active_trade_keys = set()
+            current_open_exposure = 0.0
+
+            def _refresh_local_active_trade_state():
+                nonlocal current_active_trades, active_trade_keys, current_open_exposure
+                current_active_trades = [
+                    trade
+                    for trade in trade_manager.active_trades.values()
+                    if getattr(trade, "state", None) != TradeState.CLOSED
+                ]
+                active_trade_keys = {
+                    _trade_key_from_signal({
+                        "token_id": trade.token_id,
+                        "condition_id": trade.condition_id,
+                        "market_title": trade.market,
+                        "outcome_side": trade.outcome_side,
+                    })
+                    for trade in current_active_trades if trade.market or trade.token_id
+                }
+                current_open_exposure = sum(
+                    float(getattr(trade, "size_usdc", 0) or 0)
+                    for trade in current_active_trades
+                )
+
+            _refresh_local_active_trade_state()
+
+            cached_entry_available_balance: float | None = None
+
+            def _invalidate_entry_available_balance():
+                nonlocal cached_entry_available_balance
+                cached_entry_available_balance = None
+
+            def _get_entry_available_balance(force_refresh: bool = False) -> float:
+                nonlocal cached_entry_available_balance
+                if (
+                    not force_refresh
+                    and cached_entry_available_balance is not None
+                    and cached_entry_available_balance > 0
+                ):
+                    return float(cached_entry_available_balance)
+
+                available_balance = 0.0
+                if order_manager is not None:
+                    try:
+                        available_balance, _ = order_manager._get_available_balance(
+                            asset_type="COLLATERAL",
+                            use_onchain_fallback=False,
+                        )
+                    except Exception:
+                        pass
+                if available_balance <= 0 and execution_client is not None and trading_mode != "live":
+                    try:
+                        available_balance = execution_client.get_available_balance(asset_type="COLLATERAL")
+                    except Exception:
+                        pass
+                if available_balance <= 0 and trading_mode == "paper":
+                    try:
+                        _sim_bal = float(os.getenv("SIMULATED_STARTING_BALANCE", "1000"))
+                        available_balance = max(0.0, _sim_bal - current_open_exposure)
+                    except Exception:
+                        available_balance = 0.0
+
+                if available_balance > 0:
+                    cached_entry_available_balance = float(available_balance)
+                return float(available_balance or 0.0)
+
+            def _get_live_available_token_shares(token_id: str) -> float:
+                if trading_mode != "live" or order_manager is None or not token_id:
+                    return 0.0
+                try:
+                    readiness = order_manager.check_readiness(asset_type="CONDITIONAL", token_id=token_id)
+                except Exception:
+                    readiness = None
+                raw_balance = None
+                if isinstance(readiness, dict):
+                    for key in ["balance", "available", "available_balance", "amount"]:
+                        if readiness.get(key) is not None:
+                            raw_balance = readiness[key]
+                            break
+                try:
+                    normalized_balance = float(order_manager._normalize_balance(raw_balance))
+                except Exception:
+                    try:
+                        normalized_balance = float(raw_balance or 0.0)
+                    except Exception:
+                        normalized_balance = 0.0
+                try:
+                    return float(order_manager._round_down_shares(max(0.0, normalized_balance)))
+                except Exception:
+                    return float(max(0.0, normalized_balance))
+
+            def _build_live_exit_price_ladder(token_id: str, fallback_price: float, aggressive: bool = False):
+                tick_size = max(0.001, float(os.getenv("LIVE_EXIT_TICK_SIZE", "0.01") or 0.01))
+                max_attempts = max(2, int(os.getenv("LIVE_EXIT_MAX_ATTEMPTS", "4") or 4))
+                analysis = {}
+                try:
+                    if orderbook_guard is not None:
+                        analysis = orderbook_guard.analyze_book(token_id, depth=max(5, max_attempts))
+                except Exception:
+                    analysis = {}
+
+                ladder = []
+                seen_prices = set()
+
+                def _append_price(raw_price):
+                    try:
+                        price_val = round(float(raw_price), 4)
+                    except Exception:
+                        return
+                    if not (0.009 < price_val < 0.991):
+                        return
+                    if price_val in seen_prices:
+                        return
+                    seen_prices.add(price_val)
+                    ladder.append(price_val)
+
+                for level in (analysis.get("top_bids") or []):
+                    _append_price(level.get("price"))
+
+                best_bid = analysis.get("best_bid")
+                if best_bid is not None:
+                    for step in ([1, 2, 3, 4] if aggressive else [1, 2]):
+                        _append_price(float(best_bid) - (tick_size * step))
+
+                _append_price(fallback_price)
+                if not ladder:
+                    _append_price(quote_exit_price({"current_price": fallback_price}, slippage=0.03 if aggressive else 0.01))
+
+                return ladder[:max_attempts], analysis
+
+            def _execute_live_sell_ladder(token_id: str, requested_shares: float, condition_id=None, outcome_side=None, reference_price: float = 0.0, close_reason: str = "rl_exit"):
+                aggressive_reasons = {
+                    "stop_loss",
+                    "trailing_stop",
+                    "time_stop",
+                    "trajectory_panic_exit",
+                    "trajectory_reversal_exit",
+                    "ai_close_long",
+                }
+                aggressive_exit = str(close_reason or "").strip().lower() in aggressive_reasons
+                fallback_price = max(0.01, min(0.99, float(reference_price or 0.0)))
+                initial_available_shares = _get_live_available_token_shares(token_id)
+                requested_shares = max(0.0, float(requested_shares or 0.0))
+                remaining_target_shares = min(requested_shares, initial_available_shares)
+                if remaining_target_shares <= 0:
+                    return {
+                        "status": "no_inventory",
+                        "filled_shares": 0.0,
+                        "avg_price": fallback_price,
+                        "remaining_exchange_shares": initial_available_shares,
+                        "attempts": [],
+                        "analysis": {},
+                    }
+
+                per_attempt_timeout = max(2.0, float(os.getenv("LIVE_EXIT_ATTEMPT_TIMEOUT_SECONDS", "6") or 6))
+                ladder_prices, analysis = _build_live_exit_price_ladder(token_id, fallback_price=fallback_price, aggressive=aggressive_exit)
+                attempts = []
+                filled_total_shares = 0.0
+                filled_total_notional = 0.0
+                available_before = initial_available_shares
+
+                for attempt_index, attempt_price in enumerate(ladder_prices, start=1):
+                    remaining_target_shares = min(max(requested_shares - filled_total_shares, 0.0), available_before)
+                    if remaining_target_shares <= 1e-6:
+                        break
+
+                    exit_row, exit_response = order_manager.submit_entry(
+                        token_id=token_id,
+                        price=attempt_price,
+                        size=remaining_target_shares,
+                        side="SELL",
+                        condition_id=condition_id,
+                        outcome_side=outcome_side,
+                        order_type="GTC",
+                        post_only=False,
+                        execution_style="taker",
+                        bypass_risk_checks=True,
+                    )
+                    exit_order_id = (exit_row or {}).get("order_id") or (exit_response or {}).get("orderID") or (exit_response or {}).get("order_id") or (exit_response or {}).get("id")
+                    attempt_record = {
+                        "attempt": attempt_index,
+                        "price": attempt_price,
+                        "requested_shares": round(remaining_target_shares, 6),
+                        "order_id": exit_order_id,
+                    }
+
+                    if not exit_order_id:
+                        attempt_record["result"] = "rejected"
+                        attempt_record["reason"] = (exit_row or {}).get("reason") or (exit_response or {}).get("reason")
+                        attempts.append(attempt_record)
+                        continue
+
+                    fill_result = order_manager.wait_for_fill(exit_order_id, timeout_seconds=per_attempt_timeout, poll_seconds=1)
+                    if not fill_result.get("filled"):
+                        logging.warning(
+                            "Live SELL attempt %s/%s not fully filled for %s; attempting cancel for order_id=%s at %.4f",
+                            attempt_index,
+                            len(ladder_prices),
+                            token_id,
+                            exit_order_id,
+                            attempt_price,
+                        )
+                        try:
+                            order_manager.cancel_stale_order(exit_order_id)
+                        except Exception as exc:
+                            logging.warning("Failed to cancel stale live exit order %s: %s", exit_order_id, exc)
+
+                    fill_payload = fill_result.get("response") or {}
+                    available_after = _get_live_available_token_shares(token_id)
+                    actual_filled_shares = max(0.0, available_before - available_after)
+                    reported_fill_size = 0.0
+                    try:
+                        reported_fill_size = float(fill_payload.get("size", 0.0) or 0.0)
+                    except Exception:
+                        reported_fill_size = 0.0
+                    if actual_filled_shares <= 1e-6 and fill_result.get("filled") and reported_fill_size > 0:
+                        actual_filled_shares = min(reported_fill_size, remaining_target_shares)
+                        available_after = max(0.0, available_before - actual_filled_shares)
+
+                    if actual_filled_shares > 1e-6:
+                        try:
+                            actual_fill_price = float(fill_payload.get("price", attempt_price) or attempt_price)
+                        except Exception:
+                            actual_fill_price = float(attempt_price)
+                        filled_total_shares += actual_filled_shares
+                        filled_total_notional += actual_filled_shares * actual_fill_price
+                        attempt_record["result"] = "filled" if fill_result.get("filled") else "partial_after_timeout"
+                        attempt_record["filled_shares"] = round(actual_filled_shares, 6)
+                        attempt_record["fill_price"] = round(actual_fill_price, 6)
+                    else:
+                        attempt_record["result"] = "unfilled"
+
+                    attempts.append(attempt_record)
+                    available_before = available_after
+
+                remaining_exchange_shares = _get_live_available_token_shares(token_id)
+                avg_fill_price = (filled_total_notional / filled_total_shares) if filled_total_shares > 0 else fallback_price
+                return {
+                    "status": "filled" if filled_total_shares >= (requested_shares - 1e-6) else ("partial" if filled_total_shares > 0 else "unfilled"),
+                    "filled_shares": float(filled_total_shares),
+                    "avg_price": float(avg_fill_price),
+                    "remaining_exchange_shares": float(remaining_exchange_shares),
+                    "attempts": attempts,
+                    "analysis": analysis,
+                }
             live_entry_freeze = pre_cycle_entry_freeze
             freeze_reason = pre_cycle_freeze_reason
             freeze_detail = pre_cycle_freeze_detail or {}
@@ -1882,22 +2185,31 @@ def main_loop():
                 if market_age_sec is None and entry_require_market_timestamp:
                     _log_candidate_skip(signal_row, "missing_market_timestamp", gate="freshness")
                     continue
-                if market_age_sec is not None and market_age_sec > entry_max_market_staleness_sec:
+                effective_entry_max_market_staleness_sec = entry_max_market_staleness_sec
+                if trading_mode == "live":
+                    # Current cycles can run long when the bot is reconciling positions,
+                    # checking balances, and walking many candidates. Avoid aging out
+                    # otherwise-current signals purely because this cycle is still busy.
+                    effective_entry_max_market_staleness_sec = max(
+                        effective_entry_max_market_staleness_sec,
+                        entry_cycle_staleness_grace_sec,
+                    )
+                if market_age_sec is not None and market_age_sec > effective_entry_max_market_staleness_sec:
                     _log_candidate_skip(
                         signal_row,
                         "stale_market_data",
                         gate="freshness",
                         market_age_seconds=round(market_age_sec, 3),
-                        max_age_seconds=entry_max_market_staleness_sec,
+                        max_age_seconds=effective_entry_max_market_staleness_sec,
                     )
                     continue
 
-                if len(trade_manager.active_trades) >= _max_pos:
+                if len(current_active_trades) >= _max_pos:
                     _log_candidate_skip(
                         signal_row,
                         "max_concurrent_positions_reached",
                         gate="capacity",
-                        active_positions=len(trade_manager.active_trades),
+                        active_positions=len(current_active_trades),
                         max_positions=_max_pos,
                     )
                     continue
@@ -1976,7 +2288,7 @@ def main_loop():
                     continue
 
                 # FIX: Check dynamic active_trades to prevent Triple-Buy duplicates in the same loop
-                if market_key in active_trade_keys or market_key in trade_manager.active_trades:
+                if market_key in active_trade_keys:
                     logging.info("Prevented duplicate entry: Trade already open for %s.", market_key)
                     _log_candidate_skip(signal_row, "duplicate_active_trade", gate="dedupe", market_key=market_key)
                     continue
@@ -2042,23 +2354,13 @@ def main_loop():
                     # the real fetch (with paper fallbacks) still happens in the
                     # action_val != 0 block so sizing logic is unchanged.
                     try:
-                        if order_manager is not None:
-                            _pre_available_bal, _ = order_manager._get_available_balance(
-                                asset_type="COLLATERAL",
-                                use_onchain_fallback=False,
-                            )
-                        elif execution_client is not None and trading_mode != "live":
-                            _pre_available_bal = execution_client.get_available_balance(asset_type="COLLATERAL")
+                        _pre_available_bal = _get_entry_available_balance()
                     except Exception:
                         pass
                     if (_pre_available_bal is None or _pre_available_bal <= 0) and trading_mode == "paper":
                         try:
                             _sim_bal = float(os.getenv("SIMULATED_STARTING_BALANCE", "1000"))
-                            _open_cost = sum(
-                                float(getattr(t, "size_usdc", 0) or 0)
-                                for t in trade_manager.get_open_positions()
-                            )
-                            _pre_available_bal = max(0.0, _sim_bal - _open_cost)
+                            _pre_available_bal = max(0.0, _sim_bal - current_open_exposure)
                         except Exception:
                             pass
 
@@ -2099,40 +2401,42 @@ def main_loop():
                     confidence = _safe_float(signal_row.get("confidence", 0.0), default=0.0)
 
                     # ── Get balance (with paper mode fallback) ──
-                    _available_bal = 0.0
-                    if order_manager is not None:
-                        try:
-                            # Sizing must use the exchange-reported spendable CLOB balance only.
-                            _available_bal, _ = order_manager._get_available_balance(
-                                asset_type="COLLATERAL",
-                                use_onchain_fallback=False,
-                            )
-                        except Exception:
-                            pass
-                    if _available_bal <= 0 and execution_client is not None and trading_mode != "live":
-                        try:
-                            _available_bal = execution_client.get_available_balance(asset_type="COLLATERAL")
-                        except Exception:
-                            pass
+                    _available_bal = _get_entry_available_balance()
                     # ── BUGFIX: Paper mode needs simulated balance ──
                     if _available_bal <= 0 and trading_mode == "paper":
                         _sim_bal = float(os.getenv("SIMULATED_STARTING_BALANCE", "1000"))
-                        _open_cost = sum(float(getattr(t, 'size_usdc', 0) or 0) for t in trade_manager.get_open_positions())
-                        _available_bal = max(0.0, _sim_bal - _open_cost)
+                        _available_bal = max(0.0, _sim_bal - current_open_exposure)
 
-                    _current_exposure = sum(
-                        float(getattr(t, 'size_usdc', 0) or 0)
-                        for t in trade_manager.get_open_positions()
-                    )
+                    _current_exposure = current_open_exposure
                     size_usdc = _money_mgr.calculate_bet_size(
                         available_balance=_available_bal,
                         confidence=confidence,
                         current_exposure=_current_exposure,
                     )
-                    strategic_min_entry = max(
+                    min_bet_usdc = float(getattr(TradingConfig, "MIN_BET_USDC", 1.0))
+                    configured_min_entry = max(
+                        min_bet_usdc,
                         float(getattr(TradingConfig, "MIN_BET_USDC", 1.0)),
                         float(getattr(TradingConfig, "MIN_ENTRY_USDC", getattr(TradingConfig, "MIN_BET_USDC", 1.0))),
                     )
+                    reserve_pct = max(0.0, min(0.95, float(getattr(TradingConfig, "CAPITAL_RESERVE_PCT", 0.20))))
+                    tradable_balance = max(0.0, _available_bal - (_available_bal * reserve_pct))
+                    hard_max_bet = max(min_bet_usdc, float(getattr(TradingConfig, "HARD_MAX_BET_USDC", 250.0)))
+                    risk_capped_max_entry = min(
+                        tradable_balance * float(getattr(TradingConfig, "MAX_RISK_PER_TRADE_PCT", 0.15)),
+                        hard_max_bet,
+                    )
+                    effective_min_entry = configured_min_entry
+                    risk_capped_below_strategy_floor = (
+                        risk_capped_max_entry + 1e-9 < configured_min_entry and size_usdc + 1e-9 >= min_bet_usdc
+                    )
+                    if risk_capped_below_strategy_floor:
+                        # Small live accounts can otherwise deadlock forever here:
+                        # MoneyManager correctly respects max-risk, but the static
+                        # strategic floor rejects every entry. Fall back to the
+                        # exchange minimum when the risk cap itself sits below the
+                        # strategic anti-micro threshold.
+                        effective_min_entry = min_bet_usdc
                     if size_usdc <= 0:
                         logging.info(
                             "MoneyManager: skip trade (balance=$%.2f, conf=%.2f, exposure=$%.2f)",
@@ -2147,12 +2451,12 @@ def main_loop():
                             current_exposure=round(_current_exposure, 6),
                         )
                         continue
-                    if size_usdc + 1e-9 < strategic_min_entry:
+                    if size_usdc + 1e-9 < effective_min_entry:
                         logging.info(
                             "Anti-micro guard: skipping tiny entry for %s (size=$%.2f < min_entry=$%.2f)",
                             token_id[:16],
                             size_usdc,
-                            strategic_min_entry,
+                            effective_min_entry,
                         )
                         _log_candidate_skip(
                             signal_row,
@@ -2161,10 +2465,21 @@ def main_loop():
                             model_action=action_map.get(action_val, "UNKNOWN"),
                             available_balance=round(_available_bal, 6),
                             current_exposure=round(_current_exposure, 6),
-                            strategic_min_entry=round(strategic_min_entry, 6),
+                            strategic_min_entry=round(configured_min_entry, 6),
+                            effective_min_entry=round(effective_min_entry, 6),
+                            risk_capped_max_entry=round(risk_capped_max_entry, 6),
                             proposed_size_usdc=round(size_usdc, 6),
                         )
                         continue
+                    if risk_capped_below_strategy_floor and size_usdc + 1e-9 < configured_min_entry:
+                        logging.info(
+                            "Anti-micro guard: allowing risk-capped small-account entry for %s (size=$%.2f, configured_min=$%.2f, effective_min=$%.2f, risk_cap=$%.2f)",
+                            token_id[:16],
+                            size_usdc,
+                            configured_min_entry,
+                            effective_min_entry,
+                            risk_capped_max_entry,
+                        )
                     # ── Order book guard: check spread/depth before entry ──
                     try:
                         ob_check = orderbook_guard.check_before_entry(
@@ -2314,6 +2629,8 @@ def main_loop():
                         trade.enter(size_usdc=size_usdc, entry_price=actual_fill_price)
                         trade.shares = actual_fill_size
                         trade_manager.active_trades[market_key] = trade
+                        _refresh_local_active_trade_state()
+                        _invalidate_entry_available_balance()
                         logging.info("Live trade filled for %s at %s. Shares: %s", token_id, actual_fill_price, actual_fill_size)
                         _record_candidate_decision(
                             signal_row,
@@ -2332,6 +2649,8 @@ def main_loop():
                         # FIX C7: Don't also call execute_paper_trade — it creates duplicate log entries
                         trade = trade_manager.handle_signal(signal_row=pd.Series(signal_row), confidence=confidence, size_usdc=size_usdc, entry_price_override=fill_price)
                         if trade is not None:
+                            _refresh_local_active_trade_state()
+                            _invalidate_entry_available_balance()
                             logging.info(
                                 "Brain: FOLLOW -> Paper filled %s USDC on %s at $%.3f for '%s' | label=%s confidence=%.2f",
                                 size_usdc,
@@ -2461,7 +2780,11 @@ def main_loop():
                     trajectory_metrics = position_telemetry.build_trajectory_metrics(live_positions_df_for_cycle)
                 except Exception as exc:
                     logging.warning("Live trade reconciliation failed before management decisions: %s", exc)
-            current_open_trades = trade_manager.get_open_positions()
+            current_open_trades = [
+                trade
+                for trade in trade_manager.active_trades.values()
+                if getattr(trade, "state", None) != TradeState.CLOSED
+            ]
             if current_open_trades and (position_brain is not None or legacy_brain is not None):
                 scored_lookup = {}
                 if scored_df is not None and not scored_df.empty:
@@ -2581,7 +2904,6 @@ def main_loop():
                         if getattr(trade, 'has_been_reduced', False):
                             continue
                         logging.info("[%s] Reducing position for %s", trading_mode.upper(), token_id)
-                        trade.has_been_reduced = True
                         if trading_mode == "live" and order_manager is not None:
                             try:
                                 _ob_exit = orderbook_guard.analyze_book(token_id, depth=5)
@@ -2593,33 +2915,41 @@ def main_loop():
                                 exit_price = quote_exit_price(pos_dict)
                             exit_shares = trade.shares * 0.5
                             if exit_price is not None and exit_shares > 0:
-                                reduce_row, reduce_response = order_manager.submit_entry(
+                                pre_reduce_shares = max(float(trade.shares or 0.0), 0.0)
+                                reduce_result = _execute_live_sell_ladder(
                                     token_id=token_id,
-                                    price=exit_price,
-                                    size=exit_shares,
-                                    side="SELL",
+                                    requested_shares=exit_shares,
                                     condition_id=trade.condition_id,
                                     outcome_side=trade.outcome_side,
+                                    reference_price=exit_price,
+                                    close_reason="rl_reduce",
                                 )
-                                reduce_order_id = (reduce_row or {}).get("order_id") or (reduce_response or {}).get("orderID") or (reduce_response or {}).get("order_id") or (reduce_response or {}).get("id")
-                                if reduce_order_id:
-                                    fill_result = order_manager.wait_for_fill(reduce_order_id)
-                                    if fill_result.get("filled"):
-                                        fill_payload = fill_result.get("response") or {}
-                                        actual_fill_price = float(fill_payload.get("price", exit_price) or exit_price)
-                                        sz = fill_payload.get("size", exit_shares)
-                                        actual_fill_size = float(sz) if (sz is not None and str(sz).strip() and float(sz) > 0) else exit_shares # BUG 8 FIX
-                                        log_live_fill_event(pos_dict, actual_fill_price, actual_fill_size, action_type="LIVE_REDUCE")
-                                        trade.partial_exit(fraction=actual_fill_size / trade.shares, exit_price=actual_fill_price) # Update TradeLifecycle
-                                    else:
-                                        logging.warning("Live REDUCE not filled for %s; attempting cancel for order_id=%s", token_id, reduce_order_id)
-                                        try:
-                                            order_manager.cancel_stale_order(reduce_order_id)
-                                        except Exception as exc:
-                                            logging.warning("Failed to cancel stale live reduce order %s: %s", reduce_order_id, exc)
+                                actual_fill_size = min(float(reduce_result.get("filled_shares", 0.0) or 0.0), pre_reduce_shares)
+                                if actual_fill_size > 1e-6:
+                                    actual_fill_price = float(reduce_result.get("avg_price", exit_price) or exit_price)
+                                    log_live_fill_event(pos_dict, actual_fill_price, actual_fill_size, action_type="LIVE_REDUCE")
+                                    trade.partial_exit(
+                                        fraction=min(1.0, actual_fill_size / max(pre_reduce_shares, 1e-9)),
+                                        exit_price=actual_fill_price,
+                                    )
+                                    trade.has_been_reduced = True
+                                    logging.info(
+                                        "Live REDUCE filled %.6f/%.6f shares for %s across %s attempt(s).",
+                                        actual_fill_size,
+                                        pre_reduce_shares,
+                                        token_id,
+                                        len(reduce_result.get("attempts", [])),
+                                    )
+                                else:
+                                    logging.warning(
+                                        "Live REDUCE remained unfilled for %s after %s attempt(s).",
+                                        token_id,
+                                        len(reduce_result.get("attempts", [])),
+                                    )
                             else:
                                 logging.warning("Live REDUCE skipped for %s due to invalid exit price/size", token_id)
                         else:
+                            trade.has_been_reduced = True
                             trade.partial_exit(fraction=0.5, exit_price=trade.current_price) # Paper reduce
                             logging.info("Paper REDUCE for %s. Current PnL: %.2f (reason=rl_reduce)", token_id, trade.realized_pnl)
                     elif pos_action_val == 5: # EXIT
@@ -2635,32 +2965,40 @@ def main_loop():
                                 exit_price = quote_exit_price(pos_dict)
                             exit_shares = trade.shares
                             if exit_price is not None and exit_shares > 0:
-                                exit_row, exit_response = order_manager.submit_entry(
+                                pre_exit_shares = max(float(trade.shares or 0.0), 0.0)
+                                exit_result = _execute_live_sell_ladder(
                                     token_id=token_id,
-                                    price=exit_price,
-                                    size=exit_shares,
-                                    side="SELL",
+                                    requested_shares=exit_shares,
                                     condition_id=trade.condition_id,
                                     outcome_side=trade.outcome_side,
+                                    reference_price=exit_price,
+                                    close_reason="rl_exit",
                                 )
-                                exit_order_id = (exit_row or {}).get("order_id") or (exit_response or {}).get("orderID") or (exit_response or {}).get("order_id") or (exit_response or {}).get("id")
-                                if exit_order_id:
-                                    fill_result = order_manager.wait_for_fill(exit_order_id)
-                                    if fill_result.get("filled"):
-                                        fill_payload = fill_result.get("response") or {}
-                                        actual_fill_price = float(fill_payload.get("price", exit_price) or exit_price)
-                                        sz = fill_payload.get("size", exit_shares)
-                                        actual_fill_size = float(sz) if (sz is not None and str(sz).strip() and float(sz) > 0) else exit_shares # BUG 8 FIX
-                                        log_live_fill_event(pos_dict, actual_fill_price, actual_fill_size, action_type="LIVE_EXIT")
+                                actual_fill_size = min(float(exit_result.get("filled_shares", 0.0) or 0.0), pre_exit_shares)
+                                if actual_fill_size > 1e-6:
+                                    actual_fill_price = float(exit_result.get("avg_price", exit_price) or exit_price)
+                                    log_live_fill_event(pos_dict, actual_fill_price, actual_fill_size, action_type="LIVE_EXIT")
+                                    if actual_fill_size >= pre_exit_shares - 1e-6:
                                         trade.close(exit_price=actual_fill_price, reason="rl_exit") # Update TradeLifecycle
                                         trade_manager.persist_closed_trades([trade])
                                         trade_manager.active_trades.pop(_make_position_key(token_id=trade.token_id, condition_id=trade.condition_id, outcome_side=trade.outcome_side, market=trade.market), None) # Remove from active trades
                                     else:
-                                        logging.warning("Live EXIT not filled for %s; attempting cancel for order_id=%s", token_id, exit_order_id)
-                                        try:
-                                            order_manager.cancel_stale_order(exit_order_id)
-                                        except Exception as exc:
-                                            logging.warning("Failed to cancel stale live exit order %s: %s", exit_order_id, exc)
+                                        trade.partial_exit(
+                                            fraction=min(1.0, actual_fill_size / max(pre_exit_shares, 1e-9)),
+                                            exit_price=actual_fill_price,
+                                        )
+                                        logging.warning(
+                                            "Live EXIT partially filled for %s (filled=%.6f remaining=%.6f).",
+                                            token_id,
+                                            actual_fill_size,
+                                            float(trade.shares or 0.0),
+                                        )
+                                else:
+                                    logging.warning(
+                                        "Live EXIT remained unfilled for %s after %s attempt(s).",
+                                        token_id,
+                                        len(exit_result.get("attempts", [])),
+                                    )
                             else:
                                 logging.warning("Live EXIT skipped for %s due to invalid exit price/size", token_id)
                         else:
@@ -2671,7 +3009,11 @@ def main_loop():
             # Process any pending exits (e.g., from CLOSE_LONG signals or internal rules)
             predictive_exit_targets = _build_predictive_exit_targets(
                 scored_df,
-                trade_manager.get_open_positions(),
+                [
+                    trade
+                    for trade in trade_manager.active_trades.values()
+                    if getattr(trade, "state", None) != TradeState.CLOSED
+                ],
             )
             closed_trades = trade_manager.process_exits(
                 datetime.now(timezone.utc),
@@ -2726,27 +3068,46 @@ def main_loop():
                         logging.info("Submitting SELL for rule exit: token=%s shares=%.2f price=%.4f reason=%s", 
                                      _ct_token[:16], ct.shares, _exit_p, ct.close_reason)
                         try:
-                            _exit_row, _exit_resp = order_manager.submit_entry(
-                                token_id=_ct_token, price=_exit_p, size=ct.shares, side="SELL", 
-                                condition_id=ct.condition_id, outcome_side=ct.outcome_side)
-                                
-                            _exit_oid = (_exit_row or {}).get("order_id")
-                            if _exit_oid:
-                                _fill = order_manager.wait_for_fill(_exit_oid, timeout_seconds=15)
-                                if _fill.get("filled"):
-                                    log_live_fill_event(
-                                        {"token_id": _ct_token, "market_title": ct.market, "outcome_side": ct.outcome_side, "current_price": _exit_p},
-                                        _exit_p, ct.shares, action_type=f"LIVE_EXIT_{ct.close_reason}")
+                            _pre_ct_shares = max(float(ct.shares or 0.0), 0.0)
+                            _exit_result = _execute_live_sell_ladder(
+                                token_id=_ct_token,
+                                requested_shares=_pre_ct_shares,
+                                condition_id=ct.condition_id,
+                                outcome_side=ct.outcome_side,
+                                reference_price=_exit_p,
+                                close_reason=getattr(ct, "close_reason", None) or "policy_exit",
+                            )
+                            _filled_ct_shares = min(float(_exit_result.get("filled_shares", 0.0) or 0.0), _pre_ct_shares)
+                            if _filled_ct_shares > 1e-6:
+                                _actual_exit_price = float(_exit_result.get("avg_price", _exit_p) or _exit_p)
+                                log_live_fill_event(
+                                    {"token_id": _ct_token, "market_title": ct.market, "outcome_side": ct.outcome_side, "current_price": _actual_exit_price},
+                                    _actual_exit_price,
+                                    _filled_ct_shares,
+                                    action_type=f"LIVE_EXIT_{ct.close_reason}",
+                                )
+                                if _filled_ct_shares >= _pre_ct_shares - 1e-6:
                                     trade_manager.persist_closed_trades([ct])
                                 else:
-                                    try: order_manager.cancel_stale_order(_exit_oid)
-                                    except Exception: pass
-                                    # FIX: RESTORE ZOMBIE TRADE TO MEMORY IF SELL FAILS
-
                                     trade_manager.active_trades[_make_position_key(token_id=ct.token_id, condition_id=ct.condition_id, outcome_side=ct.outcome_side, market=ct.market)] = ct
                                     ct.state = TradeState.OPEN
+                                    ct.closed_at = None
                                     ct.close_reason = None
-                                    logging.warning("Live SELL failed for %s. Restored to active tracking.", _ct_token[:16])
+                                    ct.partial_exit(
+                                        fraction=min(1.0, _filled_ct_shares / max(_pre_ct_shares, 1e-9)),
+                                        exit_price=_actual_exit_price,
+                                    )
+                                    logging.warning(
+                                        "Live SELL partially filled for %s (filled=%.6f remaining=%.6f). Restored remainder to active tracking.",
+                                        _ct_token[:16],
+                                        _filled_ct_shares,
+                                        float(ct.shares or 0.0),
+                                    )
+                            else:
+                                trade_manager.active_trades[_make_position_key(token_id=ct.token_id, condition_id=ct.condition_id, outcome_side=ct.outcome_side, market=ct.market)] = ct
+                                ct.state = TradeState.OPEN
+                                ct.close_reason = None
+                                logging.warning("Live SELL failed for %s after %s attempt(s). Restored to active tracking.", _ct_token[:16], len(_exit_result.get("attempts", [])))
                         except Exception as _exc:
                             logging.error("Failed SELL for %s: %s", _ct_token[:16], _exc)
 
@@ -2838,7 +3199,13 @@ def main_loop():
             else:
                 autonomous_monitor.write_heartbeat("retrainer", status="ok", message="retrain_skipped_live")
 
-            if len(trade_manager.get_open_positions()) > 0:
+            open_positions_count_for_sleep = 0
+            if trading_mode == "live":
+                open_positions_count_for_sleep = len(open_positions_df_for_status) if open_positions_df_for_status is not None else 0
+            else:
+                open_positions_count_for_sleep = len(open_positions_for_status)
+
+            if open_positions_count_for_sleep > 0:
                 logging.info("Cycle complete. Fast-polling active trades. Sleeping for 5 seconds...")
                 time.sleep(5)
             else:
