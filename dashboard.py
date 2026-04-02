@@ -76,6 +76,8 @@ FILES = {
     "candidate_cycle_stats": LOGS / "candidate_cycle_stats.csv",
     "position_snapshots": LOGS / "position_snapshots.csv",
     "portfolio_curve": LOGS / "portfolio_equity_curve.csv",
+    "feedback_reports": LOGS / "trade_feedback_reports.csv",
+    "feedback_summary": LOGS / "trade_feedback_summary.csv",
 }
 
 st.set_page_config(page_title="NNC Trading Terminal", page_icon="N", layout="wide", initial_sidebar_state="expanded")
@@ -230,6 +232,172 @@ def load_candidate_decisions_from_db(hours=6):
         return pd.DataFrame()
 
 
+@st.cache_data(show_spinner=False, ttl=20)
+def load_closed_positions_from_db():
+    db_path = LOGS / "trading.db"
+    if not db_path.exists():
+        return pd.DataFrame()
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            df = pd.read_sql_query(
+                """
+                SELECT
+                    position_id,
+                    token_id,
+                    condition_id,
+                    outcome_side,
+                    status,
+                    market,
+                    market_title,
+                    order_side,
+                    size_usdc,
+                    shares,
+                    entry_price,
+                    current_price,
+                    exit_price,
+                    realized_pnl,
+                    net_realized_pnl,
+                    confidence,
+                    confidence_at_entry,
+                    signal_label,
+                    close_reason,
+                    close_fingerprint,
+                    is_reconciliation_close,
+                    lifecycle_source,
+                    opened_at,
+                    closed_at
+                FROM positions
+                WHERE UPPER(COALESCE(status, '')) = 'CLOSED'
+                ORDER BY COALESCE(closed_at, opened_at, '') DESC
+                """,
+                conn,
+            )
+        return normalize_dataframe_columns(df)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _closed_lineage_key_from_row(row):
+    getter = row.get if hasattr(row, "get") else lambda key, default=None: default
+    close_fingerprint = str(getter("close_fingerprint", "") or "").strip()
+    if close_fingerprint and close_fingerprint.lower() not in {"nan", "none"}:
+        return f"fp:{close_fingerprint}"
+    position_id = str(getter("position_id", "") or "").strip()
+    token_id = str(getter("token_id", "") or "").strip()
+    condition_id = str(getter("condition_id", "") or "").strip()
+    outcome_side = str(getter("outcome_side", "") or "").strip()
+    opened_at = str(getter("opened_at", "") or "").strip()
+    close_reason = str(getter("close_reason", "") or "").strip()
+    entry_price = str(getter("entry_price", "") or "").strip()
+    exit_price = str(getter("exit_price", getter("current_price", "")) or "").strip()
+    shares = str(getter("shares", "") or "").strip()
+    parts = [position_id, token_id, condition_id, outcome_side, opened_at, close_reason, entry_price, exit_price, shares]
+    if any(parts):
+        return "row:" + "|".join(parts)
+    return None
+
+
+def _collect_closed_lineage_keys(frame):
+    keys = set()
+    if frame is None or getattr(frame, "empty", False):
+        return keys
+    for _, row in frame.iterrows():
+        key = _closed_lineage_key_from_row(row)
+        if key:
+            keys.add(key)
+    return keys
+
+
+def summarize_closed_lifecycle(closed_csv_df, closed_db_df, feedback_reports_df, feedback_summary_df):
+    closed_csv_df = normalize_dataframe_columns(closed_csv_df.copy()) if closed_csv_df is not None and not closed_csv_df.empty else pd.DataFrame()
+    closed_db_df = normalize_dataframe_columns(closed_db_df.copy()) if closed_db_df is not None and not closed_db_df.empty else pd.DataFrame()
+    feedback_reports_df = normalize_dataframe_columns(feedback_reports_df.copy()) if feedback_reports_df is not None and not feedback_reports_df.empty else pd.DataFrame()
+    feedback_summary_df = normalize_dataframe_columns(feedback_summary_df.copy()) if feedback_summary_df is not None and not feedback_summary_df.empty else pd.DataFrame()
+
+    feedback_source = closed_csv_df.copy()
+    if not feedback_source.empty and "close_reason" in feedback_source.columns:
+        feedback_source = feedback_source[
+            ~feedback_source["close_reason"].astype(str).str.strip().str.lower().eq("external_manual_close")
+        ].copy()
+
+    closed_csv_keys = _collect_closed_lineage_keys(closed_csv_df)
+    closed_db_keys = _collect_closed_lineage_keys(closed_db_df)
+    feedback_expected_keys = _collect_closed_lineage_keys(feedback_source)
+    feedback_report_keys = _collect_closed_lineage_keys(feedback_reports_df)
+
+    closed_only_csv = len(closed_csv_keys - closed_db_keys)
+    closed_only_db = len(closed_db_keys - closed_csv_keys)
+    feedback_expected_missing = len(feedback_expected_keys - feedback_report_keys)
+    feedback_unexpected_extra = len(feedback_report_keys - feedback_expected_keys)
+    external_close_count = max(0, len(closed_csv_df) - len(feedback_source))
+    learning_coverage = (
+        len(feedback_report_keys) / len(feedback_expected_keys)
+        if feedback_expected_keys
+        else (1.0 if feedback_reports_df.empty else 0.0)
+    )
+
+    artifact_rows = [
+        {
+            "artifact": "closed_positions.csv",
+            "role": "Closed trade CSV ledger",
+            "rows": len(closed_csv_df),
+            "latest_seen": fmt_ts(latest_ts(closed_csv_df, ["closed_at", "opened_at"])),
+            "status": "ok" if closed_only_csv == 0 else f"csv-only {closed_only_csv}",
+            "note": "Dashboard closed trade table + lifecycle source",
+        },
+        {
+            "artifact": "trading.db / positions (CLOSED)",
+            "role": "Canonical DB close ledger",
+            "rows": len(closed_db_df),
+            "latest_seen": fmt_ts(latest_ts(closed_db_df, ["closed_at", "opened_at"])),
+            "status": "ok" if closed_only_db == 0 else f"db-only {closed_only_db}",
+            "note": "Supervisor / trade manager close state",
+        },
+        {
+            "artifact": "trade_feedback_reports.csv",
+            "role": "Per-trade learning reports",
+            "rows": len(feedback_reports_df),
+            "latest_seen": fmt_ts(latest_ts(feedback_reports_df, ["generated_at", "closed_at"])),
+            "status": "ok" if feedback_expected_missing == 0 and feedback_unexpected_extra == 0 else f"missing {feedback_expected_missing} | extra {feedback_unexpected_extra}",
+            "note": f"Eligible closed trades exclude {external_close_count} external manual close(s)",
+        },
+        {
+            "artifact": "trade_feedback_summary.csv",
+            "role": "Aggregated learning summary",
+            "rows": len(feedback_summary_df),
+            "latest_seen": fmt_ts(latest_ts(feedback_summary_df, ["generated_at"])),
+            "status": "ok" if not feedback_summary_df.empty else "warming_up",
+            "note": "Confidence / EV multipliers derived from reports",
+        },
+    ]
+
+    return {
+        "closed_csv_count": len(closed_csv_df),
+        "closed_db_count": len(closed_db_df),
+        "feedback_reports_count": len(feedback_reports_df),
+        "feedback_summary_count": len(feedback_summary_df),
+        "learning_eligible_count": len(feedback_expected_keys),
+        "external_close_count": external_close_count,
+        "learning_coverage": learning_coverage,
+        "closed_only_csv": closed_only_csv,
+        "closed_only_db": closed_only_db,
+        "feedback_expected_missing": feedback_expected_missing,
+        "feedback_unexpected_extra": feedback_unexpected_extra,
+        "closed_csv_latest": latest_ts(closed_csv_df, ["closed_at", "opened_at"]),
+        "closed_db_latest": latest_ts(closed_db_df, ["closed_at", "opened_at"]),
+        "feedback_reports_latest": latest_ts(feedback_reports_df, ["generated_at", "closed_at"]),
+        "feedback_summary_latest": latest_ts(feedback_summary_df, ["generated_at"]),
+        "artifact_rows": artifact_rows,
+        "is_aligned": (
+            closed_only_csv == 0
+            and closed_only_db == 0
+            and feedback_expected_missing == 0
+            and feedback_unexpected_extra == 0
+            and (feedback_reports_df.empty or not feedback_summary_df.empty)
+        ),
+    }
+
+
 def filter_closed_trade_performance_rows(closed_df):
     if closed_df is None or getattr(closed_df, "empty", False):
         return closed_df
@@ -249,8 +417,11 @@ def latest_ts(df, cols=None):
         "timestamp",
         "updated_at",
         "created_at",
+        "generated_at",
         "closed_at",
         "opened_at",
+        "promoted_at",
+        "filled_at",
         "last_retrained_at",
         "entry_time",
         "exit_time",
@@ -1059,7 +1230,7 @@ def _trajectory_badge(state):
     )
 
 
-def render_positions(positions_df, closed_df, position_history_df=None, portfolio_curve_df=None):
+def render_positions(positions_df, closed_df, position_history_df=None, portfolio_curve_df=None, closed_lifecycle=None):
     st.markdown('<div class="sec-title">Open Position Workstation</div>', unsafe_allow_html=True)
     if positions_df is None or positions_df.empty:
         st.info("No open positions.")
@@ -1295,12 +1466,45 @@ def render_positions(positions_df, closed_df, position_history_df=None, portfoli
             ]
             st.dataframe(ensure_safe(pos[cs] if cs else pos), use_container_width=True, hide_index=True)
 
+    closed_lifecycle = closed_lifecycle or {}
+    st.markdown('<div class="sec-title">Closed Lifecycle Lineage</div>', unsafe_allow_html=True)
+    st.caption("Lifecycle: close event -> closed_positions.csv -> trading.db positions(CLOSED) -> trade_feedback_reports.csv -> trade_feedback_summary.csv")
+    l1, l2, l3, l4, l5, l6 = st.columns(6)
+    l1.metric("Closed CSV", int(closed_lifecycle.get("closed_csv_count", 0)))
+    l2.metric("Closed DB", int(closed_lifecycle.get("closed_db_count", 0)))
+    l3.metric("Learning Eligible", int(closed_lifecycle.get("learning_eligible_count", 0)))
+    l4.metric("Feedback Reports", int(closed_lifecycle.get("feedback_reports_count", 0)))
+    coverage_value = closed_lifecycle.get("learning_coverage", None)
+    l5.metric("Learning Coverage", f"{coverage_value * 100:.1f}%" if coverage_value is not None else "N/A")
+    l6.metric("Summary Rows", int(closed_lifecycle.get("feedback_summary_count", 0)))
+    if closed_lifecycle.get("is_aligned"):
+        st.success(
+            "Closed-trade lineage is aligned. The CSV ledger, SQLite closed positions, and learning reports are in sync. "
+            f"External/manual closes intentionally skipped from learning: {int(closed_lifecycle.get('external_close_count', 0))}."
+        )
+    else:
+        st.warning(
+            "Closed lifecycle drift detected. "
+            f"csv-only={int(closed_lifecycle.get('closed_only_csv', 0))}, "
+            f"db-only={int(closed_lifecycle.get('closed_only_db', 0))}, "
+            f"feedback missing={int(closed_lifecycle.get('feedback_expected_missing', 0))}, "
+            f"feedback extra={int(closed_lifecycle.get('feedback_unexpected_extra', 0))}."
+        )
+    artifact_rows = closed_lifecycle.get("artifact_rows", [])
+    if artifact_rows:
+        st.dataframe(ensure_safe(pd.DataFrame(artifact_rows)), use_container_width=True, hide_index=True)
+
     st.markdown('<div class="sec-title">Closed Positions</div>', unsafe_allow_html=True)
     if closed_df.empty:
         st.info("No closed positions.")
     else:
         pc = next((c for c in ["net_realized_pnl", "realized_pnl", "net_pnl"] if c in closed_df.columns), None)
-        cs = [c for c in ["market", "outcome_side", "entry_price", "exit_price", pc, "close_reason", "closed_at"] if c and c in closed_df.columns]
+        cs = [
+            c for c in [
+                "market", "outcome_side", "entry_price", "exit_price", pc, "close_reason",
+                "close_fingerprint", "lifecycle_source", "closed_at"
+            ] if c and c in closed_df.columns
+        ]
         st.dataframe(ensure_safe(closed_df[cs].tail(20) if cs else closed_df.tail(20)), use_container_width=True, hide_index=True)
 
 
@@ -1388,7 +1592,7 @@ def render_alerts(alerts_df):
     st.dataframe(ensure_safe(v[cs].tail(50) if cs else v.tail(50)), use_container_width=True, hide_index=True)
 
 
-def render_models(msd, sup, tsd, s2d, wfd, rpd, bsd, rgd):
+def render_models(msd, sup, tsd, s2d, wfd, rpd, bsd, rgd, feedback_reports_df=None, feedback_summary_df=None, closed_lifecycle=None):
     st.markdown('<div class="sec-title">Model / Learning Status</div>', unsafe_allow_html=True)
     test_acc, test_src, test_col = resolve_numeric_metric([
         ("time_split_eval.csv", tsd, "test_accuracy"),
@@ -1487,6 +1691,53 @@ def render_models(msd, sup, tsd, s2d, wfd, rpd, bsd, rgd):
         st.caption(" | ".join(parts))
         st.code(retrain_status.get("last_action", "Unknown"), language="text")
 
+    closed_lifecycle = closed_lifecycle or {}
+    st.markdown("**Learning Intake Lineage**")
+    lt1, lt2, lt3, lt4, lt5, lt6 = st.columns(6)
+    lt1.metric("Eligible Closed Trades", int(closed_lifecycle.get("learning_eligible_count", 0)))
+    lt2.metric("Feedback Reports", int(closed_lifecycle.get("feedback_reports_count", 0)))
+    coverage_value = closed_lifecycle.get("learning_coverage", None)
+    lt3.metric("Coverage", f"{coverage_value * 100:.1f}%" if coverage_value is not None else "N/A")
+    lt4.metric("Summary Rows", int(closed_lifecycle.get("feedback_summary_count", 0)))
+    lt5.metric("Report Gap", int(closed_lifecycle.get("feedback_expected_missing", 0)))
+    lt6.metric("Skipped External Closes", int(closed_lifecycle.get("external_close_count", 0)))
+    if closed_lifecycle.get("is_aligned"):
+        st.success(
+            "Learning intake is healthy. All eligible closed trades have feedback reports, and the learning ledger matches the close ledger."
+        )
+    else:
+        st.warning(
+            "Learning lineage still has gaps. "
+            f"feedback missing={int(closed_lifecycle.get('feedback_expected_missing', 0))}, "
+            f"feedback extra={int(closed_lifecycle.get('feedback_unexpected_extra', 0))}, "
+            f"closed csv/db drift={int(closed_lifecycle.get('closed_only_csv', 0)) + int(closed_lifecycle.get('closed_only_db', 0))}."
+        )
+    intake_rows = [
+        {
+            "stage": "Closed ledger ready",
+            "rows": int(closed_lifecycle.get("learning_eligible_count", 0)),
+            "latest_seen": fmt_ts(closed_lifecycle.get("closed_csv_latest")),
+            "note": "Eligible rows exclude external manual closes",
+        },
+        {
+            "stage": "Per-trade feedback reports",
+            "rows": int(closed_lifecycle.get("feedback_reports_count", 0)),
+            "latest_seen": fmt_ts(closed_lifecycle.get("feedback_reports_latest")),
+            "note": "Detailed report + lesson for each eligible closed trade",
+        },
+        {
+            "stage": "Aggregated learning summary",
+            "rows": int(closed_lifecycle.get("feedback_summary_count", 0)),
+            "latest_seen": fmt_ts(closed_lifecycle.get("feedback_summary_latest")),
+            "note": "Scope-level multipliers feeding live scoring",
+        },
+    ]
+    st.dataframe(ensure_safe(pd.DataFrame(intake_rows)), use_container_width=True, hide_index=True)
+    if feedback_summary_df is not None and not feedback_summary_df.empty:
+        preview_cols = [c for c in ["scope", "scope_value", "sample_count", "win_rate", "avg_roi", "confidence_multiplier", "expected_return_multiplier", "generated_at"] if c in feedback_summary_df.columns]
+        with st.expander("Learning Summary Preview"):
+            st.dataframe(ensure_safe(feedback_summary_df[preview_cols].tail(10) if preview_cols else feedback_summary_df.tail(10)), use_container_width=True, hide_index=True)
+
     audit_rows = [
         {
             "field": "Test accuracy",
@@ -1541,6 +1792,8 @@ def render_models(msd, sup, tsd, s2d, wfd, rpd, bsd, rgd):
         ("backtest_summary.csv", FILES["backtest_summary"], bsd, "Backtester", "dashboard replay trades + sharpe + profit factor"),
         ("model_status.csv", FILES["model_status"], msd, "Retrainer / runtime patch", "dashboard retrain progress + last train"),
         ("model_registry.csv", FILES["registry"], rgd, "Retrainer promotion registry", "dashboard champion version"),
+        ("trade_feedback_reports.csv", FILES["feedback_reports"], feedback_reports_df, "TradeFeedbackLearner", "dashboard learning intake lineage"),
+        ("trade_feedback_summary.csv", FILES["feedback_summary"], feedback_summary_df, "TradeFeedbackLearner", "dashboard learning summary preview"),
     ]
     artifact_rows = []
     for label, path, df, producer, consumer in artifact_specs:
@@ -1645,6 +1898,8 @@ def render_quality(sdf, tdf, mdf, wdf, adf, msd, pdf, cdf, rpd, hdf):
         "stage2_temporal": load("stage2_temporal"),
         "walk_forward": load("walk_forward"),
         "backtest_summary": load("backtest_summary"),
+        "feedback_reports": load("feedback_reports"),
+        "feedback_summary": load("feedback_summary"),
     }
     rows = []
     for n, df in frames.items():
@@ -1768,6 +2023,10 @@ def main():
     shd = load("shadow")
     phd = load("position_snapshots")
     pcd = load("portfolio_curve")
+    fbr = load("feedback_reports")
+    fbs = load("feedback_summary")
+    closed_db = load_closed_positions_from_db()
+    closed_lifecycle = summarize_closed_lifecycle(cdf, closed_db, fbr, fbs)
 
     st.sidebar.markdown("**Dashboard Controls**")
     ar = st.sidebar.checkbox("Auto-refresh", False)
@@ -1845,7 +2104,7 @@ def main():
 
     with t3:
         render_pnl_summary(pdf, cdf)
-        render_positions(pdf, cdf, phd, pcd)
+        render_positions(pdf, cdf, phd, pcd, closed_lifecycle)
         render_best_trades(cdf, rpd)
         if not edf.empty:
             st.markdown('<div class="sec-title">Episode Log</div>', unsafe_allow_html=True)
@@ -1869,7 +2128,7 @@ def main():
     with t5:
         sm, sq = st.tabs(["Model Performance", "Data Quality and Readiness"])
         with sm:
-            render_models(msd, sup, tsd, s2d, wfd, rpd, bsd, rgd)
+            render_models(msd, sup, tsd, s2d, wfd, rpd, bsd, rgd, fbr, fbs, closed_lifecycle)
         with sq:
             render_quality(sdf, tdf, mdf, wdf, adf, msd, pdf, cdf, rpd, hdf)
             if dbg:
