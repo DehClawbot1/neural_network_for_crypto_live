@@ -154,7 +154,8 @@ class IncrementalRetrainer(_legacy_retrainer.Retrainer):
         last_trained_replay_rows = int(state.get("last_trained_replay_rows", 0) or 0)
         last_retrained_at = state.get("last_retrained_at")
         self.status_file.write_text(action + "\n", encoding="utf-8")
-        pd.DataFrame([
+        self._append_csv_row(
+            self.status_csv,
             self._status_payload(
                 closed_rows=closed_rows,
                 replay_rows=replay_rows,
@@ -162,8 +163,9 @@ class IncrementalRetrainer(_legacy_retrainer.Retrainer):
                 last_trained_replay_rows=last_trained_replay_rows,
                 last_retrained_at=last_retrained_at,
                 action=action,
-            )
-        ]).to_csv(self.status_csv, index=False)
+            ),
+            sort_by="last_retrained_at",
+        )
 
     def maybe_retrain(self, force=False, reason="scheduled_cycle_check"):
         closed_df = self._safe_read(self.closed_file)
@@ -204,22 +206,30 @@ class IncrementalRetrainer(_legacy_retrainer.Retrainer):
         )
 
         if not should_retrain:
-            reason = (
+            skip_reason = (
                 f"Retrain skipped: new_closed={new_closed_rows}/{self.min_new_closed_rows}, "
                 f"new_replay={new_replay_rows}/{self.min_new_replay_rows}, "
                 f"cooldown_active={cooldown_active}, pnl_degraded={pnl_degraded}, trigger={reason}"
             )
-            self.status_file.write_text(reason + "\n", encoding="utf-8")
-            pd.DataFrame([
+            self.status_file.write_text(skip_reason + "\n", encoding="utf-8")
+            self._append_csv_row(
+                self.status_csv,
                 self._status_payload(
                     closed_rows=closed_rows,
                     replay_rows=replay_rows,
                     last_trained_closed_rows=last_trained_closed_rows,
                     last_trained_replay_rows=last_trained_replay_rows,
                     last_retrained_at=status.get("last_retrained_at"),
-                    action=reason,
-                )
-            ]).to_csv(self.status_csv, index=False)
+                    action=skip_reason,
+                ),
+                sort_by="last_retrained_at",
+            )
+            self._emit_retrain_verdict(
+                verdict="waiting_threshold" if not cooldown_active else "skipped_cooldown",
+                reason=reason,
+                closed_rows=closed_rows,
+                replay_rows=replay_rows,
+            )
             return False
 
         candidate_weights_dir = build_candidate_weights_dir(self.weights_dir, prefix="runtime_retrain")
@@ -229,13 +239,32 @@ class IncrementalRetrainer(_legacy_retrainer.Retrainer):
         _resume_ppo_train_model(timesteps=self.rl_timesteps, save_path=candidate_weights_dir / "ppo_polytrader")
 
         candidate_row, champion, error_message = self._build_candidate_registry_row(closed_rows, replay_rows)
+        attempted_at = pd.Timestamp.utcnow().isoformat()
+        candidate_beats_champion = None
         if candidate_row is None:
             promoted = False
             message = error_message
+            promotion_block_reason = error_message or "candidate_metrics_unavailable"
+        elif not bool(candidate_row.get("promotion_gate_passed", False)):
+            promoted = False
+            candidate_row["attempted_at"] = attempted_at
+            candidate_row["activation_status"] = "blocked_quality_gate"
+            candidate_row["promotion_block_reason"] = candidate_row.get("promotion_gate_failures") or "quality_gate_failed"
+            message = (
+                "Candidate failed promotion quality gates: "
+                f"{candidate_row.get('promotion_gate_failures') or 'unknown gate failure'}"
+            )
+            promotion_block_reason = candidate_row["promotion_block_reason"]
         elif not self._candidate_beats_champion(candidate_row, champion):
             promoted = False
+            candidate_beats_champion = False
+            candidate_row["attempted_at"] = attempted_at
+            candidate_row["activation_status"] = "blocked_champion"
+            candidate_row["promotion_block_reason"] = "candidate_did_not_beat_champion"
             message = "Candidate did not beat champion on promotion metrics."
+            promotion_block_reason = candidate_row["promotion_block_reason"]
         else:
+            candidate_beats_champion = True
             promotion_result = promote_candidate_artifacts(
                 candidate_weights_dir,
                 self.weights_dir,
@@ -245,26 +274,61 @@ class IncrementalRetrainer(_legacy_retrainer.Retrainer):
             promoted_files = promotion_result.get("promoted_files", [])
             if not promoted_files:
                 promoted = False
+                candidate_row["attempted_at"] = attempted_at
+                candidate_row["activation_status"] = "blocked_missing_artifacts"
+                candidate_row["promotion_block_reason"] = "no_staged_artifacts_produced"
                 message = "Candidate promotion skipped: no staged artifacts were produced."
+                promotion_block_reason = candidate_row["promotion_block_reason"]
             else:
                 promoted = True
-                registry_message = self._register_promotion(candidate_row)
+                candidate_row["attempted_at"] = attempted_at
+                candidate_row["promoted_at"] = attempted_at
+                candidate_row["activation_status"] = "promoted"
+                candidate_row["promotion_block_reason"] = ""
+                registry_message = self._register_attempt(candidate_row)
                 message = (
                     f"{registry_message} | activated={len(promoted_files)} "
                     f"| rollback_dir={promotion_result.get('rollback_dir')}"
                 )
+                promotion_block_reason = ""
+        if candidate_row is not None and not promoted:
+            self._register_attempt(candidate_row)
         now_iso = pd.Timestamp.utcnow().isoformat()
         self.status_file.write_text(message + "\n", encoding="utf-8")
-        pd.DataFrame([
-            self._status_payload(
+        self._record_model_status(
+            attempted_at=attempted_at,
+            closed_rows=closed_rows,
+            replay_rows=replay_rows,
+            action=message,
+            reason=reason,
+            rl_timesteps=self.rl_timesteps,
+            candidate_row=candidate_row,
+            activation_status=(
+                candidate_row.get("activation_status")
+                if candidate_row is not None
+                else ("promoted" if promoted else "blocked")
+            ),
+            promotion_block_reason=promotion_block_reason,
+            candidate_beats_champion=candidate_beats_champion,
+            extra_fields=self._status_payload(
                 closed_rows=closed_rows,
                 replay_rows=replay_rows,
                 last_trained_closed_rows=closed_rows,
                 last_trained_replay_rows=replay_rows,
                 last_retrained_at=now_iso,
                 action=f"{message} | reason={reason}",
-            )
-        ]).to_csv(self.status_csv, index=False)
+            ),
+        )
+        self._emit_retrain_verdict(
+            verdict=("promoted" if promoted else "blocked"),
+            reason=reason,
+            closed_rows=closed_rows,
+            replay_rows=replay_rows,
+            rl_timesteps=self.rl_timesteps,
+            candidate_row=candidate_row,
+            promotion_block_reason=promotion_block_reason,
+            candidate_beats_champion=candidate_beats_champion,
+        )
         return promoted
 
 

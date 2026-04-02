@@ -92,22 +92,118 @@ class Retrainer:
         except Exception:
             pass
 
+    def _append_csv_row(self, path, row, *, sort_by=None):
+        existing = self._safe_read(path)
+        updated = pd.concat([existing, pd.DataFrame([row])], ignore_index=True)
+        if sort_by and sort_by in updated.columns:
+            try:
+                sort_key = pd.to_datetime(updated[sort_by], errors="coerce", utc=True)
+                updated = updated.assign(_sort_key=sort_key).sort_values("_sort_key").drop(columns=["_sort_key"])
+            except Exception:
+                pass
+        updated.to_csv(path, index=False)
+        return updated
+
+    def _emit_retrain_verdict(
+        self,
+        *,
+        verdict,
+        reason,
+        closed_rows,
+        replay_rows,
+        rl_timesteps=0,
+        candidate_row=None,
+        promotion_block_reason="",
+        candidate_beats_champion=None,
+    ):
+        candidate_row = candidate_row or {}
+        payload = {
+            "verdict": verdict,
+            "reason": reason,
+            "closed_rows": int(closed_rows),
+            "replay_rows": int(replay_rows),
+            "rl_timesteps": int(rl_timesteps or 0),
+            "model_version": candidate_row.get("model_version", ""),
+            "activation_status": candidate_row.get("activation_status", verdict),
+            "promotion_block_reason": promotion_block_reason or candidate_row.get("promotion_block_reason", ""),
+            "candidate_beats_champion": candidate_beats_champion,
+            "average_pnl": round(self._safe_float(candidate_row.get("average_pnl"), 0.0), 4),
+            "profit_factor": round(self._safe_float(candidate_row.get("profit_factor"), 0.0), 4),
+            "live_closed_trades": int(candidate_row.get("live_closed_trades", 0) or 0),
+            "live_average_pnl": round(self._safe_float(candidate_row.get("live_average_pnl"), 0.0), 4),
+            "live_profit_factor": round(self._safe_float(candidate_row.get("live_profit_factor"), 0.0), 4),
+            "promotion_gate_passed": bool(candidate_row.get("promotion_gate_passed", False)),
+            "promotion_gate_failures": candidate_row.get("promotion_gate_failures", ""),
+        }
+        logging.info("LATEST_RETRAIN_VERDICT %s", json.dumps(payload, separators=(",", ":"), sort_keys=True))
+
     def _write_status(self, closed_rows: int, replay_rows: int, action: str):
         self.status_file.write_text(action + "\n", encoding="utf-8")
         progress_closed = round(closed_rows / self.closed_trade_threshold, 4) if self.closed_trade_threshold else 0
         progress_replay = round(replay_rows / self.replay_threshold, 4) if self.replay_threshold else 0
-        pd.DataFrame(
-            [
-                {
-                    "closed_trade_rows": closed_rows,
-                    "closed_trade_threshold": self.closed_trade_threshold,
-                    "replay_rows": replay_rows,
-                    "replay_threshold": self.replay_threshold,
-                    "progress_ratio": max(progress_closed, progress_replay),
-                    "last_action": action,
-                }
-            ]
-        ).to_csv(self.status_csv, index=False)
+        self._append_csv_row(
+            self.status_csv,
+            {
+                "attempted_at": pd.Timestamp.utcnow().isoformat(),
+                "closed_trade_rows": closed_rows,
+                "closed_trade_threshold": self.closed_trade_threshold,
+                "replay_rows": replay_rows,
+                "replay_threshold": self.replay_threshold,
+                "progress_ratio": max(progress_closed, progress_replay),
+                "last_action": action,
+                "status_schema": "base_retrainer_v3",
+            },
+            sort_by="attempted_at",
+        )
+
+    def _record_model_status(
+        self,
+        *,
+        attempted_at,
+        closed_rows,
+        replay_rows,
+        action,
+        reason,
+        rl_timesteps=0,
+        candidate_row=None,
+        activation_status="blocked",
+        promotion_block_reason="",
+        candidate_beats_champion=None,
+        extra_fields=None,
+    ):
+        candidate_row = candidate_row or {}
+        progress_closed = round(closed_rows / self.closed_trade_threshold, 4) if self.closed_trade_threshold else 0
+        progress_replay = round(replay_rows / self.replay_threshold, 4) if self.replay_threshold else 0
+        row = {
+            "attempted_at": attempted_at,
+            "closed_trade_rows": int(closed_rows),
+            "closed_trade_threshold": int(self.closed_trade_threshold),
+            "replay_rows": int(replay_rows),
+            "replay_threshold": int(self.replay_threshold),
+            "progress_ratio": max(progress_closed, progress_replay),
+            "last_action": action,
+            "trigger_reason": reason,
+            "rl_timesteps": int(rl_timesteps or 0),
+            "activation_status": activation_status,
+            "promotion_block_reason": promotion_block_reason or "",
+            "candidate_beats_champion": candidate_beats_champion,
+            "model_version": candidate_row.get("model_version", ""),
+            "average_pnl": self._safe_float(candidate_row.get("average_pnl"), 0.0),
+            "profit_factor": self._safe_float(candidate_row.get("profit_factor"), 0.0),
+            "max_drawdown": self._safe_float(candidate_row.get("max_drawdown"), 0.0),
+            "test_accuracy": self._safe_float(candidate_row.get("test_accuracy"), 0.0),
+            "live_closed_trades": int(candidate_row.get("live_closed_trades", 0) or 0),
+            "live_win_rate": self._safe_float(candidate_row.get("live_win_rate"), 0.0),
+            "live_average_pnl": self._safe_float(candidate_row.get("live_average_pnl"), 0.0),
+            "live_profit_factor": self._safe_float(candidate_row.get("live_profit_factor"), 0.0),
+            "promotion_gate_passed": bool(candidate_row.get("promotion_gate_passed", False)),
+            "promotion_gate_failures": candidate_row.get("promotion_gate_failures", ""),
+            "status_schema": "base_retrainer_v3",
+        }
+        if extra_fields:
+            row.update(extra_fields)
+        self._append_csv_row(self.status_csv, row, sort_by="attempted_at")
+        return row
 
     def _profit_factor_from_pnl(self, pnl_series):
         pnl = pd.to_numeric(pnl_series, errors="coerce").dropna()
@@ -205,16 +301,24 @@ class Retrainer:
     def _normalize_registry(self, registry: pd.DataFrame):
         if registry is None or registry.empty:
             return pd.DataFrame()
-        required = ["model_version", "promoted_at"]
+        required = ["model_version"]
         if not all(col in registry.columns for col in required):
             return pd.DataFrame()
         work = registry.copy()
         work["model_version"] = work["model_version"].astype(str).str.strip()
-        work["promoted_at"] = pd.to_datetime(work["promoted_at"], errors="coerce", utc=True)
-        work = work[(work["model_version"] != "") & work["promoted_at"].notna()].copy()
+        if "attempted_at" in work.columns:
+            work["attempted_at"] = pd.to_datetime(work["attempted_at"], errors="coerce", utc=True)
+        else:
+            work["attempted_at"] = pd.NaT
+        if "promoted_at" in work.columns:
+            work["promoted_at"] = pd.to_datetime(work["promoted_at"], errors="coerce", utc=True)
+        else:
+            work["promoted_at"] = pd.NaT
+        work = work[work["model_version"] != ""].copy()
         if work.empty:
             return pd.DataFrame()
-        return work.sort_values("promoted_at")
+        sort_col = "attempted_at" if work["attempted_at"].notna().any() else "promoted_at"
+        return work.sort_values(sort_col)
 
     def _current_registry_row(self):
         registry = self._safe_read(self.registry_file)
@@ -222,6 +326,11 @@ class Retrainer:
             return None
         registry = self._normalize_registry(registry)
         if registry.empty:
+            return None
+        if "activation_status" in registry.columns:
+            promoted = registry[registry["activation_status"].astype(str).str.lower().isin({"promoted", "active", ""})]
+            if not promoted.empty:
+                return promoted.iloc[-1].to_dict()
             return None
         return registry.iloc[-1].to_dict()
 
@@ -245,7 +354,10 @@ class Retrainer:
             "profit_factor": self._safe_float(candidate.get("profit_factor"), 0.0),
             "max_drawdown": self._safe_float(candidate.get("max_drawdown"), 0.0),
             "test_accuracy": self._safe_float(candidate.get("test_accuracy"), 0.0),
-            "promoted_at": pd.Timestamp.utcnow().isoformat(),
+            "attempted_at": pd.Timestamp.utcnow().isoformat(),
+            "promoted_at": "",
+            "activation_status": "candidate",
+            "promotion_block_reason": "",
         }
         gates_passed, failures = self._evaluate_promotion_quality_gates(row)
         row["live_validation_passed"] = gates_passed
@@ -268,11 +380,9 @@ class Retrainer:
             and candidate_max_drawdown >= champion_max_drawdown
         )
 
-    def _register_promotion(self, row):
-        existing_registry = self._normalize_registry(self._safe_read(self.registry_file))
-        updated_registry = pd.concat([existing_registry, pd.DataFrame([row])], ignore_index=True)
-        updated_registry.to_csv(self.registry_file, index=False)
-        return f"Promoted candidate model {row['model_version']}"
+    def _register_attempt(self, row):
+        self._append_csv_row(self.registry_file, row, sort_by="attempted_at")
+        return f"Recorded candidate model {row['model_version']} ({row.get('activation_status', 'unknown')})"
 
     def _promote_if_better(self, closed_rows, replay_rows):
         candidate_row, champion, error_message = self._build_candidate_registry_row(closed_rows, replay_rows)
@@ -280,7 +390,9 @@ class Retrainer:
             return False, error_message
         if not self._candidate_beats_champion(candidate_row, champion):
             return False, "Candidate did not beat champion on promotion metrics."
-        return True, self._register_promotion(candidate_row)
+        candidate_row["activation_status"] = "promoted"
+        candidate_row["promotion_block_reason"] = ""
+        return True, self._register_attempt(candidate_row)
 
     def maybe_retrain(self, force=False, reason="scheduled_cycle_check"):
         closed_df = self._safe_read(self.closed_file)
@@ -309,10 +421,13 @@ class Retrainer:
         if pd.notna(last_retrained_ts) and min_interval_seconds > 0:
             seconds_since_last = (pd.Timestamp.now(tz="UTC") - last_retrained_ts).total_seconds()
             if seconds_since_last < min_interval_seconds:
-                self._write_status(
-                    closed_rows,
-                    replay_rows,
-                    f"Retrain deferred ({reason}): cooldown active {int(seconds_since_last)}s/{min_interval_seconds}s",
+                action = f"Retrain deferred ({reason}): cooldown active {int(seconds_since_last)}s/{min_interval_seconds}s"
+                self._write_status(closed_rows, replay_rows, action)
+                self._emit_retrain_verdict(
+                    verdict="skipped_cooldown",
+                    reason=reason,
+                    closed_rows=closed_rows,
+                    replay_rows=replay_rows,
                 )
                 return False
 
@@ -325,12 +440,17 @@ class Retrainer:
         )
 
         if not should_retrain:
-            self._write_status(
-                closed_rows,
-                replay_rows,
+            action = (
                 f"Waiting for {self.closed_trade_threshold} new closed trades to retrain: "
                 f"new_closed={new_closed}/{self.closed_trade_threshold}, "
-                f"total_closed={closed_rows}, replay={replay_rows}/{self.replay_threshold}",
+                f"total_closed={closed_rows}, replay={replay_rows}/{self.replay_threshold}"
+            )
+            self._write_status(closed_rows, replay_rows, action)
+            self._emit_retrain_verdict(
+                verdict="waiting_threshold",
+                reason=reason,
+                closed_rows=closed_rows,
+                replay_rows=replay_rows,
             )
             return False
 
@@ -358,19 +478,32 @@ class Retrainer:
         train_model(timesteps=rl_timesteps, save_path=candidate_weights_dir / "ppo_polytrader")
 
         candidate_row, champion, error_message = self._build_candidate_registry_row(closed_rows, replay_rows)
+        attempted_at = pd.Timestamp.utcnow().isoformat()
+        candidate_beats_champion = None
         if candidate_row is None:
             promoted = False
             message = error_message
+            promotion_block_reason = error_message or "candidate_metrics_unavailable"
         elif not bool(candidate_row.get("promotion_gate_passed", False)):
             promoted = False
+            candidate_row["attempted_at"] = attempted_at
+            candidate_row["activation_status"] = "blocked_quality_gate"
+            candidate_row["promotion_block_reason"] = candidate_row.get("promotion_gate_failures") or "quality_gate_failed"
             message = (
                 "Candidate failed promotion quality gates: "
                 f"{candidate_row.get('promotion_gate_failures') or 'unknown gate failure'}"
             )
+            promotion_block_reason = candidate_row["promotion_block_reason"]
         elif not self._candidate_beats_champion(candidate_row, champion):
             promoted = False
+            candidate_beats_champion = False
+            candidate_row["attempted_at"] = attempted_at
+            candidate_row["activation_status"] = "blocked_champion"
+            candidate_row["promotion_block_reason"] = "candidate_did_not_beat_champion"
             message = "Candidate did not beat champion on promotion metrics."
+            promotion_block_reason = candidate_row["promotion_block_reason"]
         else:
+            candidate_beats_champion = True
             promotion_result = promote_candidate_artifacts(
                 candidate_weights_dir,
                 self.weights_dir,
@@ -380,17 +513,55 @@ class Retrainer:
             promoted_files = promotion_result.get("promoted_files", [])
             if not promoted_files:
                 promoted = False
+                candidate_row["attempted_at"] = attempted_at
+                candidate_row["activation_status"] = "blocked_missing_artifacts"
+                candidate_row["promotion_block_reason"] = "no_staged_artifacts_produced"
                 message = "Candidate promotion skipped: no staged artifacts were produced."
+                promotion_block_reason = candidate_row["promotion_block_reason"]
             else:
                 promoted = True
-                registry_message = self._register_promotion(candidate_row)
+                candidate_row["attempted_at"] = attempted_at
+                candidate_row["promoted_at"] = attempted_at
+                candidate_row["activation_status"] = "promoted"
+                candidate_row["promotion_block_reason"] = ""
+                registry_message = self._register_attempt(candidate_row)
                 message = (
                     f"{registry_message} | activated={len(promoted_files)} "
                     f"| rollback_dir={promotion_result.get('rollback_dir')}"
                 )
+                promotion_block_reason = ""
+
+        if candidate_row is not None and not promoted:
+            self._register_attempt(candidate_row)
 
         self._last_retrained_closed_count = closed_rows
         self._last_retrained_at = pd.Timestamp.utcnow().isoformat()
         self._persist_state()
-        self._write_status(closed_rows, replay_rows, f"{message} | reason={reason} | rl_timesteps={rl_timesteps}")
+        self.status_file.write_text(f"{message} | reason={reason} | rl_timesteps={rl_timesteps}\n", encoding="utf-8")
+        self._record_model_status(
+            attempted_at=attempted_at,
+            closed_rows=closed_rows,
+            replay_rows=replay_rows,
+            action=message,
+            reason=reason,
+            rl_timesteps=rl_timesteps,
+            candidate_row=candidate_row,
+            activation_status=(
+                candidate_row.get("activation_status")
+                if candidate_row is not None
+                else ("promoted" if promoted else "blocked")
+            ),
+            promotion_block_reason=promotion_block_reason,
+            candidate_beats_champion=candidate_beats_champion,
+        )
+        self._emit_retrain_verdict(
+            verdict=("promoted" if promoted else "blocked"),
+            reason=reason,
+            closed_rows=closed_rows,
+            replay_rows=replay_rows,
+            rl_timesteps=rl_timesteps,
+            candidate_row=candidate_row,
+            promotion_block_reason=promotion_block_reason,
+            candidate_beats_champion=candidate_beats_champion,
+        )
         return promoted
