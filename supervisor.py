@@ -40,6 +40,7 @@ from polytrade_env import PolyTradeEnv
 from model_inference import ModelInference
 from stage1_inference import Stage1Inference
 from stage2_temporal_inference import Stage2TemporalInference
+from model_artifact_staging import snapshot_artifact_state
 from return_calibration import clip_expected_return_series
 from ops_state_sync import sync_ops_state_to_db
 from stage3_hybrid import Stage3HybridScorer
@@ -738,6 +739,46 @@ def main_loop():
     retrainer = Retrainer()
     feedback_learner = TradeFeedbackLearner()
     position_telemetry = PositionTelemetry()
+    def _refresh_runtime_model_handles(reason="runtime_artifacts_reloaded"):
+        nonlocal entry_brain, position_brain, legacy_brain
+        nonlocal entry_model_name, position_model_name
+        nonlocal entry_model_artifact, entry_norm_artifact
+        nonlocal position_model_artifact, position_norm_artifact
+        nonlocal model_inference, stage1_inference, stage2_inference
+
+        entry_brain = load_entry_brain()
+        position_brain = load_position_brain()
+        legacy_brain = None
+        if entry_brain is None or position_brain is None:
+            legacy_brain = load_brain()
+
+        entry_model_name = "ppo_entry_policy" if entry_brain is not None else "ppo_polytrader_legacy_entry" if legacy_brain is not None else "no_rl_entry"
+        position_model_name = "ppo_position_policy" if position_brain is not None else "ppo_polytrader_legacy_position" if legacy_brain is not None else "no_rl_position"
+        entry_model_artifact = "weights/ppo_entry_policy.zip" if entry_brain is not None else "weights/ppo_polytrader.zip" if legacy_brain is not None else None
+        entry_norm_artifact = "weights/ppo_entry_vecnormalize.pkl" if entry_brain is not None else "weights/ppo_polytrader_vecnormalize.pkl" if legacy_brain is not None else None
+        position_model_artifact = "weights/ppo_position_policy.zip" if position_brain is not None else "weights/ppo_polytrader.zip" if legacy_brain is not None else None
+        position_norm_artifact = "weights/ppo_position_vecnormalize.pkl" if position_brain is not None else "weights/ppo_polytrader_vecnormalize.pkl" if legacy_brain is not None else None
+
+        # The supervised inference classes already read fresh artifacts from disk
+        # on every run, but rebuilding them here makes promoted model activation
+        # explicit and keeps startup/reload paths symmetric.
+        model_inference = ModelInference()
+        stage1_inference = Stage1Inference()
+        stage2_inference = Stage2TemporalInference()
+
+        active_artifacts = snapshot_artifact_state("weights")
+        autonomous_monitor.write_heartbeat(
+            "inference",
+            status="ok",
+            message=reason,
+            extra={
+                "active_artifact_count": len(active_artifacts),
+                "active_artifacts": sorted(active_artifacts.keys()),
+                "legacy_brain_loaded": legacy_brain is not None,
+                "entry_brain_loaded": entry_brain is not None,
+                "position_brain_loaded": position_brain is not None,
+            },
+        )
     previous_markets_df = None
     previous_entry_freeze_active = False
     previous_entry_freeze_reason = None
@@ -3190,11 +3231,14 @@ def main_loop():
             # LIVE-TRADE FIX: enable live retraining by default so the RL model
             # actually learns from wins and losses during real trading.
             allow_live_retrain = os.getenv("ENABLE_LIVE_RETRAIN", "true").strip().lower() in {"1", "true", "yes", "on"}
+            retrain_promoted = False
             if trading_mode != "live" or allow_live_retrain:
-                retrainer.maybe_retrain(
+                retrain_promoted = bool(retrainer.maybe_retrain(
                     force=closed_trade_feedback_count > 0,
                     reason="closed_trade_feedback" if closed_trade_feedback_count > 0 else "scheduled_cycle_check",
-                )
+                ))
+                if retrain_promoted:
+                    _refresh_runtime_model_handles(reason="retrain_promoted_models_activated")
                 autonomous_monitor.write_heartbeat("retrainer", status="ok", message="retrain_checked")
             else:
                 autonomous_monitor.write_heartbeat("retrainer", status="ok", message="retrain_skipped_live")

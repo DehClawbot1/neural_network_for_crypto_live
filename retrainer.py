@@ -5,6 +5,11 @@ from pathlib import Path
 
 import pandas as pd
 
+from model_artifact_staging import (
+    PROMOTABLE_MODEL_FILENAMES,
+    build_candidate_weights_dir,
+    promote_candidate_artifacts,
+)
 from rl_trainer import train_model
 from supervised_models import SupervisedModels
 from stage1_models import Stage1Models
@@ -115,34 +120,16 @@ class Retrainer:
             return None
         return registry.iloc[-1].to_dict()
 
-    def _promote_if_better(self, closed_rows, replay_rows):
+    def _build_candidate_registry_row(self, closed_rows, replay_rows):
         backtest_df = self._safe_read(self.backtest_summary_file)
         time_split_df = self._safe_read(self.time_split_file)
         if backtest_df.empty:
-            return False, "Candidate metrics unavailable for promotion."
+            return None, None, "Candidate metrics unavailable for promotion."
 
         candidate = backtest_df.iloc[-1].to_dict()
         if not time_split_df.empty:
             candidate.update(time_split_df.iloc[-1].to_dict())
         champion = self._current_registry_row()
-
-        if champion is None:
-            promoted = True
-        else:
-            candidate_avg_pnl = self._safe_float(candidate.get("average_pnl"), 0.0)
-            candidate_profit_factor = self._safe_float(candidate.get("profit_factor"), 0.0)
-            candidate_max_drawdown = self._safe_float(candidate.get("max_drawdown"), -999.0)
-            champion_avg_pnl = self._safe_float(champion.get("average_pnl"), -999.0)
-            champion_profit_factor = self._safe_float(champion.get("profit_factor"), 0.0)
-            champion_max_drawdown = self._safe_float(champion.get("max_drawdown"), -999.0)
-            promoted = (
-                candidate_avg_pnl >= champion_avg_pnl
-                and candidate_profit_factor >= champion_profit_factor
-                and candidate_max_drawdown >= champion_max_drawdown
-            )
-
-        if not promoted:
-            return False, "Candidate did not beat champion on promotion metrics."
 
         row = {
             "model_version": pd.Timestamp.utcnow().strftime("%Y%m%d%H%M%S"),
@@ -155,10 +142,37 @@ class Retrainer:
             "test_accuracy": self._safe_float(candidate.get("test_accuracy"), 0.0),
             "promoted_at": pd.Timestamp.utcnow().isoformat(),
         }
+        return row, champion, None
+
+    def _candidate_beats_champion(self, candidate_row, champion):
+        if champion is None:
+            return True
+
+        candidate_avg_pnl = self._safe_float(candidate_row.get("average_pnl"), 0.0)
+        candidate_profit_factor = self._safe_float(candidate_row.get("profit_factor"), 0.0)
+        candidate_max_drawdown = self._safe_float(candidate_row.get("max_drawdown"), -999.0)
+        champion_avg_pnl = self._safe_float(champion.get("average_pnl"), -999.0)
+        champion_profit_factor = self._safe_float(champion.get("profit_factor"), 0.0)
+        champion_max_drawdown = self._safe_float(champion.get("max_drawdown"), -999.0)
+        return (
+            candidate_avg_pnl >= champion_avg_pnl
+            and candidate_profit_factor >= champion_profit_factor
+            and candidate_max_drawdown >= champion_max_drawdown
+        )
+
+    def _register_promotion(self, row):
         existing_registry = self._normalize_registry(self._safe_read(self.registry_file))
         updated_registry = pd.concat([existing_registry, pd.DataFrame([row])], ignore_index=True)
         updated_registry.to_csv(self.registry_file, index=False)
-        return True, f"Promoted candidate model {row['model_version']}"
+        return f"Promoted candidate model {row['model_version']}"
+
+    def _promote_if_better(self, closed_rows, replay_rows):
+        candidate_row, champion, error_message = self._build_candidate_registry_row(closed_rows, replay_rows)
+        if candidate_row is None:
+            return False, error_message
+        if not self._candidate_beats_champion(candidate_row, champion):
+            return False, "Candidate did not beat champion on promotion metrics."
+        return True, self._register_promotion(candidate_row)
 
     def maybe_retrain(self, force=False, reason="scheduled_cycle_check"):
         closed_df = self._safe_read(self.closed_file)
@@ -229,11 +243,37 @@ class Retrainer:
             self.closed_trade_threshold,
             rl_timesteps,
         )
-        SupervisedModels(logs_dir=self.logs_dir).train()
-        Stage1Models(logs_dir=self.logs_dir).train()
-        Stage2TemporalModels(logs_dir=self.logs_dir).train()
-        train_model(timesteps=rl_timesteps)
-        promoted, message = self._promote_if_better(closed_rows, replay_rows)
+        candidate_weights_dir = build_candidate_weights_dir(self.weights_dir, prefix="base_retrain")
+        SupervisedModels(logs_dir=self.logs_dir, weights_dir=candidate_weights_dir).train()
+        Stage1Models(logs_dir=self.logs_dir, weights_dir=candidate_weights_dir).train()
+        Stage2TemporalModels(logs_dir=self.logs_dir, weights_dir=candidate_weights_dir).train()
+        train_model(timesteps=rl_timesteps, save_path=candidate_weights_dir / "ppo_polytrader")
+
+        candidate_row, champion, error_message = self._build_candidate_registry_row(closed_rows, replay_rows)
+        if candidate_row is None:
+            promoted = False
+            message = error_message
+        elif not self._candidate_beats_champion(candidate_row, champion):
+            promoted = False
+            message = "Candidate did not beat champion on promotion metrics."
+        else:
+            promotion_result = promote_candidate_artifacts(
+                candidate_weights_dir,
+                self.weights_dir,
+                filenames=PROMOTABLE_MODEL_FILENAMES,
+                backup_label="base_retrain",
+            )
+            promoted_files = promotion_result.get("promoted_files", [])
+            if not promoted_files:
+                promoted = False
+                message = "Candidate promotion skipped: no staged artifacts were produced."
+            else:
+                promoted = True
+                registry_message = self._register_promotion(candidate_row)
+                message = (
+                    f"{registry_message} | activated={len(promoted_files)} "
+                    f"| rollback_dir={promotion_result.get('rollback_dir')}"
+                )
 
         self._last_retrained_closed_count = closed_rows
         self._last_retrained_at = pd.Timestamp.utcnow().isoformat()

@@ -6,6 +6,12 @@ from pathlib import Path
 
 import pandas as pd
 
+from model_artifact_staging import (
+    PROMOTABLE_MODEL_FILENAMES,
+    build_candidate_weights_dir,
+    promote_candidate_artifacts,
+)
+from supervised_models import SupervisedModels
 from training_windowed_models import WindowedStage1Models, WindowedStage2TemporalModels
 
 _BASE_DIR = Path(__file__).resolve().parent
@@ -37,7 +43,12 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
-def _resume_ppo_train_model(timesteps=5000):
+def _vecnormalize_path_for(save_path) -> Path:
+    save_path = Path(save_path)
+    return save_path.parent / f"{save_path.name}_vecnormalize.pkl"
+
+
+def _resume_ppo_train_model(timesteps=5000, save_path="weights/ppo_polytrader"):
     from stable_baselines3 import PPO
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
     from polytrade_env import PolyTradeEnv
@@ -47,6 +58,9 @@ def _resume_ppo_train_model(timesteps=5000):
     _os.makedirs("weights", exist_ok=True)
     _os.makedirs("logs", exist_ok=True)
     print(f"[+] Starting incremental RL training phase for {timesteps} timesteps...")
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    vecnorm_path = _vecnormalize_path_for(save_path)
 
     tensorboard_available = _importlib_util.find_spec("tensorboard") is not None
     progress_bar_available = _importlib_util.find_spec("tqdm") is not None and _importlib_util.find_spec("rich") is not None
@@ -57,11 +71,10 @@ def _resume_ppo_train_model(timesteps=5000):
     venv = DummyVecEnv([make_env])
     env = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
 
-    save_path = "weights/ppo_polytrader"
-    zipped_path = save_path + ".zip"
+    zipped_path = str(save_path) + ".zip"
     if _os.path.exists(zipped_path):
         print(f"[+] Resuming PPO from existing weights at {zipped_path}")
-        model = PPO.load(save_path, env=env)
+        model = PPO.load(str(save_path), env=env)
         model.learn(total_timesteps=timesteps, progress_bar=progress_bar_available, reset_num_timesteps=False)
     else:
         model = PPO(
@@ -76,8 +89,8 @@ def _resume_ppo_train_model(timesteps=5000):
         )
         model.learn(total_timesteps=timesteps, progress_bar=progress_bar_available)
 
-    model.save(save_path)
-    env.save("weights/ppo_polytrader_vecnormalize.pkl")
+    model.save(str(save_path))
+    env.save(str(vecnorm_path))
     print(f"[+] Model saved successfully to {save_path}.zip")
     return model, env
 
@@ -209,10 +222,37 @@ class IncrementalRetrainer(_legacy_retrainer.Retrainer):
             ]).to_csv(self.status_csv, index=False)
             return False
 
-        WindowedStage1Models(logs_dir=self.logs_dir, weights_dir=self.weights_dir).train()
-        WindowedStage2TemporalModels(logs_dir=self.logs_dir, weights_dir=self.weights_dir).train()
-        _resume_ppo_train_model(timesteps=self.rl_timesteps)
-        promoted, message = self._promote_if_better(closed_rows, replay_rows)
+        candidate_weights_dir = build_candidate_weights_dir(self.weights_dir, prefix="runtime_retrain")
+        SupervisedModels(logs_dir=self.logs_dir, weights_dir=candidate_weights_dir).train()
+        WindowedStage1Models(logs_dir=self.logs_dir, weights_dir=candidate_weights_dir).train()
+        WindowedStage2TemporalModels(logs_dir=self.logs_dir, weights_dir=candidate_weights_dir).train()
+        _resume_ppo_train_model(timesteps=self.rl_timesteps, save_path=candidate_weights_dir / "ppo_polytrader")
+
+        candidate_row, champion, error_message = self._build_candidate_registry_row(closed_rows, replay_rows)
+        if candidate_row is None:
+            promoted = False
+            message = error_message
+        elif not self._candidate_beats_champion(candidate_row, champion):
+            promoted = False
+            message = "Candidate did not beat champion on promotion metrics."
+        else:
+            promotion_result = promote_candidate_artifacts(
+                candidate_weights_dir,
+                self.weights_dir,
+                filenames=PROMOTABLE_MODEL_FILENAMES,
+                backup_label="runtime_retrain",
+            )
+            promoted_files = promotion_result.get("promoted_files", [])
+            if not promoted_files:
+                promoted = False
+                message = "Candidate promotion skipped: no staged artifacts were produced."
+            else:
+                promoted = True
+                registry_message = self._register_promotion(candidate_row)
+                message = (
+                    f"{registry_message} | activated={len(promoted_files)} "
+                    f"| rollback_dir={promotion_result.get('rollback_dir')}"
+                )
         now_iso = pd.Timestamp.utcnow().isoformat()
         self.status_file.write_text(message + "\n", encoding="utf-8")
         pd.DataFrame([

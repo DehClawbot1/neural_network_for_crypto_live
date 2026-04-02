@@ -1,6 +1,7 @@
 import os
 import time
 import importlib.util
+from pathlib import Path
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.env_util import make_vec_env
@@ -12,11 +13,19 @@ os.makedirs("weights", exist_ok=True)
 os.makedirs("logs", exist_ok=True)
 
 
-def train_model(timesteps=10000):
+def _vecnormalize_path_for(save_path) -> Path:
+    save_path = Path(save_path)
+    return save_path.parent / f"{save_path.name}_vecnormalize.pkl"
+
+
+def train_model(timesteps=10000, save_path="weights/ppo_polytrader"):
     """
     Initializes the environment, wraps it with normalization, builds the PPO model, and trains it.
     """
     print(f"[+] Starting RL training phase for {timesteps} timesteps...")
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    vecnorm_path = _vecnormalize_path_for(save_path)
 
     tensorboard_available = importlib.util.find_spec("tensorboard") is not None
     progress_bar_available = (
@@ -47,9 +56,8 @@ def train_model(timesteps=10000):
 
     model.learn(total_timesteps=timesteps, progress_bar=progress_bar_available)
 
-    save_path = "weights/ppo_polytrader"
-    model.save(save_path)
-    env.save("weights/ppo_polytrader_vecnormalize.pkl")
+    model.save(str(save_path))
+    env.save(str(vecnorm_path))
     print(f"[+] Model saved successfully to {save_path}.zip")
 
     return model, env
