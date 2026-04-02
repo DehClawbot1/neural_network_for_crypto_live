@@ -47,6 +47,7 @@ RESEARCH_ARTIFACTS = [
     LOGS_DIR / "backtest_summary.csv",
     LOGS_DIR / "path_replay_backtest.csv",
 ]
+DEFAULT_RESEARCH_REFRESH_MAX_AGE_MINUTES = 240
 
 
 def is_interactive():
@@ -218,11 +219,6 @@ def ensure_optional_rl_model():
 
 
 def maybe_retrain_before_start():
-    startup_retrain_enabled = os.getenv("ENABLE_STARTUP_RETRAIN", "false").strip().lower() in {"1", "true", "yes", "on"}
-    if not startup_retrain_enabled:
-        print("[3.5/5] Skipping pre-start retraining (ENABLE_STARTUP_RETRAIN is off).\n")
-        return False
-
     print("[3.5/5] Checking whether the model should retrain from accumulated data...")
     retrainer = Retrainer()
     try:
@@ -233,26 +229,36 @@ def maybe_retrain_before_start():
     if retrained:
         print("[+] Retraining triggered before startup. Latest weights refreshed.\n")
     else:
-        print("[+] No pre-start retraining needed yet.\n")
+        print("[+] No pre-start retraining needed yet (cooldown / thresholds / quality gates).\n")
     return retrained
 
 
-def should_refresh_research_artifacts(max_age_minutes=240):
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return int(default)
+
+
+def should_refresh_research_artifacts(max_age_minutes=None):
+    if max_age_minutes is None:
+        max_age_minutes = _env_int("RESEARCH_REFRESH_MAX_AGE_MINUTES", DEFAULT_RESEARCH_REFRESH_MAX_AGE_MINUTES)
+    max_age_minutes = max(1, int(max_age_minutes))
     force_refresh = os.getenv("FORCE_RESEARCH_REFRESH", "").strip().lower() in {"1", "true", "yes", "on"}
     if force_refresh:
-        return True, "FORCE_RESEARCH_REFRESH enabled"
+        return True, "FORCE_RESEARCH_REFRESH enabled", max_age_minutes
     missing = [str(path) for path in RESEARCH_ARTIFACTS if not path.exists()]
     if missing:
-        return True, f"missing artifacts: {', '.join(missing[:3])}"
+        return True, f"missing artifacts: {', '.join(missing[:3])}", max_age_minutes
     latest_mtime = min(path.stat().st_mtime for path in RESEARCH_ARTIFACTS)
     age_seconds = max(0, int(__import__("time").time() - latest_mtime))
     if age_seconds > max_age_minutes * 60:
-        return True, f"artifacts are stale ({age_seconds}s old)"
-    return False, f"artifacts are fresh ({age_seconds}s old)"
+        return True, f"artifacts are stale ({age_seconds}s old; threshold={max_age_minutes}m)", max_age_minutes
+    return False, f"artifacts are fresh ({age_seconds}s old; threshold={max_age_minutes}m)", max_age_minutes
 
 
 def build_research_artifacts():
-    refresh, reason = should_refresh_research_artifacts()
+    refresh, reason, _ = should_refresh_research_artifacts()
     if not refresh:
         print(f"[4/5] Skipping research rebuild: {reason}.\n")
         return
