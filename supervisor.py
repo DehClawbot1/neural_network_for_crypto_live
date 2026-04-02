@@ -55,6 +55,7 @@ from reconciliation_service import ReconciliationService
 from mismatch_detector import StateMismatchDetector
 from db import Database
 from money_manager import MoneyManager
+from entry_aggression import apply_entry_cadence_boost
 from orderbook_guard import OrderBookGuard
 from token_utils import normalize_token_id
 from order_flow_analyzer import OrderFlowAnalyzer
@@ -424,13 +425,19 @@ def choose_action(
     # This prevents "stuck forever" behavior when RL is stale or overly conservative.
     allow_rule_fallback_with_rl_hold = os.getenv("ALLOW_RULE_FALLBACK_WITH_RL_HOLD", "true").strip().lower() in {"1", "true", "yes", "on"}
     rl_hold_min_confidence = float(os.getenv("RL_HOLD_FALLBACK_MIN_CONFIDENCE", "0.15") or 0.15)
+    aggressive_expected_return_floor = float(getattr(TradingConfig, "ENTRY_INACTIVITY_EXPECTED_RETURN_FLOOR", -0.002))
+    if _is_truthy(signal_row.get("activity_target_mode")):
+        rl_hold_min_confidence = min(
+            rl_hold_min_confidence,
+            max(0.02, float(getattr(TradingConfig, "ENTRY_INACTIVITY_CONFIDENCE_BOOST", 0.08))),
+        )
     if (entry_brain is not None or legacy_brain is not None) and allow_rule_fallback_with_rl_hold:
         confidence = _safe_float(signal_row.get("confidence", 0.0), default=float("nan"))
         if not np.isfinite(confidence) or confidence <= 0.0:
             confidence = _safe_float(PredictionLayer.select_signal_score(signal_row), default=0.0)
         if confidence >= rl_hold_min_confidence and entry_rule.should_enter(signal_row):
             expected_return = _safe_float(signal_row.get("expected_return", 0.0), default=0.0)
-            if expected_return <= 0:
+            if expected_return <= aggressive_expected_return_floor:
                 return 0
             edge_score = _safe_float(signal_row.get("edge_score", 0.0), default=0.0)
             return 2 if edge_score >= 0.04 else 1
@@ -546,6 +553,36 @@ def log_live_fill_event(signal_row, fill_price, size_usdc, action_type="LIVE_TRA
         logging.error(f"[-] Failed to write live fill to {EXECUTION_FILE}: {e}")
 
 
+def minutes_since_last_entry(db) -> float | None:
+    try:
+        rows = db.query_all(
+            """
+            SELECT created_at
+            FROM candidate_decisions
+            WHERE final_decision IN ('ENTRY_FILLED', 'PAPER_OPENED')
+            ORDER BY COALESCE(created_at, '') DESC
+            LIMIT 1
+            """
+        )
+        if rows:
+            ts = pd.to_datetime(rows[0].get("created_at"), errors="coerce", utc=True)
+            if pd.notna(ts):
+                return max(0.0, float((pd.Timestamp.utcnow() - ts).total_seconds() / 60.0))
+    except Exception:
+        pass
+    try:
+        if EXECUTION_FILE.exists():
+            exec_df = pd.read_csv(EXECUTION_FILE, engine="python", on_bad_lines="skip")
+            if not exec_df.empty and "timestamp" in exec_df.columns:
+                if "action_type" in exec_df.columns:
+                    exec_df = exec_df[exec_df["action_type"].astype(str).str.upper().eq("LIVE_TRADE")]
+                ts = pd.to_datetime(exec_df.get("timestamp"), errors="coerce", utc=True).dropna()
+                if not ts.empty:
+                    return max(0.0, float((pd.Timestamp.utcnow() - ts.max()).total_seconds() / 60.0))
+    except Exception:
+        pass
+    return None
+
 
 # --- IP SAFEGUARD INTERCEPTOR ---
 # Prevents Polymarket IP Bans during 5-second fast-polling
@@ -643,10 +680,20 @@ def main_loop():
     sentiment_analyzer = SentimentAnalyzer()
     macro_analyzer = MacroAnalyzer()
     onchain_analyzer = OnChainAnalyzer()
-    entry_min_score = _env_float("ENTRY_MIN_SCORE", 0.15)
-    entry_max_spread = _env_float("ENTRY_MAX_SPREAD", 0.30)
-    entry_min_liquidity = _env_float("ENTRY_MIN_LIQUIDITY", 1.0)
-    entry_min_liquidity_score = _env_float("ENTRY_MIN_LIQUIDITY_SCORE", 0.01)
+    entry_min_score = _env_float("ENTRY_MIN_SCORE", 0.12)
+    entry_max_spread = _env_float("ENTRY_MAX_SPREAD", 0.35)
+    entry_min_liquidity = _env_float("ENTRY_MIN_LIQUIDITY", 0.5)
+    entry_min_liquidity_score = _env_float("ENTRY_MIN_LIQUIDITY_SCORE", 0.005)
+    target_entry_interval_minutes = _env_float(
+        "TARGET_ENTRY_INTERVAL_MINUTES",
+        float(getattr(TradingConfig, "TARGET_ENTRY_INTERVAL_MINUTES", 5)),
+    )
+    entry_aggression_top_k = _env_int(
+        "ENTRY_AGGRESSION_TOP_K",
+        int(getattr(TradingConfig, "ENTRY_AGGRESSION_TOP_K", 3)),
+        minimum=1,
+        maximum=25,
+    )
     entry_rule = EntryRuleLayer(
         min_score=entry_min_score,
         max_spread=entry_max_spread,
@@ -654,11 +701,13 @@ def main_loop():
         min_liquidity_score=entry_min_liquidity_score,
     )
     logging.info(
-        "EntryRule thresholds: min_score=%.4f max_spread=%.4f min_liquidity=%.4f min_liquidity_score=%.4f",
+        "EntryRule thresholds: min_score=%.4f max_spread=%.4f min_liquidity=%.4f min_liquidity_score=%.4f target_interval=%.1fm top_k=%d",
         entry_min_score,
         entry_max_spread,
         entry_min_liquidity,
         entry_min_liquidity_score,
+        target_entry_interval_minutes,
+        entry_aggression_top_k,
     )
     whale_tracker = WhaleTracker()
     alerts_engine = AlertsEngine()
@@ -1234,6 +1283,10 @@ def main_loop():
                 try:
                     # Strict pre-cycle sync: rebuild and reconcile live open/closed state
                     # BEFORE evaluating any new entry opportunities.
+                    dead_tokens = orderbook_guard.dead_token_ids()
+                    if dead_tokens:
+                        live_position_book.close_dead_token_positions(dead_tokens)
+                        
                     live_position_book.rebuild_from_db()
                     pre_positions_df = live_position_book.get_enriched_open_positions(scored_df=None)
                     trade_manager.reconcile_live_positions(reconciled_positions_df=pre_positions_df)
@@ -1560,6 +1613,20 @@ def main_loop():
                 log_ranked_signal(ranked_row.to_dict())
             print("======================================\n")
 
+            last_entry_age_minutes = minutes_since_last_entry(db)
+            cadence_boost_active = (
+                last_entry_age_minutes is not None
+                and target_entry_interval_minutes > 0
+                and last_entry_age_minutes >= target_entry_interval_minutes
+            )
+            if cadence_boost_active:
+                logging.info(
+                    "Trade cadence booster active: last entry %.1f minutes ago (target %.1f minutes). Relaxing top %d candidate gates this cycle.",
+                    last_entry_age_minutes,
+                    target_entry_interval_minutes,
+                    entry_aggression_top_k,
+                )
+
             # 4A. Candidate-entry path for new signals
             current_active_trades = trade_manager.get_open_positions()
             active_trade_keys = {
@@ -1796,8 +1863,15 @@ def main_loop():
                             _trade.close_reason = "ai_close_long"
 
             # FIX 1B: Normal entry loop
-            for _, row in scored_df.iterrows():
+            for candidate_rank, (_, row) in enumerate(scored_df.iterrows(), start=1):
                 signal_row = row.to_dict()
+                if cadence_boost_active and candidate_rank <= entry_aggression_top_k:
+                    signal_row = apply_entry_cadence_boost(
+                        signal_row,
+                        last_entry_age_minutes,
+                        target_entry_interval_minutes,
+                        candidate_rank,
+                    )
                 _candidate_stats["candidates_seen"] += 1
                 token_id_norm = normalize_token_id(signal_row.get("token_id"))
                 token_id = str(token_id_norm or "")
@@ -2055,6 +2129,10 @@ def main_loop():
                         confidence=confidence,
                         current_exposure=_current_exposure,
                     )
+                    strategic_min_entry = max(
+                        float(getattr(TradingConfig, "MIN_BET_USDC", 1.0)),
+                        float(getattr(TradingConfig, "MIN_ENTRY_USDC", getattr(TradingConfig, "MIN_BET_USDC", 1.0))),
+                    )
                     if size_usdc <= 0:
                         logging.info(
                             "MoneyManager: skip trade (balance=$%.2f, conf=%.2f, exposure=$%.2f)",
@@ -2067,6 +2145,24 @@ def main_loop():
                             model_action=action_map.get(action_val, "UNKNOWN"),
                             available_balance=round(_available_bal, 6),
                             current_exposure=round(_current_exposure, 6),
+                        )
+                        continue
+                    if size_usdc + 1e-9 < strategic_min_entry:
+                        logging.info(
+                            "Anti-micro guard: skipping tiny entry for %s (size=$%.2f < min_entry=$%.2f)",
+                            token_id[:16],
+                            size_usdc,
+                            strategic_min_entry,
+                        )
+                        _log_candidate_skip(
+                            signal_row,
+                            "anti_micro_min_entry",
+                            gate="sizing",
+                            model_action=action_map.get(action_val, "UNKNOWN"),
+                            available_balance=round(_available_bal, 6),
+                            current_exposure=round(_current_exposure, 6),
+                            strategic_min_entry=round(strategic_min_entry, 6),
+                            proposed_size_usdc=round(size_usdc, 6),
                         )
                         continue
                     # ── Order book guard: check spread/depth before entry ──
@@ -2426,6 +2522,39 @@ def main_loop():
                         pos_action_val = 4
                     elif pos_action_val == 3 and trajectory_signal.get("profit_lock_signal"):
                         pos_action_val = 4
+
+                    if pos_action_val == 4:
+                        if getattr(trade, 'has_been_reduced', False):
+                            continue
+                        min_reduce_notional = max(
+                            float(getattr(TradingConfig, "MIN_BET_USDC", 1.0)),
+                            float(getattr(TradingConfig, "MIN_REDUCE_NOTIONAL_USDC", 2.5)),
+                        )
+                        min_remainder_notional = max(
+                            0.0,
+                            float(getattr(TradingConfig, "MIN_POSITION_REMAINDER_USDC", min_reduce_notional)),
+                        )
+                        projected_exit_price = max(float(current_price or entry_price or 0.0), 0.0)
+                        projected_reduce_shares = max(float(trade.shares or 0.0) * 0.5, 0.0)
+                        projected_reduce_notional = projected_reduce_shares * projected_exit_price
+                        projected_remaining_shares = max(float(trade.shares or 0.0) - projected_reduce_shares, 0.0)
+                        projected_remaining_notional = projected_remaining_shares * projected_exit_price
+                        if (
+                            projected_reduce_notional > 0
+                            and (
+                                projected_reduce_notional < min_reduce_notional
+                                or (projected_remaining_shares > 0 and projected_remaining_notional < min_remainder_notional)
+                            )
+                        ):
+                            logging.info(
+                                "Anti-micro guard: converting REDUCE -> EXIT for %s (reduce=$%.2f remainder=$%.2f min_reduce=$%.2f min_remainder=$%.2f)",
+                                token_id,
+                                projected_reduce_notional,
+                                projected_remaining_notional,
+                                min_reduce_notional,
+                                min_remainder_notional,
+                            )
+                            pos_action_val = 5
 
                     pos_action_map = {3: "HOLD", 4: "REDUCE", 5: "EXIT"}
                     action_str = pos_action_map.get(pos_action_val, "HOLD")

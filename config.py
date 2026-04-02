@@ -11,6 +11,15 @@ class TradingConfig:
     # Minimum model conviction before the system should even consider action
     MIN_CONVICTION_FOR_READY = 0.55
 
+    # Trade cadence targeting
+    TARGET_ENTRY_INTERVAL_MINUTES = 5
+    ENTRY_AGGRESSION_TOP_K = 3
+    ENTRY_INACTIVITY_SCORE_RELAX = 0.08
+    ENTRY_INACTIVITY_SPREAD_RELAX = 0.10
+    ENTRY_INACTIVITY_LIQUIDITY_RELAX_FACTOR = 0.35
+    ENTRY_INACTIVITY_CONFIDENCE_BOOST = 0.08
+    ENTRY_INACTIVITY_EXPECTED_RETURN_FLOOR = -0.002
+
     # Audit probability buckets for calibration dashboards
     PROB_BUCKETS = [0.0, 0.55, 0.70, 0.85, 1.0]
 
@@ -24,6 +33,11 @@ class TradingConfig:
     # Risk sizing
     MAX_RISK_PER_TRADE_PCT = 0.15
     MIN_BET_USDC = 1.00
+    # Strategic anti-churn floor: bot should avoid opening tiny $1 micro trades by default.
+    MIN_ENTRY_USDC = 3.00
+    # If a partial reduce would create a tiny executed leg or a tiny leftover bag, prefer a full exit.
+    MIN_REDUCE_NOTIONAL_USDC = 2.50
+    MIN_POSITION_REMAINDER_USDC = 2.50
     # Legacy cap retained for compatibility; dynamic sizing uses HARD_MAX_BET_USDC.
     MAX_BET_USDC = 25.0
     # Hard per-trade fail-safe cap (absolute USD) to prevent runaway bet sizes.

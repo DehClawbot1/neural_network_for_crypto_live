@@ -243,6 +243,15 @@ class OrderBookGuard:
 
         return result
 
+    def dead_token_ids(self) -> set:
+        """Return the set of token IDs currently in the 404 cache (no orderbook exists).
+        Safe to call at any time; expired entries are pruned on access."""
+        now_mono = time.monotonic()
+        expired = [tid for tid, exp in self._no_book_cache.items() if now_mono >= exp]
+        for tid in expired:
+            del self._no_book_cache[tid]
+        return set(self._no_book_cache.keys())
+
     def check_before_entry(self, token_id, side="BUY", intended_size_usdc=10.0):
         """
         Main gate: should the bot trade this token right now?

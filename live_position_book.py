@@ -691,6 +691,28 @@ class LivePositionBook:
         self._verify_cache_token_key = token_key
         return verified_rows
 
+    def close_dead_token_positions(self, dead_tokens: set) -> int:
+        """Safeguard: Force-close any open positions for tokens that are known to be dead (404/no orderbook)."""
+        if not dead_tokens:
+            return 0
+        now = datetime.now(timezone.utc).isoformat()
+        cursor = self.db.conn.cursor()
+        
+        closed_total = 0
+        for token_id in dead_tokens:
+            rows = cursor.execute("SELECT position_key FROM live_positions WHERE status = 'OPEN' AND token_id = ?", (token_id,)).fetchall()
+            if rows:
+                logger.warning("Safeguard: Auto-closing %d live positions for dead token %s (404/no orderbook)", len(rows), token_id)
+                cursor.execute("UPDATE live_positions SET status = 'CLOSED', updated_at = ? WHERE status = 'OPEN' AND token_id = ?", (now, token_id))
+                closed_total += cursor.rowcount
+                
+        if closed_total > 0:
+            self.db.conn.commit()
+            # Invalidate the verification cache so a rebuild isn't stale
+            self._verify_cache_ts = 0.0
+            
+        return closed_total
+
     def get_open_positions(self):
         rebuild_on_read = str(os.getenv("LIVE_POSITION_REBUILD_ON_READ", "true")).strip().lower() in {"1", "true", "yes", "on"}
         if rebuild_on_read:

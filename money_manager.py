@@ -75,6 +75,7 @@ class MoneyManager:
         tradable_balance = max(0.0, available_balance - reserve_usdc)
 
         min_bet_usdc = float(getattr(TradingConfig, "MIN_BET_USDC", 1.0))
+        strategic_min_entry = max(min_bet_usdc, float(getattr(TradingConfig, "MIN_ENTRY_USDC", min_bet_usdc)))
         if tradable_balance < min_bet_usdc:
             logging.info(
                 "MoneyManager: Tradable balance below minimum bet (tradable=$%.2f, min=$%.2f).",
@@ -105,8 +106,8 @@ class MoneyManager:
         
         # Dynamic minimum grows slowly with account size but remains capped.
         dynamic_min_pct = max(0.0, float(getattr(TradingConfig, "MIN_BET_DYNAMIC_PCT", 0.002)))
-        dynamic_min_cap = max(absolute_floor, float(getattr(TradingConfig, "MAX_DYNAMIC_MIN_BET_USDC", 5.0)))
-        dynamic_min = max(absolute_floor, min(tradable_balance * dynamic_min_pct, dynamic_min_cap))
+        dynamic_min_cap = max(strategic_min_entry, float(getattr(TradingConfig, "MAX_DYNAMIC_MIN_BET_USDC", 5.0)))
+        dynamic_min = max(strategic_min_entry, min(tradable_balance * dynamic_min_pct, dynamic_min_cap))
         
         # Dynamic Max: percentage of tradable balance + hard absolute safety cap.
         dynamic_max = tradable_balance * getattr(TradingConfig, 'MAX_RISK_PER_TRADE_PCT', 0.15)
@@ -131,7 +132,7 @@ class MoneyManager:
         adjusted_bet = round(adjusted_bet, 2)
 
         logging.info(
-            "MoneyManager: balance=$%.2f reserve=$%.2f tradable=$%.2f conf=%.2f base_pct=%.1f%% loss_factor=%.2f -> final_bet=$%.2f (min=$%.2f, max=$%.2f)",
+            "MoneyManager: balance=$%.2f reserve=$%.2f tradable=$%.2f conf=%.2f base_pct=%.1f%% loss_factor=%.2f -> final_bet=$%.2f (strategy_min=$%.2f, max=$%.2f)",
             available_balance, reserve_usdc, tradable_balance, confidence, base_pct * 100, loss_factor, adjusted_bet, dynamic_min, dynamic_max
         )
 

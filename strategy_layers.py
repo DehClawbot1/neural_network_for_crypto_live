@@ -44,6 +44,10 @@ class EntryRuleLayer:
         import logging
         
         score = PredictionLayer.select_signal_score(row)
+        score_relax = max(0.0, _finite_float(row.get("entry_score_relax", 0.0), default=0.0) or 0.0)
+        spread_relax = max(0.0, _finite_float(row.get("entry_spread_relax", 0.0), default=0.0) or 0.0)
+        liquidity_relax_factor = _finite_float(row.get("entry_liquidity_relax_factor", 1.0), default=1.0)
+        liquidity_relax_factor = max(0.0, min(1.0, liquidity_relax_factor if liquidity_relax_factor is not None else 1.0))
         
         # --- MACRO MOOD HUNTING LOGIC ---
         dynamic_min_score = self.min_score
@@ -75,6 +79,7 @@ class EntryRuleLayer:
             elif target_side == "YES":
                 dynamic_min_score = min(0.95, self.min_score + 0.15)
         # --------------------------------
+        dynamic_min_score = max(0.02, dynamic_min_score - score_relax)
 
         spread = _finite_float(row.get("spread"), default=None)
         if spread is None:
@@ -93,14 +98,14 @@ class EntryRuleLayer:
 
         if has_raw_liquidity:
             liquidity_value = liquidity_raw
-            liquidity_threshold = self.min_liquidity
+            liquidity_threshold = max(0.0, self.min_liquidity * liquidity_relax_factor)
             liquidity_metric = "liquidity"
-            liquidity_ok = liquidity_raw >= self.min_liquidity
+            liquidity_ok = liquidity_raw >= liquidity_threshold
         elif has_liquidity_score:
             liquidity_value = liquidity_score
-            liquidity_threshold = self.min_liquidity_score
+            liquidity_threshold = max(0.0, self.min_liquidity_score * liquidity_relax_factor)
             liquidity_metric = "liquidity_score"
-            liquidity_ok = liquidity_score >= self.min_liquidity_score
+            liquidity_ok = liquidity_score >= liquidity_threshold
         else:
             # If liquidity features are missing or encoded as non-positive placeholders,
             # defer hard filtering to orderbook guards.
@@ -110,7 +115,8 @@ class EntryRuleLayer:
             liquidity_ok = True
 
         score_ok = score >= dynamic_min_score
-        spread_ok = spread <= self.max_spread
+        spread_threshold = self.max_spread + spread_relax
+        spread_ok = spread <= spread_threshold
         allow = score_ok and spread_ok and liquidity_ok and not macro_veto
 
         return {
@@ -119,13 +125,16 @@ class EntryRuleLayer:
             "score_threshold": dynamic_min_score,
             "score_ok": score_ok,
             "spread": spread,
-            "spread_threshold": self.max_spread,
+            "spread_threshold": spread_threshold,
             "spread_ok": spread_ok,
             "liquidity_value": liquidity_value,
             "liquidity_threshold": liquidity_threshold,
             "liquidity_metric": liquidity_metric,
             "liquidity_ok": liquidity_ok,
             "macro_veto": macro_veto,
+            "score_relax": score_relax,
+            "spread_relax": spread_relax,
+            "liquidity_relax_factor": liquidity_relax_factor,
         }
 
     def should_enter(self, row: dict) -> bool:
