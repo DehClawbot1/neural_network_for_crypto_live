@@ -24,6 +24,15 @@ class TestTradeLifecycle(unittest.TestCase):
         self.assertGreater(pnl, 0)
         self.assertGreaterEqual(tl.shares, 0)
 
+    def test_tracks_open_trade_pain_metrics(self):
+        tl = TradeLifecycle(market="BTC Test", token_id="1", condition_id="abc", outcome_side="YES")
+        tl.enter(size_usdc=4.0, entry_price=0.40)
+        tl.update_market(0.36)
+        tl.update_market(0.34)
+        self.assertLessEqual(tl.max_adverse_excursion_pct, -0.10)
+        self.assertGreaterEqual(tl.fast_adverse_move_count, 1)
+        self.assertGreaterEqual(tl.max_drawdown_from_peak_pct, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

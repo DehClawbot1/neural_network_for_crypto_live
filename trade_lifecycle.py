@@ -42,6 +42,11 @@ class TradeLifecycle:
     entry_adx_threshold: float = 0.0
     entry_anchored_vwap: float = 0.0
     entry_fractal_trigger_direction: str = "NEUTRAL"
+    max_adverse_excursion_pct: float = 0.0
+    max_favorable_excursion_pct: float = 0.0
+    max_drawdown_from_peak_pct: float = 0.0
+    fast_adverse_move_count: int = 0
+    last_fast_adverse_move_at: str | None = None
     ledger: list = field(default_factory=list)
 
     def _write_execution_event(self, payload: dict):
@@ -81,6 +86,11 @@ class TradeLifecycle:
         self.opened_at = datetime.now(timezone.utc).isoformat()
         self.state = TradeState.ENTERED
         self.peak_price = self.entry_price
+        self.max_adverse_excursion_pct = 0.0
+        self.max_favorable_excursion_pct = 0.0
+        self.max_drawdown_from_peak_pct = 0.0
+        self.fast_adverse_move_count = 0
+        self.last_fast_adverse_move_at = None
         payload = {
             "event": "enter",
             "timestamp": self.opened_at,
@@ -99,6 +109,26 @@ class TradeLifecycle:
         self.current_price = float(live_price)
         self.peak_price = max(float(getattr(self, "peak_price", self.entry_price or self.current_price)), self.current_price)
         self.unrealized_pnl = self.shares * (self.current_price - self.entry_price)
+        return_pct = ((self.current_price - self.entry_price) / self.entry_price) if self.entry_price > 0 else 0.0
+        self.max_adverse_excursion_pct = min(float(getattr(self, "max_adverse_excursion_pct", 0.0) or 0.0), return_pct)
+        self.max_favorable_excursion_pct = max(float(getattr(self, "max_favorable_excursion_pct", 0.0) or 0.0), return_pct)
+        drawdown_from_peak = ((self.peak_price - self.current_price) / self.peak_price) if self.peak_price > 0 else 0.0
+        self.max_drawdown_from_peak_pct = max(float(getattr(self, "max_drawdown_from_peak_pct", 0.0) or 0.0), drawdown_from_peak)
+        try:
+            opened_dt = datetime.fromisoformat(str(self.opened_at)) if self.opened_at else None
+        except Exception:
+            opened_dt = None
+        if opened_dt is not None:
+            now_dt = datetime.now(timezone.utc)
+            if opened_dt.tzinfo is None:
+                opened_dt = opened_dt.replace(tzinfo=timezone.utc)
+            minutes_open = max(0.0, (now_dt.astimezone(timezone.utc) - opened_dt.astimezone(timezone.utc)).total_seconds() / 60.0)
+            if minutes_open <= 10 and return_pct <= -0.02:
+                previous_mae = float(getattr(self, "_last_fast_adverse_recorded_mae", 0.0) or 0.0)
+                if return_pct < previous_mae - 1e-9:
+                    self.fast_adverse_move_count = int(getattr(self, "fast_adverse_move_count", 0) or 0) + 1
+                    self.last_fast_adverse_move_at = now_dt.isoformat()
+                    self._last_fast_adverse_recorded_mae = return_pct
         if self.state in [TradeState.ENTERED, TradeState.PARTIAL_EXIT]:
             self.state = TradeState.OPEN
         self.ledger.append({
@@ -106,6 +136,10 @@ class TradeLifecycle:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "live_price": self.current_price,
             "unrealized_pnl": self.unrealized_pnl,
+            "return_pct": return_pct,
+            "max_adverse_excursion_pct": self.max_adverse_excursion_pct,
+            "max_drawdown_from_peak_pct": self.max_drawdown_from_peak_pct,
+            "fast_adverse_move_count": self.fast_adverse_move_count,
         })
         return self.unrealized_pnl
 

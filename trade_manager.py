@@ -546,6 +546,11 @@ class TradeManager:
             "runup_from_entry": None,
             "volatility_short": None,
             "fallback_ratio": None,
+            "max_adverse_excursion_pct": getattr(trade, "max_adverse_excursion_pct", 0.0),
+            "max_favorable_excursion_pct": getattr(trade, "max_favorable_excursion_pct", 0.0),
+            "max_drawdown_from_peak_pct": getattr(trade, "max_drawdown_from_peak_pct", 0.0),
+            "fast_adverse_move_count": getattr(trade, "fast_adverse_move_count", 0),
+            "last_fast_adverse_move_at": getattr(trade, "last_fast_adverse_move_at", None),
             "close_reason": getattr(trade, "close_reason", None),
             "exit_price": getattr(trade, "current_price", None) if getattr(trade, "state", None) == TradeState.CLOSED else None,
             "close_fingerprint": self._closed_trade_fingerprint(trade) if getattr(trade, "state", None) == TradeState.CLOSED else None,
@@ -786,6 +791,8 @@ class TradeManager:
                 "mark_price", "best_bid", "best_ask", "spread", "mid_price", "spread_pct", "mark_source",
                 "trajectory_state", "drawdown_from_peak", "recent_return_3", "runup_from_entry",
                 "volatility_short", "fallback_ratio",
+                "max_adverse_excursion_pct", "max_favorable_excursion_pct", "max_drawdown_from_peak_pct",
+                "fast_adverse_move_count", "last_fast_adverse_move_at",
                 "close_reason", "exit_price", "close_fingerprint", "is_reconciliation_close", "lifecycle_source",
             ]
         )
@@ -832,9 +839,11 @@ class TradeManager:
         df["entry_price"] = pd.to_numeric(df["entry_price"], errors="coerce").fillna(0.0)
         df["current_price"] = pd.to_numeric(df["current_price"], errors="coerce").fillna(df["entry_price"])
         df["mark_price"] = pd.to_numeric(df["mark_price"], errors="coerce").fillna(df["current_price"])
-        for col in ["best_bid", "best_ask", "spread", "mid_price", "spread_pct", "drawdown_from_peak", "recent_return_3", "runup_from_entry", "volatility_short", "fallback_ratio"]:
+        for col in ["best_bid", "best_ask", "spread", "mid_price", "spread_pct", "drawdown_from_peak", "recent_return_3", "runup_from_entry", "volatility_short", "fallback_ratio", "max_adverse_excursion_pct", "max_favorable_excursion_pct", "max_drawdown_from_peak_pct"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
+        if "fast_adverse_move_count" in df.columns:
+            df["fast_adverse_move_count"] = pd.to_numeric(df["fast_adverse_move_count"], errors="coerce").fillna(0).astype(int)
         if "size_usdc" not in df.columns:
             df["size_usdc"] = df["shares"] * df["entry_price"]
         if "market_value" not in df.columns:
@@ -865,6 +874,16 @@ class TradeManager:
             df["is_reconciliation_close"] = False
         if "lifecycle_source" not in df.columns:
             df["lifecycle_source"] = "trade_manager_reconciled_open"
+        if "max_adverse_excursion_pct" not in df.columns:
+            df["max_adverse_excursion_pct"] = 0.0
+        if "max_favorable_excursion_pct" not in df.columns:
+            df["max_favorable_excursion_pct"] = 0.0
+        if "max_drawdown_from_peak_pct" not in df.columns:
+            df["max_drawdown_from_peak_pct"] = 0.0
+        if "fast_adverse_move_count" not in df.columns:
+            df["fast_adverse_move_count"] = 0
+        if "last_fast_adverse_move_at" not in df.columns:
+            df["last_fast_adverse_move_at"] = None
 
         keep = self._empty_positions_frame().columns.tolist()
         for col in keep:

@@ -23,6 +23,8 @@ class TradeFeedbackLearner:
         self.reports_dir.mkdir(parents=True, exist_ok=True)
         self.report_csv = self.logs_dir / "trade_feedback_reports.csv"
         self.summary_csv = self.logs_dir / "trade_feedback_summary.csv"
+        self.positions_csv = self.logs_dir / "positions.csv"
+        self.open_pain_summary_csv = self.logs_dir / "trade_feedback_open_pain_summary.csv"
         self.db = Database(self.logs_dir / "trading.db")
 
     def _safe_float(self, value, default=0.0):
@@ -51,6 +53,43 @@ class TradeFeedbackLearner:
             return json.loads(value)
         except Exception:
             return {} if default is None else default
+
+    def _env_float(self, name: str, default: float, minimum: float | None = None, maximum: float | None = None) -> float:
+        try:
+            value = float(os.getenv(name, str(default)) or default)
+        except Exception:
+            value = float(default)
+        if minimum is not None:
+            value = max(float(minimum), value)
+        if maximum is not None:
+            value = min(float(maximum), value)
+        return float(value)
+
+    def _env_int(self, name: str, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
+        try:
+            value = int(os.getenv(name, str(default)) or default)
+        except Exception:
+            value = int(default)
+        if minimum is not None:
+            value = max(int(minimum), value)
+        if maximum is not None:
+            value = min(int(maximum), value)
+        return int(value)
+
+    def _numeric_series(self, frame: pd.DataFrame, column: str, default=0.0):
+        if frame is None or frame.empty:
+            return pd.Series(dtype=float)
+        if column in frame.columns:
+            return pd.to_numeric(frame[column], errors="coerce").fillna(default)
+        return pd.Series(default, index=frame.index, dtype=float)
+
+    def _numeric_series_any(self, frame: pd.DataFrame, columns, default=0.0):
+        if frame is None or frame.empty:
+            return pd.Series(dtype=float)
+        for column in columns:
+            if column in frame.columns:
+                return pd.to_numeric(frame[column], errors="coerce").fillna(default)
+        return pd.Series(default, index=frame.index, dtype=float)
 
     def _safe_iso(self, value):
         try:
@@ -254,8 +293,10 @@ class TradeFeedbackLearner:
 
     def _compute_feedback_factors(self, group: pd.DataFrame):
         count = len(group.index)
-        win_rate = self._safe_float((pd.to_numeric(group.get("realized_pnl"), errors="coerce").fillna(0.0) > 0).mean(), 0.5)
-        avg_roi = self._safe_float(pd.to_numeric(group.get("roi"), errors="coerce").fillna(0.0).mean(), 0.0)
+        realized_pnl = self._numeric_series(group, "realized_pnl", default=0.0)
+        roi = self._numeric_series(group, "roi", default=0.0)
+        win_rate = self._safe_float((realized_pnl > 0).mean(), 0.5)
+        avg_roi = self._safe_float(roi.mean(), 0.0)
 
         confidence_multiplier = np.clip(1.0 + ((win_rate - 0.5) * 0.40) + np.clip(avg_roi, -0.25, 0.25) * 0.20, 0.85, 1.15)
         expected_return_multiplier = np.clip(1.0 + ((win_rate - 0.5) * 0.60) + np.clip(avg_roi, -0.25, 0.25) * 0.35, 0.80, 1.20)
@@ -308,6 +349,150 @@ class TradeFeedbackLearner:
         if not summary_df.empty:
             summary_df.to_csv(self.summary_csv, index=False)
         return summary_df
+
+    def _reset_open_pain_summary(self):
+        if self.open_pain_summary_csv.exists():
+            try:
+                self.open_pain_summary_csv.unlink()
+            except Exception:
+                pass
+
+    def _compute_open_pain_factors(self, group: pd.DataFrame):
+        count = len(group.index)
+        if count <= 0:
+            return {
+                "sample_count": 0,
+                "pain_rate": 0.0,
+                "avg_open_return": 0.0,
+                "avg_mae": 0.0,
+                "avg_drawdown": 0.0,
+                "avg_fast_adverse_count": 0.0,
+                "confidence_multiplier": 1.0,
+                "expected_return_multiplier": 1.0,
+                "edge_multiplier": 1.0,
+                "pain_score": 0.0,
+            }
+
+        open_return_trigger = self._env_float("OPEN_PAIN_TRIGGER_OPEN_RETURN", -0.015, minimum=-1.0, maximum=0.0)
+        mae_trigger = self._env_float("OPEN_PAIN_TRIGGER_MAE", -0.03, minimum=-1.0, maximum=0.0)
+        drawdown_trigger = self._env_float("OPEN_PAIN_TRIGGER_DRAWDOWN", 0.03, minimum=0.0, maximum=1.0)
+        fast_count_trigger = self._env_int("OPEN_PAIN_TRIGGER_FAST_COUNT", 1, minimum=0, maximum=100)
+        pain_sensitivity = self._env_float("OPEN_PAIN_SENSITIVITY", 1.0, minimum=0.1, maximum=3.0)
+        conf_penalty_max = self._env_float("OPEN_PAIN_CONF_PENALTY_MAX", 0.18, minimum=0.0, maximum=0.50)
+        ret_penalty_max = self._env_float("OPEN_PAIN_RET_PENALTY_MAX", 0.24, minimum=0.0, maximum=0.60)
+        edge_floor = self._env_float("OPEN_PAIN_EDGE_MULTIPLIER_FLOOR", 0.78, minimum=0.50, maximum=1.0)
+        conf_floor = self._env_float("OPEN_PAIN_CONF_MULTIPLIER_FLOOR", 0.82, minimum=0.50, maximum=1.0)
+        ret_floor = self._env_float("OPEN_PAIN_RET_MULTIPLIER_FLOOR", 0.76, minimum=0.40, maximum=1.0)
+
+        current_return = self._numeric_series(group, "open_return_pct", default=0.0)
+        mae = self._numeric_series(group, "max_adverse_excursion_pct", default=0.0)
+        drawdown = self._numeric_series_any(
+            group,
+            ["max_drawdown_from_peak_pct", "drawdown_from_peak"],
+            default=0.0,
+        )
+        fast_count = self._numeric_series(group, "fast_adverse_move_count", default=0.0)
+
+        pain_mask = (
+            (current_return <= open_return_trigger)
+            | (mae <= mae_trigger)
+            | (drawdown >= drawdown_trigger)
+            | (fast_count >= fast_count_trigger)
+        )
+        pain_rate = self._safe_float(pain_mask.mean(), 0.0)
+        avg_open_return = self._safe_float(current_return.mean(), 0.0)
+        avg_mae = self._safe_float(mae.mean(), 0.0)
+        avg_drawdown = self._safe_float(drawdown.mean(), 0.0)
+        avg_fast = self._safe_float(fast_count.mean(), 0.0)
+
+        pain_score = float(
+            np.clip(
+                (
+                    (pain_rate * 0.45)
+                    + np.clip((-avg_open_return) / max(abs(open_return_trigger) * 4.0, 1e-9), 0.0, 1.0) * 0.20
+                    + np.clip((-avg_mae) / max(abs(mae_trigger) * 4.0, 1e-9), 0.0, 1.0) * 0.20
+                    + np.clip(avg_drawdown / max(drawdown_trigger * 3.5, 1e-9), 0.0, 1.0) * 0.10
+                    + np.clip(avg_fast / max(fast_count_trigger + 1.0, 1.0), 0.0, 1.0) * 0.05
+                ) * pain_sensitivity,
+                0.0,
+                1.0,
+            )
+        )
+
+        confidence_multiplier = np.clip(1.0 - (pain_score * conf_penalty_max), conf_floor, 1.0)
+        expected_return_multiplier = np.clip(1.0 - (pain_score * ret_penalty_max), ret_floor, 1.0)
+        edge_multiplier = np.clip((confidence_multiplier * 0.45) + (expected_return_multiplier * 0.55), edge_floor, 1.0)
+
+        return {
+            "sample_count": int(count),
+            "pain_rate": round(pain_rate, 4),
+            "avg_open_return": round(avg_open_return, 6),
+            "avg_mae": round(avg_mae, 6),
+            "avg_drawdown": round(avg_drawdown, 6),
+            "avg_fast_adverse_count": round(avg_fast, 4),
+            "confidence_multiplier": round(float(confidence_multiplier), 4),
+            "expected_return_multiplier": round(float(expected_return_multiplier), 4),
+            "edge_multiplier": round(float(edge_multiplier), 4),
+            "pain_score": round(float(pain_score), 4),
+            "pain_sensitivity": round(float(pain_sensitivity), 4),
+            "pain_open_return_trigger": round(float(open_return_trigger), 6),
+            "pain_mae_trigger": round(float(mae_trigger), 6),
+            "pain_drawdown_trigger": round(float(drawdown_trigger), 6),
+            "pain_fast_count_trigger": int(fast_count_trigger),
+        }
+
+    def _refresh_open_pain_summary(self):
+        positions_df = self._safe_read(self.positions_csv)
+        if positions_df.empty:
+            self._reset_open_pain_summary()
+            return pd.DataFrame()
+
+        work = positions_df.copy()
+        if "status" in work.columns:
+            work = work[work["status"].astype(str).str.strip().str.upper() == "OPEN"].copy()
+        if work.empty:
+            self._reset_open_pain_summary()
+            return pd.DataFrame()
+
+        entry_price = self._numeric_series(work, "entry_price", default=0.0)
+        current_price = self._numeric_series_any(work, ["current_price"], default=np.nan).fillna(entry_price)
+        work["open_return_pct"] = np.where(entry_price > 0, (current_price - entry_price) / entry_price, 0.0)
+        work["max_adverse_excursion_pct"] = self._numeric_series(work, "max_adverse_excursion_pct", default=0.0)
+        work["max_drawdown_from_peak_pct"] = self._numeric_series_any(
+            work,
+            ["max_drawdown_from_peak_pct", "drawdown_from_peak"],
+            default=0.0,
+        )
+        work["fast_adverse_move_count"] = self._numeric_series(work, "fast_adverse_move_count", default=0.0)
+
+        rows = [
+            {
+                "scope": "overall",
+                "scope_value": "overall",
+                **self._compute_open_pain_factors(work),
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ]
+
+        if "signal_label" in work.columns:
+            for signal_label, group in work.groupby("signal_label", dropna=True):
+                if len(group.index) < 1:
+                    continue
+                rows.append(
+                    {
+                        "scope": "signal_label",
+                        "scope_value": str(signal_label),
+                        **self._compute_open_pain_factors(group),
+                        "generated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+
+        pain_df = pd.DataFrame(rows)
+        if pain_df.empty:
+            self._reset_open_pain_summary()
+            return pain_df
+        pain_df.to_csv(self.open_pain_summary_csv, index=False)
+        return pain_df
 
     def _closed_row_to_trade(self, row: dict):
         exit_price = row.get("exit_price", row.get("current_price"))
@@ -365,16 +550,15 @@ class TradeFeedbackLearner:
         if scored_df is None or scored_df.empty or signal_engine is None:
             return scored_df
 
+        pain_summary_df = self._refresh_open_pain_summary()
         summary_df = self._safe_read(self.summary_csv)
-        if summary_df.empty:
-            return scored_df
-
-        overall_row = summary_df[
-            (summary_df.get("scope") == "overall") & (summary_df.get("scope_value") == "overall")
-        ]
-        if overall_row.empty:
-            return scored_df
-        overall_row = overall_row.iloc[0].to_dict()
+        overall_row = {}
+        if not summary_df.empty:
+            overall = summary_df[
+                (summary_df.get("scope") == "overall") & (summary_df.get("scope_value") == "overall")
+            ]
+            if not overall.empty:
+                overall_row = overall.iloc[0].to_dict()
 
         label_rows = {}
         label_df = summary_df[summary_df.get("scope") == "signal_label"] if "scope" in summary_df.columns else pd.DataFrame()
@@ -384,15 +568,38 @@ class TradeFeedbackLearner:
                 for _, row in label_df.iterrows()
             }
 
+        pain_overall_row = {}
+        pain_label_rows = {}
+        if not pain_summary_df.empty:
+            overall_pain = pain_summary_df[
+                (pain_summary_df.get("scope") == "overall") & (pain_summary_df.get("scope_value") == "overall")
+            ]
+            if not overall_pain.empty:
+                pain_overall_row = overall_pain.iloc[0].to_dict()
+            pain_label_df = pain_summary_df[pain_summary_df.get("scope") == "signal_label"] if "scope" in pain_summary_df.columns else pd.DataFrame()
+            if not pain_label_df.empty:
+                pain_label_rows = {
+                    str(row.get("scope_value")): row.to_dict()
+                    for _, row in pain_label_df.iterrows()
+                }
+
         adjusted_rows = []
         for _, row in scored_df.iterrows():
             working = row.to_dict()
             existing_label = str(working.get("signal_label", "") or "")
             label_ctx = label_rows.get(existing_label, {})
+            pain_label_ctx = pain_label_rows.get(existing_label, {})
 
             conf_mult = self._safe_float(overall_row.get("confidence_multiplier"), 1.0) * self._safe_float(label_ctx.get("confidence_multiplier"), 1.0)
             ret_mult = self._safe_float(overall_row.get("expected_return_multiplier"), 1.0) * self._safe_float(label_ctx.get("expected_return_multiplier"), 1.0)
             edge_mult = self._safe_float(overall_row.get("edge_multiplier"), 1.0) * self._safe_float(label_ctx.get("edge_multiplier"), 1.0)
+            pain_conf_mult = self._safe_float(pain_overall_row.get("confidence_multiplier"), 1.0) * self._safe_float(pain_label_ctx.get("confidence_multiplier"), 1.0)
+            pain_ret_mult = self._safe_float(pain_overall_row.get("expected_return_multiplier"), 1.0) * self._safe_float(pain_label_ctx.get("expected_return_multiplier"), 1.0)
+            pain_edge_mult = self._safe_float(pain_overall_row.get("edge_multiplier"), 1.0) * self._safe_float(pain_label_ctx.get("edge_multiplier"), 1.0)
+
+            conf_mult *= pain_conf_mult
+            ret_mult *= pain_ret_mult
+            edge_mult *= pain_edge_mult
 
             working["pre_feedback_confidence"] = self._safe_float(working.get("confidence"), 0.0)
             working["pre_feedback_expected_return"] = self._safe_float(working.get("expected_return"), 0.0)
@@ -400,6 +607,8 @@ class TradeFeedbackLearner:
             working["feedback_expected_return_multiplier"] = round(ret_mult, 4)
             working["feedback_edge_multiplier"] = round(edge_mult, 4)
             working["feedback_recent_win_rate"] = self._safe_float(label_ctx.get("win_rate"), self._safe_float(overall_row.get("win_rate"), 0.5))
+            working["feedback_open_pain_score"] = self._safe_float(pain_label_ctx.get("pain_score"), self._safe_float(pain_overall_row.get("pain_score"), 0.0))
+            working["feedback_open_pain_rate"] = self._safe_float(pain_label_ctx.get("pain_rate"), self._safe_float(pain_overall_row.get("pain_rate"), 0.0))
 
             working["expected_return"] = self._safe_float(working.get("expected_return"), 0.0) * ret_mult
             working["edge_score"] = self._safe_float(working.get("edge_score"), 0.0) * edge_mult
@@ -420,18 +629,20 @@ class TradeFeedbackLearner:
                 f"{rescored.get('reason')} | "
                 f"feedback_wr={self._safe_float(rescored.get('feedback_recent_win_rate'), 0.5):.2f}, "
                 f"feedback_conf_mult={self._safe_float(conf_mult, 1.0):.2f}, "
-                f"feedback_ret_mult={self._safe_float(ret_mult, 1.0):.2f}"
+                f"feedback_ret_mult={self._safe_float(ret_mult, 1.0):.2f}, "
+                f"open_pain={self._safe_float(rescored.get('feedback_open_pain_score'), 0.0):.2f}"
             )
             adjusted_rows.append(rescored)
 
         adjusted_df = pd.DataFrame(adjusted_rows)
         if not adjusted_df.empty:
             logging.info(
-                "Trade feedback applied to %s scored rows (overall_wr=%.2f, conf_mult=%.2f, ret_mult=%.2f).",
+                "Trade feedback applied to %s scored rows (overall_wr=%.2f, conf_mult=%.2f, ret_mult=%.2f, open_pain=%.2f).",
                 len(adjusted_df),
                 self._safe_float(overall_row.get("win_rate"), 0.5),
                 self._safe_float(overall_row.get("confidence_multiplier"), 1.0),
                 self._safe_float(overall_row.get("expected_return_multiplier"), 1.0),
+                self._safe_float(pain_overall_row.get("pain_score"), 0.0),
             )
         return adjusted_df if not adjusted_df.empty else scored_df
 
