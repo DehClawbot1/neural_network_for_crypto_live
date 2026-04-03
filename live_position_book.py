@@ -26,6 +26,10 @@ class LivePositionBook:
         self._verify_cache: list | None = None
         self._verify_cache_ts: float = 0.0
         self._verify_cache_token_key: str = ""
+        # Cooldown for rebuild_from_db — prevents redundant heavy queries
+        # when the supervisor calls rebuild multiple times per cycle.
+        self._rebuild_cooldown_seconds: float = 5.0
+        self._last_rebuild_ts: float = 0.0
 
     def _insert_external_sync_sell_fill(self, cursor, *, token_id, condition_id, outcome_side, price, shares, now):
         shares = float(shares or 0.0)
@@ -191,7 +195,7 @@ class LivePositionBook:
             self.db.conn.rollback()
             raise
 
-        self.rebuild_from_db()
+        self.rebuild_from_db(force=True)
         if bool(vacuum):
             try:
                 self.db.conn.execute("VACUUM")
@@ -382,7 +386,11 @@ class LivePositionBook:
             return False
         return exchange_shares < local_shares - 1e-6
 
-    def rebuild_from_db(self):
+    def rebuild_from_db(self, *, force: bool = False):
+        now = time.monotonic()
+        if not force and (now - self._last_rebuild_ts) < self._rebuild_cooldown_seconds:
+            return getattr(self, "_last_rebuild_result", pd.DataFrame())
+        self._last_rebuild_ts = now
         known_local_order_ids = self._load_known_local_order_ids()
         fills = self.db.query_all(
             """
@@ -497,7 +505,9 @@ class LivePositionBook:
                 "rebuild_from_db: fills query returned 0 position books — "
                 "skipping live_positions wipe to prevent data loss."
             )
-            return pd.DataFrame(columns=["position_key", "token_id", "condition_id", "outcome_side", "shares", "avg_entry_price", "realized_pnl", "last_fill_at", "source", "status"])
+            result = pd.DataFrame(columns=["position_key", "token_id", "condition_id", "outcome_side", "shares", "avg_entry_price", "realized_pnl", "last_fill_at", "source", "status"])
+            self._last_rebuild_result = result
+            return result
 
         now = datetime.now(timezone.utc).isoformat()
         dust_notional_threshold = 0.01
@@ -535,7 +545,9 @@ class LivePositionBook:
             self.db.conn.rollback()
             raise
 
-        return pd.DataFrame(list(books.values())) if books else pd.DataFrame(columns=["position_key", "token_id", "condition_id", "outcome_side", "shares", "avg_entry_price", "realized_pnl", "last_fill_at", "source", "status"]) # BUG FIX 4 if books else pd.DataFrame(columns=["position_key", "token_id", "condition_id", "outcome_side", "shares", "avg_entry_price", "realized_pnl", "last_fill_at", "source", "status"]) # BUG FIX 4
+        result = pd.DataFrame(list(books.values())) if books else pd.DataFrame(columns=["position_key", "token_id", "condition_id", "outcome_side", "shares", "avg_entry_price", "realized_pnl", "last_fill_at", "source", "status"])
+        self._last_rebuild_result = result
+        return result
 
     def _extract_available_balance(self, payload, execution_client, asset_type="COLLATERAL"):
         if not isinstance(payload, dict): return None

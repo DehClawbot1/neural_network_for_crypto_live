@@ -1429,7 +1429,7 @@ def main_loop():
                     if dead_tokens:
                         live_position_book.close_dead_token_positions(dead_tokens)
                         
-                    live_position_book.rebuild_from_db()
+                    live_position_book.rebuild_from_db(force=True)
                     pre_positions_df = live_position_book.get_enriched_open_positions(scored_df=None)
                     trade_manager.reconcile_live_positions(reconciled_positions_df=pre_positions_df)
 
@@ -1956,7 +1956,7 @@ def main_loop():
                     try:
                         closed_rows = int(live_position_book.close_dead_token_positions({token_id}) or 0)
                         if closed_rows > 0:
-                            live_position_book.rebuild_from_db()
+                            live_position_book.rebuild_from_db(force=True)
                     except Exception as exc:
                         logging.warning("Dead-orderbook safeguard failed for %s: %s", token_id, exc)
                 return closed_rows
@@ -3167,7 +3167,6 @@ def main_loop():
 
             # If in live mode, reconcile with exchange before making decisions
             if trading_mode == "live" and execution_client is not None:
-                live_position_book.rebuild_from_db()
                 try:
                     live_position_book.rebuild_from_db()
                     reconciled_positions_df = live_position_book.get_enriched_open_positions(scored_df=scored_df)
