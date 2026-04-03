@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pandas as pd
+from model_feature_catalog import DEFAULT_TABULAR_FEATURE_COLUMNS
 from model_feature_safety import drop_all_nan_features
 from schema import ALIASES
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
@@ -15,22 +16,7 @@ class TimeSplitTrainer:
     Research/paper-trading only.
     """
 
-    FEATURE_COLUMNS = [
-        "trader_win_rate",
-        "normalized_trade_size",
-        "current_price",
-        "time_left",
-        "liquidity_score",
-        "volume_score",
-        "probability_momentum",
-        "volatility_score",
-        "whale_pressure",
-        "market_structure_score",
-        "spread",
-        "wallet_trade_count_30d",
-        "wallet_alpha_30d",
-        "wallet_avg_forward_return_15m",
-    ]
+    FEATURE_COLUMNS = DEFAULT_TABULAR_FEATURE_COLUMNS
 
     def __init__(self, logs_dir="logs"):
         self.logs_dir = Path(logs_dir)

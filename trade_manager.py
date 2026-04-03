@@ -12,7 +12,7 @@ import pandas as pd
 from balance_normalization import maybe_trace_allowance_payload
 from db import Database
 from trade_lifecycle import TradeLifecycle, TradeState
-from trade_quality import build_quality_context, classify_exit_reason_family
+from trade_quality import build_quality_context, classify_exit_reason_family, resolve_entry_signal_label
 from config import TradingConfig
 
 logger = logging.getLogger(__name__)
@@ -232,6 +232,10 @@ class TradeManager:
 
 
     def handle_signal(self, signal_row: pd.Series, confidence: float, size_usdc: float, entry_price_override: float | None = None) -> Optional[TradeLifecycle]:
+        signal_row = signal_row.copy()
+        signal_row["signal_label"] = resolve_entry_signal_label(
+            signal_row.to_dict() if hasattr(signal_row, "to_dict") else dict(signal_row)
+        )
         trade_key = self._get_trade_key(signal_row)
         if trade_key is None:
             return None
@@ -577,6 +581,7 @@ class TradeManager:
             "entry_context_complete": getattr(trade, "entry_context_complete", False),
             "learning_eligible": getattr(trade, "learning_eligible", False),
             "operational_close_flag": getattr(trade, "operational_close_flag", False),
+            "reconciliation_close_flag": str(getattr(trade, "close_reason", "") or "").strip().lower() == "external_manual_close",
             "exit_reason_family": getattr(trade, "exit_reason_family", "unknown"),
             "intended_exit_reason": getattr(trade, "intended_exit_reason", None),
             "actual_execution_path": getattr(trade, "actual_execution_path", None),
@@ -688,6 +693,7 @@ class TradeManager:
         row["entry_context_complete"] = getattr(trade, "entry_context_complete", False)
         row["learning_eligible"] = getattr(trade, "learning_eligible", False)
         row["operational_close_flag"] = getattr(trade, "operational_close_flag", False)
+        row["reconciliation_close_flag"] = str(trade.close_reason or "").strip().lower() == "external_manual_close"
         row["exit_reason_family"] = getattr(trade, "exit_reason_family", classify_exit_reason_family(trade.close_reason))
         row["intended_exit_reason"] = getattr(trade, "intended_exit_reason", trade.close_reason)
         row["actual_execution_path"] = getattr(trade, "actual_execution_path", "local_rule_close")
@@ -721,6 +727,14 @@ class TradeManager:
                 f"{float(row.get('shares', 0.0) or 0.0):.6f}",
             ]
         )
+
+    def _refresh_lifecycle_audit_reports(self):
+        try:
+            from trade_lifecycle_audit import TradeLifecycleAuditor
+
+            TradeLifecycleAuditor(logs_dir=str(self.logs_dir)).build_reports()
+        except Exception as exc:
+            logger.warning("[~] Failed to refresh trade lifecycle audit after close sync: %s", exc)
 
     def _append_closed_rows(self, rows: List[dict]):
         if not rows:
@@ -761,6 +775,7 @@ class TradeManager:
         merged = append_df.copy() if existing_df.empty else pd.concat([existing_df, append_df], ignore_index=True)
         merged.to_csv(self.closed_file, index=False)
         self._upsert_position_rows_to_db(deduped_rows)
+        self._refresh_lifecycle_audit_reports()
         return len(deduped_rows)
 
     def _close_absent_ledger_positions(self, open_snapshot_df: pd.DataFrame | None, close_reason: str = "external_manual_close") -> int:
@@ -779,7 +794,11 @@ class TradeManager:
                 status, entry_price, current_price, size_usdc, shares, market_value, realized_pnl,
                 net_realized_pnl, unrealized_pnl, confidence, confidence_at_entry, signal_label,
                 close_reason, exit_price, close_fingerprint, is_reconciliation_close, lifecycle_source,
-                opened_at, closed_at
+                entry_model_family, entry_model_version, performance_governor_level, market_family,
+                horizon_bucket, liquidity_bucket, volatility_bucket, technical_regime_bucket,
+                entry_context_complete, learning_eligible, operational_close_flag, reconciliation_close_flag, exit_reason_family,
+                intended_exit_reason, actual_execution_path, exit_fill_latency_seconds, exit_cancel_count,
+                exit_partial_fill_ratio, exit_realized_slippage_bps, market_slug, opened_at, closed_at
             FROM positions
             WHERE UPPER(COALESCE(status, '')) = 'OPEN'
             """
@@ -800,6 +819,7 @@ class TradeManager:
             closed_row["exit_price"] = row.get("exit_price") if row.get("exit_price") is not None else row.get("current_price", row.get("entry_price"))
             closed_row["current_price"] = row.get("current_price", row.get("entry_price"))
             closed_row["is_reconciliation_close"] = True
+            closed_row["reconciliation_close_flag"] = True
             closed_row["lifecycle_source"] = "trade_manager_reconciled_closed"
             closed_row["close_fingerprint"] = self._closed_row_fingerprint(closed_row)
             rows_to_close.append(closed_row)
@@ -815,8 +835,12 @@ class TradeManager:
                     status, entry_price, current_price, size_usdc, shares, market_value, realized_pnl,
                     net_realized_pnl, unrealized_pnl, confidence, confidence_at_entry, signal_label,
                     close_reason, exit_price, close_fingerprint, is_reconciliation_close, lifecycle_source,
-                    opened_at, closed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    entry_model_family, entry_model_version, performance_governor_level, market_family,
+                    horizon_bucket, liquidity_bucket, volatility_bucket, technical_regime_bucket,
+                    entry_context_complete, learning_eligible, operational_close_flag, reconciliation_close_flag, exit_reason_family,
+                    intended_exit_reason, actual_execution_path, exit_fill_latency_seconds, exit_cancel_count,
+                    exit_partial_fill_ratio, exit_realized_slippage_bps, market_slug, opened_at, closed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row.get("position_id"),
@@ -843,6 +867,26 @@ class TradeManager:
                     row.get("close_fingerprint"),
                     int(bool(row.get("is_reconciliation_close"))) if row.get("is_reconciliation_close") is not None else 0,
                     row.get("lifecycle_source"),
+                    row.get("entry_model_family"),
+                    row.get("entry_model_version"),
+                    int(row.get("performance_governor_level", 0) or 0),
+                    row.get("market_family"),
+                    row.get("horizon_bucket"),
+                    row.get("liquidity_bucket"),
+                    row.get("volatility_bucket"),
+                    row.get("technical_regime_bucket"),
+                    int(bool(row.get("entry_context_complete"))) if row.get("entry_context_complete") is not None else 0,
+                    int(bool(row.get("learning_eligible"))) if row.get("learning_eligible") is not None else 0,
+                    int(bool(row.get("operational_close_flag"))) if row.get("operational_close_flag") is not None else 0,
+                    int(bool(row.get("reconciliation_close_flag"))) if row.get("reconciliation_close_flag") is not None else 0,
+                    row.get("exit_reason_family"),
+                    row.get("intended_exit_reason"),
+                    row.get("actual_execution_path"),
+                    row.get("exit_fill_latency_seconds"),
+                    row.get("exit_cancel_count"),
+                    row.get("exit_partial_fill_ratio"),
+                    row.get("exit_realized_slippage_bps"),
+                    row.get("market_slug"),
                     row.get("opened_at"),
                     row.get("closed_at"),
                 ),
@@ -859,7 +903,7 @@ class TradeManager:
                 "confidence", "confidence_at_entry", "signal_label",
                 "entry_model_family", "entry_model_version", "performance_governor_level",
                 "market_family", "horizon_bucket", "liquidity_bucket", "volatility_bucket", "technical_regime_bucket",
-                "entry_context_complete", "learning_eligible", "operational_close_flag", "exit_reason_family",
+                "entry_context_complete", "learning_eligible", "operational_close_flag", "reconciliation_close_flag", "exit_reason_family",
                 "intended_exit_reason", "actual_execution_path", "exit_fill_latency_seconds", "exit_cancel_count",
                 "exit_partial_fill_ratio", "exit_realized_slippage_bps",
                 "mark_price", "best_bid", "best_ask", "spread", "mid_price", "spread_pct", "mark_source",
@@ -960,6 +1004,8 @@ class TradeManager:
             df["learning_eligible"] = False
         if "operational_close_flag" not in df.columns:
             df["operational_close_flag"] = False
+        if "reconciliation_close_flag" not in df.columns:
+            df["reconciliation_close_flag"] = False
         if "exit_reason_family" not in df.columns:
             df["exit_reason_family"] = "unknown"
         if "intended_exit_reason" not in df.columns:
@@ -1148,4 +1194,8 @@ class TradeManager:
                 removed_dust,
                 min_reconciled_notional,
             )
+        try:
+            self.persist_open_positions(reconciled_positions_df=reconciled_positions_df)
+        except Exception as exc:
+            logger.warning("[~] Failed to persist reconciled live positions snapshot: %s", exc)
         logger.info("[~] Reconciled %s live positions into TradeManager.", len(self.active_trades))

@@ -4,6 +4,7 @@ import time
 import pandas as pd
 import numpy as np
 from candle_data_service import CandleDataService
+from btc_live_price_tracker import BTCLivePriceTracker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -15,12 +16,20 @@ class TechnicalAnalyzer:
     the macro trend configuration (e.g. above/below the 200-day SMA).
     """
 
-    def __init__(self, cache_ttl_seconds=300, candle_data_service: CandleDataService | None = None):
+    def __init__(
+        self,
+        cache_ttl_seconds=300,
+        candle_data_service: CandleDataService | None = None,
+        btc_live_tracker: BTCLivePriceTracker | None = None,
+    ):
         # Cache TA context briefly so intraday trend signals stay relevant.
         self.cache_ttl = cache_ttl_seconds
         self._cached_context = None
         self._last_fetch_time = 0
         self.candle_data_service = candle_data_service or CandleDataService(symbol="BTCUSDT")
+        self.btc_live_tracker = btc_live_tracker or BTCLivePriceTracker(
+            candle_data_service=self.candle_data_service,
+        )
 
     def _safe_float(self, value, default=0.0):
         try:
@@ -236,8 +245,11 @@ class TechnicalAnalyzer:
         Returns a dictionary expressing the current technical posture.
         """
         now = time.time()
+        live_context = self.btc_live_tracker.analyze()
         if self._cached_context and (now - self._last_fetch_time) < self.cache_ttl:
-            return self._cached_context
+            cached = dict(self._cached_context)
+            cached.update(live_context)
+            return cached
 
         # Safe defaults if API fails
         context = {
@@ -258,6 +270,9 @@ class TechnicalAnalyzer:
             )
             if daily_df is None or daily_df.empty or len(daily_df) < 200:
                 logging.warning("TechnicalAnalyzer: Not enough daily candles returned to calculate 200 SMA.")
+                context.update(live_context)
+                self._cached_context = dict(context)
+                self._last_fetch_time = now
                 return context
 
             df = daily_df[["close"]].copy()
@@ -304,10 +319,12 @@ class TechnicalAnalyzer:
                 f"FractalReady={context.get('fractal_entry_ready')}"
             )
 
-            self._cached_context = context
+            context.update(live_context)
+            self._cached_context = dict(context)
             self._last_fetch_time = now
             return context
 
         except Exception as e:
             logging.warning(f"TechnicalAnalyzer: Failed to fetch closed BTC candles: {e}")
+            context.update(live_context)
             return context

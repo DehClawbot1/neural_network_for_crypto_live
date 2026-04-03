@@ -300,10 +300,19 @@ class LivePositionBook:
         ).fetchall()
         return bool(rows)
 
+    def _is_synthetic_fill_id(self, fill_id) -> bool:
+        fill_id = str(fill_id or "").strip().lower()
+        return (
+            fill_id.startswith("fill_dust_clear_")
+            or fill_id.startswith("fill_ext_sync_")
+            or fill_id.startswith("ext_sync_")
+            or "dust_clear" in fill_id
+        )
+
     def _load_latest_external_syncs(self):
         rows = self.db.query_all(
             """
-            SELECT s.position_key, s.exchange_shares, s.observed_at
+            SELECT s.position_key, s.exchange_shares, s.sync_type, s.observed_at
             FROM external_position_syncs s
             JOIN (
                 SELECT position_key, MAX(observed_at) AS observed_at
@@ -316,7 +325,61 @@ class LivePositionBook:
         )
         return {str(row.get("position_key") or ""): row for row in rows}
 
+    def _load_known_local_order_ids(self) -> set[str]:
+        rows = self.db.query_all(
+            """
+            SELECT order_id
+            FROM orders
+            WHERE order_id IS NOT NULL
+            """
+        )
+        known_ids = set()
+        for row in rows:
+            order_id = str(row.get("order_id") or "").strip()
+            if order_id:
+                known_ids.add(order_id)
+        return known_ids
+
+    def _fill_is_rebuild_eligible(self, fill: dict, known_local_order_ids: set[str]) -> bool:
+        fill_id = str(fill.get("fill_id") or "").strip()
+        order_id = str(fill.get("order_id") or "").strip()
+
+        if self._is_synthetic_fill_id(fill_id):
+            return True
+        if order_id == "external_manual":
+            return True
+        if order_id and order_id in known_local_order_ids:
+            return True
+        return False
+
+    def _sync_should_override_local_book(self, sync: dict, row: dict) -> bool:
+        if not sync:
+            return False
+        try:
+            observed_at = pd.to_datetime(sync.get("observed_at"), utc=True, errors="coerce")
+            last_buy_at = pd.to_datetime(row.get("last_buy_at"), utc=True, errors="coerce")
+            exchange_shares = float(sync.get("exchange_shares") or 0.0)
+        except Exception:
+            return False
+
+        sync_type = str(sync.get("sync_type") or "").strip().lower()
+        local_shares = float(row.get("shares") or 0.0)
+        local_avg_entry = float(row.get("avg_entry_price") or 0.0)
+        local_notional = local_shares * max(local_avg_entry, 0.0)
+
+        # Certain exchange-synced outcomes are authoritative and must survive rebuilds,
+        # even if local fill timestamps were written later during reconciliation/import.
+        authoritative_zero_sync = sync_type in {"dead_orderbook_close", "full_close"} and exchange_shares <= 1e-9
+        authoritative_near_zero_sync = exchange_shares <= 0.01 and local_notional >= 0.01
+        if authoritative_zero_sync or authoritative_near_zero_sync:
+            return True
+
+        if pd.notna(last_buy_at) and pd.notna(observed_at) and last_buy_at > observed_at:
+            return False
+        return exchange_shares < local_shares - 1e-6
+
     def rebuild_from_db(self):
+        known_local_order_ids = self._load_known_local_order_ids()
         fills = self.db.query_all(
             """
             SELECT
@@ -339,12 +402,16 @@ class LivePositionBook:
         )
         fills = self._collapse_consecutive_external_sync_fills(fills)
         books = {}
+        skipped_untracked_fills = 0
         for fill in fills:
             fill_id = str(fill.get("fill_id") or "")
             # Synthetic dust-clear fills are internal bookkeeping artifacts.
             # They are useful for local logs, but should not drive live position
             # reconstruction from exchange-synced fills.
             if "dust_clear" in fill_id:
+                continue
+            if not self._fill_is_rebuild_eligible(fill, known_local_order_ids):
+                skipped_untracked_fills += 1
                 continue
             tid = fill.get("token_id"); token_id = "" if pd.isna(tid) else str(tid or "") # BUG FIX 10
             condition_id = fill.get("condition_id")
@@ -397,24 +464,26 @@ class LivePositionBook:
             elif side not in ("BUY", "SELL") and side:
                 logger.debug("rebuild_from_db: unrecognised side=%r on fill_id=%s — skipped", side, fill_id)
 
+        if skipped_untracked_fills:
+            logger.info(
+                "rebuild_from_db: skipped %d fills that were not tied to local orders or synthetic syncs.",
+                skipped_untracked_fills,
+            )
+
         latest_syncs = self._load_latest_external_syncs()
         for row in books.values():
             sync = latest_syncs.get(str(row.get("position_key") or ""))
             if not sync:
                 continue
             try:
-                observed_at = pd.to_datetime(sync.get("observed_at"), utc=True, errors="coerce")
-                last_buy_at = pd.to_datetime(row.get("last_buy_at"), utc=True, errors="coerce")
                 exchange_shares = float(sync.get("exchange_shares") or 0.0)
             except Exception:
                 continue
-            if pd.notna(last_buy_at) and pd.notna(observed_at) and last_buy_at > observed_at:
-                continue
-            if exchange_shares < float(row.get("shares") or 0.0) - 1e-6:
+            if self._sync_should_override_local_book(sync, row):
                 row["shares"] = exchange_shares
                 if exchange_shares <= 1e-9:
                     row["avg_entry_price"] = 0.0
-                row["source"] = "fills_reconciled_external_sync"
+                row["source"] = f"fills_reconciled_external_sync:{str(sync.get('sync_type') or 'unknown').strip().lower()}"
 
         # Guard: if fills produced no books, do not wipe live_positions.
         # An empty result can come from a transient DB lock or a degenerate fills
@@ -703,16 +772,50 @@ class LivePositionBook:
         
         closed_total = 0
         for token_id in dead_tokens:
-            rows = cursor.execute("SELECT position_key FROM live_positions WHERE status = 'OPEN' AND token_id = ?", (token_id,)).fetchall()
+            rows = cursor.execute(
+                """
+                SELECT position_key, token_id, condition_id, outcome_side, shares, avg_entry_price
+                FROM live_positions
+                WHERE status = 'OPEN' AND token_id = ?
+                """,
+                (token_id,),
+            ).fetchall()
             if rows:
                 logger.warning("Safeguard: Auto-closing %d live positions for dead token %s (404/no orderbook)", len(rows), token_id)
-                cursor.execute("UPDATE live_positions SET status = 'CLOSED', updated_at = ? WHERE status = 'OPEN' AND token_id = ?", (now, token_id))
+                for row in rows:
+                    row_data = dict(row)
+                    local_shares = float(row_data.get("shares") or 0.0)
+                    if local_shares > 0:
+                        self._record_external_sync_event(
+                            cursor,
+                            position_key=row_data.get("position_key"),
+                            token_id=row_data.get("token_id"),
+                            condition_id=row_data.get("condition_id"),
+                            outcome_side=row_data.get("outcome_side"),
+                            sync_type="dead_orderbook_close",
+                            local_shares_before=local_shares,
+                            exchange_shares=0.0,
+                            delta_shares=local_shares,
+                            avg_entry_price=row_data.get("avg_entry_price"),
+                            fill_id=None,
+                            observed_at=now,
+                        )
+                cursor.execute(
+                    """
+                    UPDATE live_positions
+                    SET shares = 0.0, status = 'CLOSED', source = 'dead_orderbook_tombstone', updated_at = ?
+                    WHERE status = 'OPEN' AND token_id = ?
+                    """,
+                    (now, token_id),
+                )
                 closed_total += cursor.rowcount
                 
         if closed_total > 0:
             self.db.conn.commit()
             # Invalidate the verification cache so a rebuild isn't stale
             self._verify_cache_ts = 0.0
+            self._verify_cache = None
+            self._verify_cache_token_key = ""
             
         return closed_total
 

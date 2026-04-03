@@ -1,4 +1,5 @@
 import logging
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -42,6 +43,16 @@ class HistoricalDatasetBuilder:
             return df
         return df.loc[:, ~df.columns.duplicated()].copy()
 
+    def _parse_logged_timestamp_series(self, series: pd.Series) -> pd.Series:
+        local_tz = os.getenv("BOT_LOG_LOCAL_TIMEZONE", "Europe/Lisbon")
+        raw = pd.to_datetime(series, errors="coerce", utc=False, format="mixed")
+        if getattr(raw.dt, "tz", None) is None:
+            try:
+                return raw.dt.tz_localize(local_tz, nonexistent="shift_forward", ambiguous="NaT").dt.tz_convert("UTC")
+            except Exception:
+                return pd.to_datetime(series, utc=True, errors="coerce", format="mixed")
+        return raw.dt.tz_convert("UTC")
+
     def _coalesce_market_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         if df is None or df.empty:
             return df
@@ -63,6 +74,7 @@ class HistoricalDatasetBuilder:
         wallet_alpha_df = self._safe_read("wallet_alpha.csv")
         wallet_alpha_history_df = self._safe_read("wallet_alpha_history.csv")
         btc_targets_df = self._safe_read("btc_targets.csv")
+        btc_live_df = self._safe_read("btc_live_snapshot.csv")
 
         if signals_df.empty:
             return pd.DataFrame()
@@ -79,13 +91,13 @@ class HistoricalDatasetBuilder:
         dataset = self._dedupe_columns(dataset)
         if "timestamp" not in dataset.columns:
             dataset["timestamp"] = pd.NaT
-        dataset["timestamp"] = pd.to_datetime(dataset["timestamp"], utc=True, errors="coerce")
+        dataset["timestamp"] = self._parse_logged_timestamp_series(dataset["timestamp"])
 
         if not trades_df.empty:
             trade_cols = [c for c in ["timestamp", "market", "wallet_copied", "fill_price", "size_usdc", "action_type"] if c in trades_df.columns]
             trade_view = trades_df[trade_cols].copy()
             if "timestamp" in trade_view.columns:
-                trade_view["timestamp"] = pd.to_datetime(trade_view["timestamp"], utc=True, errors="coerce")
+                trade_view["timestamp"] = self._parse_logged_timestamp_series(trade_view["timestamp"])
                 trade_view = trade_view[trade_view["timestamp"].notna()].copy()
             if "market" in trade_view.columns and "market_title" not in trade_view.columns:
                 trade_view = trade_view.rename(columns={"market": "market_title"})
@@ -102,7 +114,7 @@ class HistoricalDatasetBuilder:
             if market_name_col and "market_title" in dataset.columns:
                 if "timestamp" in markets_df.columns:
                     markets_df = markets_df.copy()
-                    markets_df["timestamp"] = pd.to_datetime(markets_df["timestamp"], utc=True, errors="coerce")
+                    markets_df["timestamp"] = self._parse_logged_timestamp_series(markets_df["timestamp"])
                     markets_df = markets_df[markets_df["timestamp"].notna()].copy()
                     merged_parts = []
                     for market_title, group in dataset.groupby("market_title", dropna=False):
@@ -140,7 +152,7 @@ class HistoricalDatasetBuilder:
             history_key = "wallet_copied" if "wallet_copied" in wallet_alpha_history_df.columns else "trader_wallet" if "trader_wallet" in wallet_alpha_history_df.columns else None
             if history_key and "timestamp" in wallet_alpha_history_df.columns:
                 wallet_alpha_history_df = wallet_alpha_history_df.copy()
-                wallet_alpha_history_df["timestamp"] = pd.to_datetime(wallet_alpha_history_df["timestamp"], utc=True, errors="coerce")
+                wallet_alpha_history_df["timestamp"] = self._parse_logged_timestamp_series(wallet_alpha_history_df["timestamp"])
                 wallet_alpha_history_df = wallet_alpha_history_df[wallet_alpha_history_df["timestamp"].notna()].copy()
                 merged_parts = []
                 for wallet, group in dataset.groupby("trader_wallet", dropna=False):
@@ -154,11 +166,47 @@ class HistoricalDatasetBuilder:
 
         if not btc_targets_df.empty and "timestamp" in dataset.columns and "timestamp" in btc_targets_df.columns:
             btc_targets_df = btc_targets_df.copy()
-            btc_targets_df["timestamp"] = pd.to_datetime(btc_targets_df["timestamp"], utc=True, errors="coerce")
+            btc_targets_df["timestamp"] = self._parse_logged_timestamp_series(btc_targets_df["timestamp"])
             btc_targets_df = btc_targets_df[btc_targets_df["timestamp"].notna()].copy()
             cols = [c for c in ["timestamp", "btc_price", "btc_spot_return_5m", "btc_spot_return_15m", "btc_realized_vol_15m", "btc_volume_proxy"] if c in btc_targets_df.columns]
             dataset = pd.merge_asof(dataset.sort_values("timestamp"), btc_targets_df[cols].sort_values("timestamp"), on="timestamp", direction="backward")
             dataset = self._dedupe_columns(dataset)
+
+        if not btc_live_df.empty and "timestamp" in dataset.columns:
+            btc_live_df = btc_live_df.copy()
+            ts_col = "btc_live_timestamp" if "btc_live_timestamp" in btc_live_df.columns else "timestamp" if "timestamp" in btc_live_df.columns else None
+            if ts_col:
+                btc_live_df[ts_col] = pd.to_datetime(btc_live_df[ts_col], utc=True, errors="coerce")
+                btc_live_df = btc_live_df[btc_live_df[ts_col].notna()].copy()
+                live_cols = [
+                    c
+                    for c in [
+                        ts_col,
+                        "btc_live_price",
+                        "btc_live_spot_price",
+                        "btc_live_index_price",
+                        "btc_live_mark_price",
+                        "btc_live_funding_rate",
+                        "btc_live_source_quality",
+                        "btc_live_source_quality_score",
+                        "btc_live_source_divergence_bps",
+                        "btc_live_spot_index_basis_bps",
+                        "btc_live_mark_index_basis_bps",
+                        "btc_live_mark_spot_basis_bps",
+                        "btc_live_return_1m",
+                        "btc_live_return_5m",
+                        "btc_live_return_15m",
+                        "btc_live_return_1h",
+                        "btc_live_volatility_proxy",
+                        "btc_live_bias",
+                        "btc_live_confluence",
+                        "btc_live_index_ready",
+                    ]
+                    if c in btc_live_df.columns
+                ]
+                live_view = btc_live_df[live_cols].sort_values(ts_col).rename(columns={ts_col: "timestamp"})
+                dataset = pd.merge_asof(dataset.sort_values("timestamp"), live_view, on="timestamp", direction="backward")
+                dataset = self._dedupe_columns(dataset)
 
         if "best_ask" in dataset.columns and "best_bid" in dataset.columns:
             dataset["spread"] = (pd.to_numeric(dataset["best_ask"], errors="coerce").fillna(0) - pd.to_numeric(dataset["best_bid"], errors="coerce").fillna(0)).abs()

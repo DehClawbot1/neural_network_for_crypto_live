@@ -1,0 +1,2 @@
+generated_at,date,total_closed_trades,learning_eligible_ratio,entry_context_complete_ratio,unknown_signal_label_ratio,operational_close_ratio,external_manual_close_ratio,recent_window,recent_learning_eligible_ratio,recent_entry_context_complete_ratio,recent_unknown_signal_label_ratio,recent_non_operational_unknown_signal_label_ratio,recent_operational_close_ratio,top_exit_reason_families
+2026-04-03T09:25:58.671550+00:00,2026-04-03,2,0.5,1.0,0.0,0.5,0.5,2,0.5,1.0,0.0,0.0,0.5,"{""target"":1,""operational"":1}"

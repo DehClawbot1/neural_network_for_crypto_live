@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from pnl_engine import PNLEngine
-from trade_quality import build_quality_context
+from trade_quality import build_quality_context, resolve_entry_signal_label
 
 
 class TradeState(str, Enum):
@@ -77,6 +77,8 @@ class TradeLifecycle:
         pd.DataFrame([payload]).to_csv(events_file, mode="a", header=not events_file.exists(), index=False)
 
     def on_signal(self, signal_row: dict):
+        normalized_signal_row = dict(signal_row or {})
+        normalized_signal_row["signal_label"] = resolve_entry_signal_label(normalized_signal_row)
         payload = {
             "event": "signal",
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -85,28 +87,28 @@ class TradeLifecycle:
             "condition_id": self.condition_id,
             "outcome_side": self.outcome_side,
         }
-        self.ledger.append({**payload, "signal": signal_row})
+        self.ledger.append({**payload, "signal": normalized_signal_row})
         self._write_execution_event(payload)
         self.state = TradeState.NEW_SIGNAL
-        self.confidence_at_entry = float(signal_row.get("confidence", 0.0) or 0.0)
-        self.signal_label = str(signal_row.get("signal_label", "UNKNOWN") or "UNKNOWN")
-        self.entry_btc_trend_bias = str(signal_row.get("btc_trend_bias", "NEUTRAL") or "NEUTRAL")
-        self.entry_alligator_alignment = str(signal_row.get("alligator_alignment", "NEUTRAL") or "NEUTRAL")
-        self.entry_adx_value = float(signal_row.get("adx_value", 0.0) or 0.0)
-        self.entry_adx_threshold = float(signal_row.get("adx_threshold", 0.0) or 0.0)
-        self.entry_anchored_vwap = float(signal_row.get("anchored_vwap", 0.0) or 0.0)
-        self.entry_fractal_trigger_direction = str(signal_row.get("fractal_trigger_direction", "NEUTRAL") or "NEUTRAL")
-        self.entry_model_family = str(signal_row.get("entry_model_family", "") or "")
-        self.entry_model_version = str(signal_row.get("entry_model_version", "") or "")
-        self.performance_governor_level = int(signal_row.get("performance_governor_level", 0) or 0)
-        quality_context = build_quality_context(signal_row)
-        self.market_family = str(signal_row.get("market_family", quality_context.get("market_family", "other")) or "other")
-        self.horizon_bucket = str(signal_row.get("horizon_bucket", quality_context.get("horizon_bucket", "unknown")) or "unknown")
-        self.liquidity_bucket = str(signal_row.get("liquidity_bucket", quality_context.get("liquidity_bucket", "unknown")) or "unknown")
-        self.volatility_bucket = str(signal_row.get("volatility_bucket", quality_context.get("volatility_bucket", "unknown")) or "unknown")
-        self.technical_regime_bucket = str(signal_row.get("technical_regime_bucket", quality_context.get("technical_regime_bucket", "neutral")) or "neutral")
+        self.confidence_at_entry = float(normalized_signal_row.get("confidence", 0.0) or 0.0)
+        self.signal_label = str(normalized_signal_row.get("signal_label", "UNKNOWN") or "UNKNOWN")
+        self.entry_btc_trend_bias = str(normalized_signal_row.get("btc_trend_bias", "NEUTRAL") or "NEUTRAL")
+        self.entry_alligator_alignment = str(normalized_signal_row.get("alligator_alignment", "NEUTRAL") or "NEUTRAL")
+        self.entry_adx_value = float(normalized_signal_row.get("adx_value", 0.0) or 0.0)
+        self.entry_adx_threshold = float(normalized_signal_row.get("adx_threshold", 0.0) or 0.0)
+        self.entry_anchored_vwap = float(normalized_signal_row.get("anchored_vwap", 0.0) or 0.0)
+        self.entry_fractal_trigger_direction = str(normalized_signal_row.get("fractal_trigger_direction", "NEUTRAL") or "NEUTRAL")
+        self.entry_model_family = str(normalized_signal_row.get("entry_model_family", "") or "")
+        self.entry_model_version = str(normalized_signal_row.get("entry_model_version", "") or "")
+        self.performance_governor_level = int(normalized_signal_row.get("performance_governor_level", 0) or 0)
+        quality_context = build_quality_context(normalized_signal_row)
+        self.market_family = str(normalized_signal_row.get("market_family", quality_context.get("market_family", "other")) or "other")
+        self.horizon_bucket = str(normalized_signal_row.get("horizon_bucket", quality_context.get("horizon_bucket", "unknown")) or "unknown")
+        self.liquidity_bucket = str(normalized_signal_row.get("liquidity_bucket", quality_context.get("liquidity_bucket", "unknown")) or "unknown")
+        self.volatility_bucket = str(normalized_signal_row.get("volatility_bucket", quality_context.get("volatility_bucket", "unknown")) or "unknown")
+        self.technical_regime_bucket = str(normalized_signal_row.get("technical_regime_bucket", quality_context.get("technical_regime_bucket", "neutral")) or "neutral")
         self.entry_context_complete = bool(
-            signal_row.get("entry_context_complete", quality_context.get("entry_context_complete", False))
+            normalized_signal_row.get("entry_context_complete", quality_context.get("entry_context_complete", False))
         )
 
     def enter(self, size_usdc: float, entry_price: float):

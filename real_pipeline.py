@@ -16,6 +16,7 @@ from sequence_feature_builder import SequenceFeatureBuilder
 from stage2_temporal_models import Stage2TemporalModels
 from contract_target_builder import ContractTargetBuilder
 from wallet_alpha_builder import WalletAlphaBuilder
+from feature_ablation import FeatureAblationReporter
 from walk_forward_evaluator import WalkForwardEvaluator
 from time_split_trainer import TimeSplitTrainer
 from path_replay_simulator import PathReplaySimulator
@@ -262,6 +263,7 @@ def run_research_pipeline():
 
         WalkForwardEvaluator().evaluate()
         TimeSplitTrainer().run()
+        FeatureAblationReporter().write()
         PathReplaySimulator().write()
         _ensure_dashboard_supervised_eval("logs")
 

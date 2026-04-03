@@ -3,6 +3,7 @@ import warnings
 
 import joblib
 import pandas as pd
+from model_feature_catalog import DEFAULT_TABULAR_FEATURE_COLUMNS
 from model_feature_safety import drop_all_nan_features
 from return_calibration import fit_return_calibration, transform_return_targets
 from sklearn.calibration import CalibratedClassifierCV
@@ -40,29 +41,7 @@ class Stage1Models:
     BUG FIX I: Now uses all available CPU cores via n_jobs parameter.
     """
 
-    FEATURE_COLUMNS = [
-        "current_price",
-        "spread",
-        "liquidity_score",
-        "volume_score",
-        "probability_momentum",
-        "volatility_score",
-        "wallet_trade_count_30d",
-        "wallet_alpha_30d",
-        "wallet_avg_forward_return_15m",
-        "wallet_signal_precision_tp",
-        "wallet_recent_streak",
-        "whale_pressure",
-        "market_structure_score",
-        "btc_fee_pressure_score",
-        "btc_mempool_congestion_score",
-        "btc_network_activity_score",
-        "btc_network_stress_score",
-        "btc_spot_return_5m",
-        "btc_spot_return_15m",
-        "btc_realized_vol_15m",
-        "btc_volume_proxy",
-    ]
+    FEATURE_COLUMNS = DEFAULT_TABULAR_FEATURE_COLUMNS
 
     def __init__(self, logs_dir="logs", weights_dir="weights"):
         self.logs_dir = Path(logs_dir)

@@ -1,0 +1,6 @@
+generated_at,scope,scope_value,trades,average_pnl,win_rate,profit_factor
+2026-04-03T09:25:58.671550+00:00,signal_label,TEST,1,0.1,1.0,100000000.0
+2026-04-03T09:25:58.671550+00:00,market_family,other,1,0.1,1.0,100000000.0
+2026-04-03T09:25:58.671550+00:00,horizon_bucket,unknown,1,0.1,1.0,100000000.0
+2026-04-03T09:25:58.671550+00:00,technical_regime_bucket,neutral,1,0.1,1.0,100000000.0
+2026-04-03T09:25:58.671550+00:00,exit_reason_family,target,1,0.1,1.0,100000000.0

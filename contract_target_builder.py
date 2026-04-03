@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -18,6 +19,7 @@ class ContractTargetBuilder:
         self.signals_file = self.logs_dir / "signals.csv"
         self.markets_file = self.logs_dir / "markets.csv"
         self.clob_history_file = self.logs_dir / "clob_price_history.csv"
+        self.btc_live_file = self.logs_dir / "btc_live_snapshot.csv"
         self.output_file = self.logs_dir / "contract_targets.csv"
 
     def _safe_read(self, path):
@@ -33,6 +35,16 @@ class ContractTargetBuilder:
         if side == "NO":
             return market_row.get("no_token_id")
         return market_row.get("yes_token_id")
+
+    def _parse_logged_timestamp_series(self, series: pd.Series) -> pd.Series:
+        local_tz = os.getenv("BOT_LOG_LOCAL_TIMEZONE", "Europe/Lisbon")
+        raw = pd.to_datetime(series, errors="coerce", utc=False, format="mixed")
+        if getattr(raw.dt, "tz", None) is None:
+            try:
+                return raw.dt.tz_localize(local_tz, nonexistent="shift_forward", ambiguous="NaT").dt.tz_convert("UTC")
+            except Exception:
+                return pd.to_datetime(series, utc=True, errors="coerce", format="mixed")
+        return raw.dt.tz_convert("UTC")
 
     def _path_stats(self, entry_price, path_prices, tp_move, sl_move):
         if path_prices.empty:
@@ -50,6 +62,7 @@ class ContractTargetBuilder:
         signals_df = self._safe_read(self.signals_file)
         markets_df = self._safe_read(self.markets_file)
         history_df = self._safe_read(self.clob_history_file)
+        btc_live_df = self._safe_read(self.btc_live_file)
 
         if signals_df.empty or markets_df.empty or history_df.empty:
             return pd.DataFrame()
@@ -60,7 +73,46 @@ class ContractTargetBuilder:
             return pd.DataFrame()
 
         signals_df = signals_df.copy()
-        signals_df["timestamp"] = pd.to_datetime(signals_df["timestamp"], utc=True, errors="coerce")
+        signals_df["timestamp"] = self._parse_logged_timestamp_series(signals_df["timestamp"])
+        if not btc_live_df.empty:
+            btc_live_df = btc_live_df.copy()
+            ts_col = "btc_live_timestamp" if "btc_live_timestamp" in btc_live_df.columns else "timestamp" if "timestamp" in btc_live_df.columns else None
+            if ts_col:
+                btc_live_df[ts_col] = pd.to_datetime(btc_live_df[ts_col], utc=True, errors="coerce")
+                btc_live_df = btc_live_df[btc_live_df[ts_col].notna()].copy()
+                live_cols = [
+                    c
+                    for c in [
+                        ts_col,
+                        "btc_live_price",
+                        "btc_live_spot_price",
+                        "btc_live_index_price",
+                        "btc_live_mark_price",
+                        "btc_live_funding_rate",
+                        "btc_live_source_quality",
+                        "btc_live_source_quality_score",
+                        "btc_live_source_divergence_bps",
+                        "btc_live_spot_index_basis_bps",
+                        "btc_live_mark_index_basis_bps",
+                        "btc_live_mark_spot_basis_bps",
+                        "btc_live_return_1m",
+                        "btc_live_return_5m",
+                        "btc_live_return_15m",
+                        "btc_live_return_1h",
+                        "btc_live_volatility_proxy",
+                        "btc_live_bias",
+                        "btc_live_confluence",
+                        "btc_live_index_ready",
+                    ]
+                    if c in btc_live_df.columns
+                ]
+                live_view = btc_live_df[live_cols].sort_values(ts_col).rename(columns={ts_col: "timestamp"})
+                signals_df = pd.merge_asof(
+                    signals_df.sort_values("timestamp"),
+                    live_view,
+                    on="timestamp",
+                    direction="backward",
+                )
         history_df = history_df.copy()
         history_df["timestamp"] = pd.to_datetime(history_df["timestamp"], utc=True, errors="coerce")
         history_df = history_df.dropna(subset=["timestamp", "token_id"]).sort_values(["token_id", "timestamp"]).reset_index(drop=True)

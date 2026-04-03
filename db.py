@@ -55,6 +55,29 @@ class Database:
         self._ensure_column("positions", "close_fingerprint", "TEXT")
         self._ensure_column("positions", "is_reconciliation_close", "INTEGER")
         self._ensure_column("positions", "lifecycle_source", "TEXT")
+        for column_name, column_type in [
+            ("entry_model_family", "TEXT"),
+            ("entry_model_version", "TEXT"),
+            ("performance_governor_level", "INTEGER"),
+            ("market_family", "TEXT"),
+            ("horizon_bucket", "TEXT"),
+            ("liquidity_bucket", "TEXT"),
+            ("volatility_bucket", "TEXT"),
+            ("technical_regime_bucket", "TEXT"),
+            ("entry_context_complete", "INTEGER"),
+            ("learning_eligible", "INTEGER"),
+            ("operational_close_flag", "INTEGER"),
+            ("reconciliation_close_flag", "INTEGER"),
+            ("exit_reason_family", "TEXT"),
+            ("intended_exit_reason", "TEXT"),
+            ("actual_execution_path", "TEXT"),
+            ("exit_fill_latency_seconds", "REAL"),
+            ("exit_cancel_count", "INTEGER"),
+            ("exit_partial_fill_ratio", "REAL"),
+            ("exit_realized_slippage_bps", "REAL"),
+            ("market_slug", "TEXT"),
+        ]:
+            self._ensure_column("positions", column_name, column_type)
         self._ensure_column("fills", "condition_id", "TEXT")
         self._ensure_column("fills", "outcome_side", "TEXT")
         self._ensure_column("fills", "side", "TEXT")
@@ -374,6 +397,29 @@ class Database:
         self._ensure_column("candidate_decisions", "available_balance", "REAL")
         self._ensure_column("candidate_decisions", "order_id", "TEXT")
         self._ensure_column("candidate_decisions", "details_json", "TEXT")
+        for column_name, column_type in [
+            ("entry_model_family", "TEXT"),
+            ("entry_model_version", "TEXT"),
+            ("performance_governor_level", "INTEGER"),
+            ("market_family", "TEXT"),
+            ("horizon_bucket", "TEXT"),
+            ("liquidity_bucket", "TEXT"),
+            ("volatility_bucket", "TEXT"),
+            ("technical_regime_bucket", "TEXT"),
+            ("entry_context_complete", "INTEGER"),
+            ("learning_eligible", "INTEGER"),
+            ("operational_close_flag", "INTEGER"),
+            ("reconciliation_close_flag", "INTEGER"),
+            ("exit_reason_family", "TEXT"),
+            ("intended_exit_reason", "TEXT"),
+            ("actual_execution_path", "TEXT"),
+            ("exit_fill_latency_seconds", "REAL"),
+            ("exit_cancel_count", "INTEGER"),
+            ("exit_partial_fill_ratio", "REAL"),
+            ("exit_realized_slippage_bps", "REAL"),
+            ("market_slug", "TEXT"),
+        ]:
+            self._ensure_column("positions", column_name, column_type)
         self._ensure_column("fills", "condition_id", "TEXT")
         self._ensure_column("fills", "outcome_side", "TEXT")
         self._ensure_column("fills", "side", "TEXT")

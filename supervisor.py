@@ -69,7 +69,7 @@ from position_telemetry import PositionTelemetry
 from performance_governor import PerformanceGovernor
 from trade_lifecycle_audit import TradeLifecycleAuditor
 from benchmark_strategy import BenchmarkStrategy
-from trade_quality import build_quality_context
+from trade_quality import build_quality_context, resolve_entry_signal_label
 try:
     from inference_runtime_guard import (
         reset_cycle as _reset_inference_runtime_guard,
@@ -264,6 +264,8 @@ def _signal_age_seconds(signal_row: dict):
 
 def _reject_category(reason: str):
     text = str(reason or "").strip().lower()
+    if "performance_governor" in text:
+        return "performance_governor"
     if text in {"rule_veto"}:
         return "rule_veto"
     if "size" in text or "min" in text:
@@ -484,6 +486,7 @@ def execute_paper_trade(action, signal_row, fill_price=None, size_usdc=None):
     signal_price = float(signal_row.get("current_price", signal_row.get("price", 0.5)))
     fill_price = quote_entry_price(signal_row) if fill_price is None else fill_price
 
+    normalized_signal_label = resolve_entry_signal_label(signal_row)
     trade_record = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "market": signal_row.get("market_title", "Unknown Market"),
@@ -495,7 +498,7 @@ def execute_paper_trade(action, signal_row, fill_price=None, size_usdc=None):
         "signal_price": round(signal_price, 3),
         "fill_price": round(fill_price, 3),
         "size_usdc": size,
-        "signal_label": signal_row.get("signal_label", "UNKNOWN"),
+        "signal_label": normalized_signal_label,
         "confidence": signal_row.get("confidence", 0.0),
         "action_type": "PAPER_TRADE",
     }
@@ -537,6 +540,7 @@ def build_feature_snapshot(row):
 
 
 def log_live_fill_event(signal_row, fill_price, size_usdc, action_type="LIVE_TRADE"):
+    normalized_signal_label = resolve_entry_signal_label(signal_row)
     trade_record = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "market": signal_row.get("market_title", signal_row.get("market", "Unknown Market")),
@@ -548,7 +552,7 @@ def log_live_fill_event(signal_row, fill_price, size_usdc, action_type="LIVE_TRA
         "signal_price": round(float(signal_row.get("current_price", signal_row.get("price", fill_price)) or fill_price), 3),
         "fill_price": round(float(fill_price), 3),
         "size_usdc": float(size_usdc),
-        "signal_label": signal_row.get("signal_label", "UNKNOWN"),
+        "signal_label": normalized_signal_label,
         "confidence": signal_row.get("confidence", 0.0),
         "action_type": action_type,
     }
@@ -1763,13 +1767,6 @@ def main_loop():
                 and target_entry_interval_minutes > 0
                 and last_entry_age_minutes >= target_entry_interval_minutes
             )
-            if cadence_boost_active:
-                logging.info(
-                    "Trade cadence booster active: last entry %.1f minutes ago (target %.1f minutes). Relaxing top %d candidate gates this cycle.",
-                    last_entry_age_minutes,
-                    target_entry_interval_minutes,
-                    entry_aggression_top_k,
-                )
 
             # 4A. Candidate-entry path for new signals
             current_active_trades = []
@@ -1844,6 +1841,144 @@ def main_loop():
                 if available_balance > 0:
                     cached_entry_available_balance = float(available_balance)
                 return float(available_balance or 0.0)
+
+            def _entry_balance_sizing_context(available_balance: float) -> dict:
+                available_balance = max(0.0, float(available_balance or 0.0))
+                reserve_pct = max(0.0, min(0.95, float(getattr(TradingConfig, "CAPITAL_RESERVE_PCT", 0.20))))
+                tradable_balance = max(0.0, available_balance - (available_balance * reserve_pct))
+                min_bet_usdc = float(getattr(TradingConfig, "MIN_BET_USDC", 1.0))
+                configured_min_entry = max(
+                    min_bet_usdc,
+                    float(getattr(TradingConfig, "MIN_BET_USDC", 1.0)),
+                    float(getattr(TradingConfig, "MIN_ENTRY_USDC", getattr(TradingConfig, "MIN_BET_USDC", 1.0))),
+                )
+                hard_max_bet = max(min_bet_usdc, float(getattr(TradingConfig, "HARD_MAX_BET_USDC", 250.0)))
+                max_risk_per_trade_pct = max(0.0, float(getattr(TradingConfig, "MAX_RISK_PER_TRADE_PCT", 0.15)))
+                risk_capped_max_entry = min(tradable_balance * max_risk_per_trade_pct, hard_max_bet)
+                floor_support_pct = max(0.0, (1.0 - reserve_pct) * max_risk_per_trade_pct)
+                min_balance_for_exchange_floor = (
+                    (min_bet_usdc / floor_support_pct) if floor_support_pct > 0 else float("inf")
+                )
+                low_balance_pause = (
+                    tradable_balance + 1e-9 < min_bet_usdc
+                    or risk_capped_max_entry + 1e-9 < min_bet_usdc
+                )
+                return {
+                    "reserve_pct": reserve_pct,
+                    "tradable_balance": tradable_balance,
+                    "min_bet_usdc": min_bet_usdc,
+                    "configured_min_entry": configured_min_entry,
+                    "hard_max_bet": hard_max_bet,
+                    "max_risk_per_trade_pct": max_risk_per_trade_pct,
+                    "risk_capped_max_entry": risk_capped_max_entry,
+                    "min_balance_for_exchange_floor": min_balance_for_exchange_floor,
+                    "low_balance_pause": low_balance_pause,
+                }
+
+            def _reason_indicates_dead_orderbook(value) -> bool:
+                reason = str(value or "").strip().lower()
+                if not reason:
+                    return False
+                return (
+                    "orderbook_not_found" in reason
+                    or "orderbook_not_available" in reason
+                    or ("orderbook" in reason and "does not exist" in reason)
+                    or ("404" in reason and "orderbook" in reason)
+                    or "no orderbook exists" in reason
+                )
+
+            def _mark_dead_orderbook_token(token_id: str, reason: str | None = None, persist_close: bool = True):
+                token_id = str(normalize_token_id(token_id) or "")
+                if not token_id:
+                    return 0
+                _ob_no_book_cache[token_id] = time.monotonic()
+                try:
+                    _orderbook_unavailable_tokens.add(token_id)
+                except Exception:
+                    pass
+                if orderbook_guard is not None and hasattr(orderbook_guard, "_no_book_cache"):
+                    try:
+                        orderbook_guard._no_book_cache[token_id] = time.monotonic() + _OB_NO_BOOK_TTL
+                    except Exception:
+                        pass
+                if reason:
+                    logging.warning(
+                        "Dead-orderbook guard: tombstoning token %s (%s).",
+                        token_id,
+                        reason,
+                    )
+                closed_rows = 0
+                if persist_close and live_position_book is not None:
+                    try:
+                        closed_rows = int(live_position_book.close_dead_token_positions({token_id}) or 0)
+                        if closed_rows > 0:
+                            live_position_book.rebuild_from_db()
+                    except Exception as exc:
+                        logging.warning("Dead-orderbook safeguard failed for %s: %s", token_id, exc)
+                return closed_rows
+
+            def _force_local_dead_orderbook_close(trade, intended_reason: str, exit_result: dict | None = None):
+                if trade is None:
+                    return False
+                if getattr(trade, "state", None) == TradeState.CLOSED:
+                    return True
+                reference_price = max(
+                    float(getattr(trade, "current_price", 0.0) or 0.0),
+                    float(getattr(trade, "entry_price", 0.0) or 0.0),
+                    0.01,
+                )
+                _apply_exit_execution_metrics(trade, exit_result or {"status": "dead_orderbook"}, intended_reason, reference_price)
+                trade.actual_execution_path = "dead_orderbook_tombstone"
+                trade.intended_exit_reason = intended_reason
+                trade.close(exit_price=reference_price, reason="external_manual_close")
+                trade_manager.persist_closed_trades([trade])
+                trade_manager.active_trades.pop(
+                    _make_position_key(
+                        token_id=trade.token_id,
+                        condition_id=trade.condition_id,
+                        outcome_side=trade.outcome_side,
+                        market=trade.market,
+                    ),
+                    None,
+                )
+                return True
+
+            cadence_boost_blockers = []
+            if cadence_boost_active:
+                governor_level = int(governor_state.get("governor_level", 0) or 0)
+                min_profit_factor_for_boost = float(os.getenv("ENTRY_CADENCE_MIN_PROFIT_FACTOR", "1.0") or 1.0)
+                if governor_level > 0:
+                    cadence_boost_blockers.append(f"governor_level={governor_level}")
+                if float(governor_state.get("live_profit_factor", 0.0) or 0.0) < min_profit_factor_for_boost:
+                    cadence_boost_blockers.append(
+                        f"profit_factor={float(governor_state.get('live_profit_factor', 0.0) or 0.0):.2f}"
+                    )
+                if pre_cycle_entry_freeze:
+                    cadence_boost_blockers.append(f"entry_freeze={pre_cycle_freeze_reason or 'state_mismatch'}")
+                if session_kill_switch_active:
+                    cadence_boost_blockers.append("session_kill_switch")
+                if trading_mode == "live":
+                    cadence_balance = _get_entry_available_balance()
+                    cadence_sizing = _entry_balance_sizing_context(cadence_balance)
+                    if cadence_sizing["low_balance_pause"]:
+                        cadence_boost_blockers.append(
+                            "low_balance_pause="
+                            f"balance${cadence_balance:.2f}<floor_support${cadence_sizing['min_balance_for_exchange_floor']:.2f}"
+                        )
+                if cadence_boost_blockers:
+                    cadence_boost_active = False
+                    logging.info(
+                        "Trade cadence booster suppressed: last entry %.1f minutes ago, blockers=%s.",
+                        last_entry_age_minutes,
+                        ", ".join(cadence_boost_blockers),
+                    )
+                else:
+                    logging.info(
+                        "Trade cadence booster active: last entry %.1f minutes ago (target %.1f minutes). Relaxing top %d candidate gates this cycle.",
+                        last_entry_age_minutes,
+                        target_entry_interval_minutes,
+                        entry_aggression_top_k,
+                    )
 
             def _get_live_available_token_shares(token_id: str) -> float:
                 if trading_mode != "live" or order_manager is None or not token_id:
@@ -1920,6 +2055,20 @@ def main_loop():
                 }
                 aggressive_exit = str(close_reason or "").strip().lower() in aggressive_reasons
                 fallback_price = max(0.01, min(0.99, float(reference_price or 0.0)))
+                if token_id in _orderbook_unavailable_tokens:
+                    _mark_dead_orderbook_token(token_id, reason="cached_dead_orderbook", persist_close=True)
+                    return {
+                        "status": "dead_orderbook",
+                        "filled_shares": 0.0,
+                        "avg_price": fallback_price,
+                        "remaining_exchange_shares": 0.0,
+                        "attempts": [{"attempt": 0, "price": fallback_price, "result": "dead_orderbook", "reason": "cached_dead_orderbook"}],
+                        "analysis": {},
+                        "elapsed_seconds": 0.0,
+                        "cancel_count": 0,
+                        "partial_fill_ratio": 0.0,
+                        "slippage_bps": 0.0,
+                    }
                 initial_available_shares = _get_live_available_token_shares(token_id)
                 requested_shares = max(0.0, float(requested_shares or 0.0))
                 remaining_target_shares = min(requested_shares, initial_available_shares)
@@ -1972,8 +2121,20 @@ def main_loop():
                     }
 
                     if not exit_order_id:
+                        dead_orderbook_reason = (
+                            (exit_row or {}).get("reason")
+                            or (exit_response or {}).get("reason")
+                            or (exit_row or {}).get("orderbook_error")
+                            or (exit_response or {}).get("orderbook_error")
+                        )
+                        if _reason_indicates_dead_orderbook(dead_orderbook_reason):
+                            attempt_record["result"] = "dead_orderbook"
+                            attempt_record["reason"] = dead_orderbook_reason
+                            attempts.append(attempt_record)
+                            _mark_dead_orderbook_token(token_id, reason=dead_orderbook_reason, persist_close=True)
+                            break
                         attempt_record["result"] = "rejected"
-                        attempt_record["reason"] = (exit_row or {}).get("reason") or (exit_response or {}).get("reason")
+                        attempt_record["reason"] = dead_orderbook_reason
                         attempts.append(attempt_record)
                         continue
 
@@ -2164,6 +2325,22 @@ def main_loop():
                 detail_payload.setdefault("performance_governor_reason", governor_state.get("reason", ""))
                 detail_payload.setdefault("entry_model_version", active_model_version)
                 detail_payload.setdefault("entry_model_family", "runtime_live_stack")
+                for live_field in (
+                    "btc_live_price",
+                    "btc_live_index_price",
+                    "btc_live_mark_price",
+                    "btc_live_return_5m",
+                    "btc_live_return_15m",
+                    "btc_live_return_1h",
+                    "btc_live_bias",
+                    "btc_live_confluence",
+                    "btc_live_source_quality",
+                    "btc_live_source_quality_score",
+                    "btc_live_source_divergence_bps",
+                    "btc_live_mark_index_basis_bps",
+                ):
+                    if live_field not in detail_payload:
+                        detail_payload[live_field] = signal_row.get(live_field)
                 details_json = json.dumps(detail_payload, default=str, separators=(",", ":"))
                 try:
                     db.execute(
@@ -2517,8 +2694,29 @@ def main_loop():
                     signal_row["performance_governor_level"] = int(governor_state.get("governor_level", 0) or 0)
                     signal_row["entry_model_family"] = "runtime_live_stack"
                     signal_row["entry_model_version"] = active_model_version
-                    signal_row["entry_context_complete"] = bool(
-                        signal_row.get("signal_label") not in [None, "", "UNKNOWN"] and confidence > 0 and bool(active_model_version)
+                    signal_quality_context = build_quality_context(
+                        {
+                            **(signal_row.to_dict() if hasattr(signal_row, "to_dict") else dict(signal_row)),
+                            "confidence_at_entry": confidence,
+                            "entry_model_family": signal_row["entry_model_family"],
+                            "entry_model_version": signal_row["entry_model_version"],
+                        }
+                    )
+                    for field in (
+                        "market_family",
+                        "horizon_bucket",
+                        "liquidity_bucket",
+                        "volatility_bucket",
+                        "technical_regime_bucket",
+                        "entry_context_complete",
+                    ):
+                        if signal_quality_context.get(field) not in [None, ""]:
+                            signal_row[field] = signal_quality_context.get(field)
+                    signal_row["signal_label"] = resolve_entry_signal_label(
+                        {
+                            **(signal_row.to_dict() if hasattr(signal_row, "to_dict") else dict(signal_row)),
+                            **signal_quality_context,
+                        }
                     )
                     governor_min_conf = float(governor_state.get("min_confidence", 0.0) or 0.0)
                     if governor_min_conf > 0 and confidence < governor_min_conf:
@@ -2571,19 +2769,12 @@ def main_loop():
                         current_exposure=_current_exposure,
                     )
                     size_usdc *= float(governor_state.get("size_multiplier", 1.0) or 1.0)
-                    min_bet_usdc = float(getattr(TradingConfig, "MIN_BET_USDC", 1.0))
-                    configured_min_entry = max(
-                        min_bet_usdc,
-                        float(getattr(TradingConfig, "MIN_BET_USDC", 1.0)),
-                        float(getattr(TradingConfig, "MIN_ENTRY_USDC", getattr(TradingConfig, "MIN_BET_USDC", 1.0))),
-                    )
-                    reserve_pct = max(0.0, min(0.95, float(getattr(TradingConfig, "CAPITAL_RESERVE_PCT", 0.20))))
-                    tradable_balance = max(0.0, _available_bal - (_available_bal * reserve_pct))
-                    hard_max_bet = max(min_bet_usdc, float(getattr(TradingConfig, "HARD_MAX_BET_USDC", 250.0)))
-                    risk_capped_max_entry = min(
-                        tradable_balance * float(getattr(TradingConfig, "MAX_RISK_PER_TRADE_PCT", 0.15)),
-                        hard_max_bet,
-                    )
+                    sizing_context = _entry_balance_sizing_context(_available_bal)
+                    min_bet_usdc = sizing_context["min_bet_usdc"]
+                    configured_min_entry = sizing_context["configured_min_entry"]
+                    tradable_balance = sizing_context["tradable_balance"]
+                    risk_capped_max_entry = sizing_context["risk_capped_max_entry"]
+                    low_balance_pause = sizing_context["low_balance_pause"]
                     effective_min_entry = configured_min_entry
                     risk_capped_below_strategy_floor = (
                         risk_capped_max_entry + 1e-9 < configured_min_entry and size_usdc + 1e-9 >= min_bet_usdc
@@ -2600,16 +2791,19 @@ def main_loop():
                         effective_min_entry = min_bet_usdc
                     if size_usdc <= 0:
                         logging.info(
-                            "MoneyManager: skip trade (balance=$%.2f, conf=%.2f, exposure=$%.2f)",
-                            _available_bal, confidence, _current_exposure,
+                            "MoneyManager: skip trade (balance=$%.2f, conf=%.2f, exposure=$%.2f, low_balance_pause=%s)",
+                            _available_bal, confidence, _current_exposure, low_balance_pause,
                         )
                         _log_candidate_skip(
                             signal_row,
-                            "min_size",
+                            "low_balance_pause" if low_balance_pause else "min_size",
                             gate="sizing",
                             model_action=action_map.get(action_val, "UNKNOWN"),
                             available_balance=round(_available_bal, 6),
                             current_exposure=round(_current_exposure, 6),
+                            tradable_balance=round(tradable_balance, 6),
+                            risk_capped_max_entry=round(risk_capped_max_entry, 6),
+                            min_balance_for_exchange_floor=round(float(sizing_context["min_balance_for_exchange_floor"]), 6),
                         )
                         continue
                     if size_usdc + 1e-9 < effective_min_entry:
@@ -3086,6 +3280,13 @@ def main_loop():
                                     reference_price=exit_price,
                                     close_reason="rl_reduce",
                                 )
+                                if str(reduce_result.get("status") or "").strip().lower() == "dead_orderbook":
+                                    logging.warning(
+                                        "Live REDUCE converted to local operational close for dead token %s.",
+                                        token_id,
+                                    )
+                                    _force_local_dead_orderbook_close(trade, "rl_reduce", reduce_result)
+                                    continue
                                 actual_fill_size = min(float(reduce_result.get("filled_shares", 0.0) or 0.0), pre_reduce_shares)
                                 if actual_fill_size > 1e-6:
                                     actual_fill_price = float(reduce_result.get("avg_price", exit_price) or exit_price)
@@ -3136,6 +3337,13 @@ def main_loop():
                                     reference_price=exit_price,
                                     close_reason="rl_exit",
                                 )
+                                if str(exit_result.get("status") or "").strip().lower() == "dead_orderbook":
+                                    logging.warning(
+                                        "Live EXIT converted to local operational close for dead token %s.",
+                                        token_id,
+                                    )
+                                    _force_local_dead_orderbook_close(trade, "rl_exit", exit_result)
+                                    continue
                                 actual_fill_size = min(float(exit_result.get("filled_shares", 0.0) or 0.0), pre_exit_shares)
                                 if actual_fill_size > 1e-6:
                                     actual_fill_price = float(exit_result.get("avg_price", exit_price) or exit_price)
@@ -3243,6 +3451,17 @@ def main_loop():
                                 reference_price=_exit_p,
                                 close_reason=getattr(ct, "close_reason", None) or "policy_exit",
                             )
+                            if str(_exit_result.get("status") or "").strip().lower() == "dead_orderbook":
+                                logging.warning(
+                                    "Rule exit converted to local operational close for dead token %s.",
+                                    _ct_token[:16],
+                                )
+                                _force_local_dead_orderbook_close(
+                                    ct,
+                                    getattr(ct, "close_reason", None) or "policy_exit",
+                                    _exit_result,
+                                )
+                                continue
                             _filled_ct_shares = min(float(_exit_result.get("filled_shares", 0.0) or 0.0), _pre_ct_shares)
                             if _filled_ct_shares > 1e-6:
                                 _actual_exit_price = float(_exit_result.get("avg_price", _exit_p) or _exit_p)

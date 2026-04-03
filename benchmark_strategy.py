@@ -23,11 +23,37 @@ class BenchmarkStrategy:
         below_vwap = bool(technical_context.get("price_below_anchored_vwap", False))
         long_breakout = bool(technical_context.get("long_fractal_breakout", False))
         short_breakout = bool(technical_context.get("short_fractal_breakout", False))
+        live_bias = str(technical_context.get("btc_live_bias", "NEUTRAL") or "NEUTRAL").strip().upper()
+        live_confluence = float(technical_context.get("btc_live_confluence", 0.0) or 0.0)
+        live_quality = float(technical_context.get("btc_live_source_quality_score", 0.0) or 0.0)
+        live_divergence_bps = float(technical_context.get("btc_live_source_divergence_bps", 0.0) or 0.0)
 
         benchmark_action = "HOLD"
-        if alligator == "BULLISH" and bias == "LONG" and adx_value >= adx_threshold and above_vwap and long_breakout:
+        long_ready = (
+            alligator == "BULLISH"
+            and bias == "LONG"
+            and adx_value >= adx_threshold
+            and above_vwap
+            and long_breakout
+            and live_bias == "LONG"
+            and live_confluence >= 0.55
+            and live_quality >= 0.45
+            and live_divergence_bps <= 35.0
+        )
+        short_ready = (
+            alligator == "BEARISH"
+            and bias == "SHORT"
+            and adx_value >= adx_threshold
+            and below_vwap
+            and short_breakout
+            and live_bias == "SHORT"
+            and live_confluence >= 0.55
+            and live_quality >= 0.45
+            and live_divergence_bps <= 35.0
+        )
+        if long_ready:
             benchmark_action = "LONG"
-        elif alligator == "BEARISH" and bias == "SHORT" and adx_value >= adx_threshold and below_vwap and short_breakout:
+        elif short_ready:
             benchmark_action = "SHORT"
 
         row = {

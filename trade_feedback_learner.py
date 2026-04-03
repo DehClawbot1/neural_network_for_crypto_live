@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from db import Database
-from trade_quality import build_quality_context
+from trade_quality import build_quality_context, enrich_quality_frame
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -321,11 +321,12 @@ class TradeFeedbackLearner:
         min_samples = max(2, int(os.getenv("TRADE_FEEDBACK_MIN_SAMPLES", "3") or 3))
 
         work = reports_df.copy()
+        work = enrich_quality_frame(work, logs_dir=self.logs_dir)
         if "learning_eligible" in work.columns:
-            eligible_mask = work["learning_eligible"].astype(str).str.strip().str.lower().isin({"true", "1", "yes"})
+            eligible_mask = work["learning_eligible"].astype(bool)
             work = work[eligible_mask].copy()
         if "entry_context_complete" in work.columns:
-            complete_mask = work["entry_context_complete"].astype(str).str.strip().str.lower().isin({"true", "1", "yes"})
+            complete_mask = work["entry_context_complete"].astype(bool)
             work = work[complete_mask].copy()
         if work.empty:
             return pd.DataFrame()
@@ -515,6 +516,18 @@ class TradeFeedbackLearner:
             outcome_side=row.get("outcome_side"),
             signal_label=row.get("signal_label"),
             confidence_at_entry=self._safe_float(row.get("confidence_at_entry", row.get("confidence", 0.0)), 0.0),
+            entry_model_family=row.get("entry_model_family"),
+            entry_model_version=row.get("entry_model_version"),
+            performance_governor_level=int(self._safe_float(row.get("performance_governor_level"), 0.0)),
+            market_family=row.get("market_family"),
+            horizon_bucket=row.get("horizon_bucket"),
+            liquidity_bucket=row.get("liquidity_bucket"),
+            volatility_bucket=row.get("volatility_bucket"),
+            technical_regime_bucket=row.get("technical_regime_bucket"),
+            entry_context_complete=bool(row.get("entry_context_complete", False)),
+            operational_close_flag=bool(row.get("operational_close_flag", False)),
+            reconciliation_close_flag=bool(row.get("reconciliation_close_flag", False)),
+            learning_eligible=bool(row.get("learning_eligible", False)),
             entry_price=self._safe_float(row.get("entry_price"), 0.0),
             current_price=self._safe_float(exit_price, self._safe_float(row.get("current_price"), 0.0)),
             realized_pnl=self._safe_float(row.get("realized_pnl"), 0.0),
@@ -532,6 +545,7 @@ class TradeFeedbackLearner:
         closed_df = self._safe_read(closed_path)
         if closed_df.empty:
             return {"csv_rows": 0, "processed_reports": 0}
+        closed_df = enrich_quality_frame(closed_df, logs_dir=self.logs_dir)
 
         trades = []
         for _, row in closed_df.iterrows():

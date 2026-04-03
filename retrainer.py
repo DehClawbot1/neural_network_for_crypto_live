@@ -14,6 +14,7 @@ from rl_trainer import train_model
 from supervised_models import SupervisedModels
 from stage1_models import Stage1Models
 from stage2_temporal_models import Stage2TemporalModels
+from trade_quality import enrich_quality_frame
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -122,7 +123,8 @@ class Retrainer:
         promotion_block_reason="",
         candidate_beats_champion=None,
     ):
-        candidate_row = candidate_row or {}
+        candidate_row = self._with_live_summary(candidate_row)
+        promotion_gate_passed = candidate_row.get("promotion_gate_passed")
         payload = {
             "verdict": verdict,
             "reason": reason,
@@ -136,14 +138,21 @@ class Retrainer:
             "average_pnl": round(self._safe_float(candidate_row.get("average_pnl"), 0.0), 4),
             "profit_factor": round(self._safe_float(candidate_row.get("profit_factor"), 0.0), 4),
             "live_closed_trades": int(candidate_row.get("live_closed_trades", 0) or 0),
+            "live_recent_closed_rows": int(candidate_row.get("live_recent_closed_rows", 0) or 0),
+            "live_recent_quality_scope_closed_trades": int(candidate_row.get("live_recent_quality_scope_closed_trades", 0) or 0),
+            "live_recent_reconciliation_close_count": int(candidate_row.get("live_recent_reconciliation_close_count", 0) or 0),
             "live_average_pnl": round(self._safe_float(candidate_row.get("live_average_pnl"), 0.0), 4),
             "live_profit_factor": round(self._safe_float(candidate_row.get("live_profit_factor"), 0.0), 4),
+            "live_recent_reconciliation_close_ratio": round(self._safe_float(candidate_row.get("live_recent_reconciliation_close_ratio"), 0.0), 4),
+            "live_recent_quality_scope_ratio": round(self._safe_float(candidate_row.get("live_recent_quality_scope_ratio"), 0.0), 4),
             "live_learning_eligible_ratio": round(self._safe_float(candidate_row.get("live_learning_eligible_ratio"), 0.0), 4),
             "live_entry_context_complete_ratio": round(self._safe_float(candidate_row.get("live_entry_context_complete_ratio"), 0.0), 4),
             "live_unknown_signal_label_ratio": round(self._safe_float(candidate_row.get("live_unknown_signal_label_ratio"), 0.0), 4),
             "live_operational_close_ratio": round(self._safe_float(candidate_row.get("live_operational_close_ratio"), 0.0), 4),
-            "promotion_gate_passed": bool(candidate_row.get("promotion_gate_passed", False)),
+            "promotion_gate_evaluated": promotion_gate_passed is not None,
+            "promotion_gate_passed": promotion_gate_passed,
             "promotion_gate_failures": candidate_row.get("promotion_gate_failures", ""),
+            "promotion_gate_context": candidate_row.get("promotion_gate_context", ""),
         }
         logging.info("LATEST_RETRAIN_VERDICT %s", json.dumps(payload, separators=(",", ":"), sort_keys=True))
 
@@ -181,7 +190,8 @@ class Retrainer:
         candidate_beats_champion=None,
         extra_fields=None,
     ):
-        candidate_row = candidate_row or {}
+        candidate_row = self._with_live_summary(candidate_row)
+        promotion_gate_passed = candidate_row.get("promotion_gate_passed")
         progress_closed = round(closed_rows / self.closed_trade_threshold, 4) if self.closed_trade_threshold else 0
         progress_replay = round(replay_rows / self.replay_threshold, 4) if self.replay_threshold else 0
         row = {
@@ -203,21 +213,49 @@ class Retrainer:
             "max_drawdown": self._safe_float(candidate_row.get("max_drawdown"), 0.0),
             "test_accuracy": self._safe_float(candidate_row.get("test_accuracy"), 0.0),
             "live_closed_trades": int(candidate_row.get("live_closed_trades", 0) or 0),
+            "live_recent_closed_rows": int(candidate_row.get("live_recent_closed_rows", 0) or 0),
+            "live_recent_quality_scope_closed_trades": int(candidate_row.get("live_recent_quality_scope_closed_trades", 0) or 0),
+            "live_recent_reconciliation_close_count": int(candidate_row.get("live_recent_reconciliation_close_count", 0) or 0),
             "live_win_rate": self._safe_float(candidate_row.get("live_win_rate"), 0.0),
             "live_average_pnl": self._safe_float(candidate_row.get("live_average_pnl"), 0.0),
             "live_profit_factor": self._safe_float(candidate_row.get("live_profit_factor"), 0.0),
+            "live_recent_reconciliation_close_ratio": self._safe_float(candidate_row.get("live_recent_reconciliation_close_ratio"), 0.0),
+            "live_recent_quality_scope_ratio": self._safe_float(candidate_row.get("live_recent_quality_scope_ratio"), 0.0),
             "live_learning_eligible_ratio": self._safe_float(candidate_row.get("live_learning_eligible_ratio"), 0.0),
             "live_entry_context_complete_ratio": self._safe_float(candidate_row.get("live_entry_context_complete_ratio"), 0.0),
             "live_unknown_signal_label_ratio": self._safe_float(candidate_row.get("live_unknown_signal_label_ratio"), 0.0),
             "live_operational_close_ratio": self._safe_float(candidate_row.get("live_operational_close_ratio"), 0.0),
-            "promotion_gate_passed": bool(candidate_row.get("promotion_gate_passed", False)),
+            "promotion_gate_evaluated": promotion_gate_passed is not None,
+            "promotion_gate_passed": promotion_gate_passed,
             "promotion_gate_failures": candidate_row.get("promotion_gate_failures", ""),
+            "promotion_gate_context": candidate_row.get("promotion_gate_context", ""),
             "status_schema": "base_retrainer_v3",
         }
         if extra_fields:
             row.update(extra_fields)
         self._append_csv_row(self.status_csv, row, sort_by="attempted_at")
         return row
+
+    def _with_live_summary(self, candidate_row=None):
+        merged = dict(candidate_row or {})
+        live_summary = self._build_live_validation_summary()
+        for key, value in live_summary.items():
+            if key not in merged or merged.get(key) in [None, "", 0, 0.0, False]:
+                merged[key] = value
+        if not merged.get("promotion_gate_context"):
+            merged["promotion_gate_context"] = self._format_live_window_context(merged)
+        return merged
+
+    def _format_live_window_context(self, candidate_row) -> str:
+        recent_closed_rows = int(candidate_row.get("live_recent_closed_rows", 0) or 0)
+        if recent_closed_rows <= 0:
+            return ""
+        reconciliation_count = int(candidate_row.get("live_recent_reconciliation_close_count", 0) or 0)
+        quality_scope_count = int(candidate_row.get("live_recent_quality_scope_closed_trades", 0) or 0)
+        return (
+            f"{reconciliation_count}/{recent_closed_rows} recent closes were reconciliation-driven; "
+            f"evaluating quality gates on the remaining {quality_scope_count}."
+        )
 
     def _profit_factor_from_pnl(self, pnl_series):
         pnl = pd.to_numeric(pnl_series, errors="coerce").dropna()
@@ -233,10 +271,15 @@ class Retrainer:
         closed_df = self._safe_read(self.closed_file)
         summary = {
             "live_closed_trades": 0,
+            "live_recent_closed_rows": 0,
+            "live_recent_quality_scope_closed_trades": 0,
+            "live_recent_reconciliation_close_count": 0,
             "live_win_rate": 0.0,
             "live_average_pnl": 0.0,
             "live_profit_factor": 0.0,
             "live_validation_window": 0,
+            "live_recent_reconciliation_close_ratio": 0.0,
+            "live_recent_quality_scope_ratio": 0.0,
             "live_learning_eligible_ratio": 0.0,
             "live_entry_context_complete_ratio": 0.0,
             "live_unknown_signal_label_ratio": 0.0,
@@ -246,30 +289,44 @@ class Retrainer:
             return summary
 
         work = closed_df.copy()
-        if "is_reconciliation_close" in work.columns:
-            recon = work["is_reconciliation_close"].astype(str).str.strip().str.lower()
-            work = work[~recon.isin({"true", "1", "yes"})]
-        if "close_reason" in work.columns:
-            reason = work["close_reason"].astype(str).str.strip().str.lower()
-            work = work[reason != "external_manual_close"]
-        if work.empty:
-            return summary
-
         if "closed_at" in work.columns:
             work["closed_at"] = pd.to_datetime(work["closed_at"], errors="coerce", utc=True)
             work = work.sort_values("closed_at")
 
         lookback = max(1, self._env_int("PROMOTION_LIVE_LOOKBACK_TRADES", 200))
         work = work.tail(lookback).copy()
-        learning_eligible_mask = work.get("learning_eligible", pd.Series(False, index=work.index)).astype(str).str.strip().str.lower().isin({"true", "1", "yes"})
-        complete_mask = work.get("entry_context_complete", pd.Series(False, index=work.index)).astype(str).str.strip().str.lower().isin({"true", "1", "yes"})
-        operational_mask = work.get("operational_close_flag", pd.Series(False, index=work.index)).astype(str).str.strip().str.lower().isin({"true", "1", "yes"})
-        signal_label = work.get("signal_label", pd.Series("", index=work.index)).fillna("").astype(str).str.strip().str.upper()
-        summary["live_learning_eligible_ratio"] = float(learning_eligible_mask.mean()) if len(work.index) else 0.0
-        summary["live_entry_context_complete_ratio"] = float(complete_mask.mean()) if len(work.index) else 0.0
-        summary["live_unknown_signal_label_ratio"] = float(signal_label.isin({"", "UNKNOWN"}).mean()) if len(work.index) else 0.0
-        summary["live_operational_close_ratio"] = float(operational_mask.mean()) if len(work.index) else 0.0
-        work = work[learning_eligible_mask & complete_mask].copy()
+        work = enrich_quality_frame(work, logs_dir=self.logs_dir)
+        if work.empty:
+            return summary
+        summary["live_validation_window"] = int(lookback)
+        summary["live_recent_closed_rows"] = int(len(work.index))
+        reconciliation_mask = work.get("reconciliation_close_flag", pd.Series(False, index=work.index)).astype(bool)
+        summary["live_recent_reconciliation_close_count"] = int(reconciliation_mask.sum())
+        summary["live_recent_reconciliation_close_ratio"] = float(reconciliation_mask.mean()) if len(work.index) else 0.0
+        quality_scope = work[~reconciliation_mask].copy()
+        summary["live_recent_quality_scope_closed_trades"] = int(len(quality_scope.index))
+        summary["live_recent_quality_scope_ratio"] = (
+            float(len(quality_scope.index) / len(work.index)) if len(work.index) else 0.0
+        )
+        if quality_scope.empty:
+            return summary
+        learning_eligible_mask = quality_scope.get("learning_eligible", pd.Series(False, index=quality_scope.index)).astype(bool)
+        complete_mask = quality_scope.get("entry_context_complete", pd.Series(False, index=quality_scope.index)).astype(bool)
+        operational_mask = quality_scope.get("operational_close_flag", pd.Series(False, index=quality_scope.index)).astype(bool)
+        quality_scope_signal = (
+            quality_scope.get("signal_label", pd.Series("", index=quality_scope.index))
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+        summary["live_unknown_signal_label_ratio"] = (
+            float(quality_scope_signal.isin({"", "UNKNOWN"}).mean()) if len(quality_scope.index) else 0.0
+        )
+        summary["live_learning_eligible_ratio"] = float(learning_eligible_mask.mean()) if len(quality_scope.index) else 0.0
+        summary["live_entry_context_complete_ratio"] = float(complete_mask.mean()) if len(quality_scope.index) else 0.0
+        summary["live_operational_close_ratio"] = float(operational_mask.mean()) if len(quality_scope.index) else 0.0
+        work = quality_scope[learning_eligible_mask & complete_mask].copy()
 
         pnl_column = "net_realized_pnl" if "net_realized_pnl" in work.columns else "realized_pnl"
         pnl = pd.to_numeric(work.get(pnl_column), errors="coerce").dropna()
@@ -277,7 +334,6 @@ class Retrainer:
             return summary
 
         summary["live_closed_trades"] = int(len(pnl))
-        summary["live_validation_window"] = int(lookback)
         summary["live_win_rate"] = float((pnl > 0).mean())
         summary["live_average_pnl"] = float(pnl.mean())
         summary["live_profit_factor"] = float(self._profit_factor_from_pnl(pnl))
@@ -345,6 +401,7 @@ class Retrainer:
                 f"live_unknown_signal_label_ratio {live_unknown_signal_label_ratio:.3f} > allowed {max_unknown_signal_label_ratio:.3f}"
             )
 
+        candidate_row["promotion_gate_context"] = self._format_live_window_context(candidate_row)
         candidate_row["promotion_gate_passed"] = not failures
         candidate_row["promotion_gate_failures"] = " | ".join(failures)
         return not failures, failures
@@ -539,11 +596,17 @@ class Retrainer:
             promoted = False
             candidate_row["attempted_at"] = attempted_at
             candidate_row["activation_status"] = "blocked_quality_gate"
-            candidate_row["promotion_block_reason"] = candidate_row.get("promotion_gate_failures") or "quality_gate_failed"
+            gate_failure_reason = candidate_row.get("promotion_gate_failures") or "quality_gate_failed"
+            gate_context = candidate_row.get("promotion_gate_context", "")
+            candidate_row["promotion_block_reason"] = (
+                f"{gate_failure_reason} | {gate_context}" if gate_context else gate_failure_reason
+            )
             message = (
                 "Candidate failed promotion quality gates: "
-                f"{candidate_row.get('promotion_gate_failures') or 'unknown gate failure'}"
+                f"{gate_failure_reason}"
             )
+            if gate_context:
+                message = f"{message} | {gate_context}"
             promotion_block_reason = candidate_row["promotion_block_reason"]
         elif not self._candidate_beats_champion(candidate_row, champion):
             promoted = False

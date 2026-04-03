@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 
 import pandas as pd
+from model_feature_catalog import SEQUENCE_BASE_COLUMNS
 
 
 class SequenceFeatureBuilder:
@@ -32,21 +33,7 @@ class SequenceFeatureBuilder:
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
         df = df.sort_values(["token_id", "timestamp"]).reset_index(drop=True)
 
-        potential_cols = [
-            "entry_price",
-            "wallet_trade_count_30d",
-            "wallet_alpha_30d",
-            "wallet_signal_precision_tp",
-            "btc_fee_pressure_score",
-            "btc_mempool_congestion_score",
-            "btc_network_activity_score",
-            "btc_network_stress_score",
-            "btc_spot_return_5m",
-            "btc_spot_return_15m",
-            "spread",
-            "current_price",
-            "normalized_trade_size",
-        ]
+        potential_cols = SEQUENCE_BASE_COLUMNS
 
         base_cols = []
         for c in potential_cols:

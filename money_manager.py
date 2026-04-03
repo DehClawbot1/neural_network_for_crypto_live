@@ -78,8 +78,8 @@ class MoneyManager:
         strategic_min_entry = max(min_bet_usdc, float(getattr(TradingConfig, "MIN_ENTRY_USDC", min_bet_usdc)))
         if tradable_balance < min_bet_usdc:
             logging.info(
-                "MoneyManager: Tradable balance below minimum bet (tradable=$%.2f, min=$%.2f).",
-                tradable_balance, min_bet_usdc,
+                "MoneyManager: low-balance pause (balance=$%.2f, tradable=$%.2f, exchange_floor=$%.2f).",
+                available_balance, tradable_balance, min_bet_usdc,
             )
             return 0.0
 
@@ -103,6 +103,7 @@ class MoneyManager:
 
         # --- DYNAMIC LIMITS ---
         absolute_floor = min_bet_usdc # Exchange absolute minimum
+        max_risk_per_trade_pct = max(0.0, float(getattr(TradingConfig, "MAX_RISK_PER_TRADE_PCT", 0.15)))
         
         # Dynamic minimum grows slowly with account size but remains capped.
         dynamic_min_pct = max(0.0, float(getattr(TradingConfig, "MIN_BET_DYNAMIC_PCT", 0.002)))
@@ -110,7 +111,7 @@ class MoneyManager:
         dynamic_min = max(strategic_min_entry, min(tradable_balance * dynamic_min_pct, dynamic_min_cap))
         
         # Dynamic Max: percentage of tradable balance + hard absolute safety cap.
-        dynamic_max = tradable_balance * getattr(TradingConfig, 'MAX_RISK_PER_TRADE_PCT', 0.15)
+        dynamic_max = tradable_balance * max_risk_per_trade_pct
         hard_max = max(absolute_floor, float(getattr(TradingConfig, "HARD_MAX_BET_USDC", 250.0)))
         dynamic_max = min(dynamic_max, hard_max)
 
@@ -120,7 +121,16 @@ class MoneyManager:
 
         # Enforce the dynamic minimum
         if dynamic_max < absolute_floor:
-            logging.info("MoneyManager: dynamic_max ($%.2f) < absolute_floor ($%.2f). Rejecting trade.", dynamic_max, absolute_floor)
+            floor_support_pct = max(0.0, (1.0 - reserve_pct) * max_risk_per_trade_pct)
+            min_balance_for_floor = (absolute_floor / floor_support_pct) if floor_support_pct > 0 else float("inf")
+            logging.info(
+                "MoneyManager: low-balance pause (balance=$%.2f, tradable=$%.2f, risk_cap=$%.2f, exchange_floor=$%.2f, min_balance_for_floor=$%.2f).",
+                available_balance,
+                tradable_balance,
+                dynamic_max,
+                absolute_floor,
+                min_balance_for_floor,
+            )
             return 0.0
             
         if adjusted_bet < dynamic_min:

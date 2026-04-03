@@ -102,6 +102,13 @@ class EntryRuleLayer:
         latest_bearish_fractal = _finite_float(row.get("latest_bearish_fractal"), default=None)
         long_fractal_breakout = bool(row.get("long_fractal_breakout"))
         short_fractal_breakout = bool(row.get("short_fractal_breakout"))
+        live_bias = str(row.get("btc_live_bias", "NEUTRAL") or "NEUTRAL").strip().upper()
+        live_confluence = _finite_float(row.get("btc_live_confluence"), default=0.0) or 0.0
+        live_quality_score = _finite_float(row.get("btc_live_source_quality_score"), default=0.0) or 0.0
+        live_source_quality = str(row.get("btc_live_source_quality", "LOW") or "LOW").strip().upper()
+        live_divergence_bps = abs(_finite_float(row.get("btc_live_source_divergence_bps"), default=0.0) or 0.0)
+        live_mark_index_basis_bps = _finite_float(row.get("btc_live_mark_index_basis_bps"), default=0.0) or 0.0
+        live_index_ready = bool(row.get("btc_live_index_ready", False))
         ta_bias_conflicts = (
             (ta_bias == "LONG" and target_direction == "SHORT")
             or (ta_bias == "SHORT" and target_direction == "LONG")
@@ -156,6 +163,25 @@ class EntryRuleLayer:
                 short_fractal_breakout,
                 row.get("market_slug", row.get("market_title", "market")),
             )
+
+        live_bias_aligns = live_bias in {"LONG", "SHORT"} and live_bias == target_direction
+        live_bias_conflicts = live_bias in {"LONG", "SHORT"} and target_direction in {"LONG", "SHORT"} and live_bias != target_direction
+        live_feed_unreliable = live_index_ready and (live_quality_score < 0.25 or live_divergence_bps >= 35.0)
+        if live_feed_unreliable and abs(live_mark_index_basis_bps) >= 20.0 and target_direction in {"LONG", "SHORT"}:
+            macro_veto = True
+            logging.info(
+                "StrategyLayer: Live BTC/index veto. target=%s quality=%s(%.2f) divergence_bps=%.2f basis_bps=%.2f market=%s",
+                target_direction,
+                live_source_quality,
+                live_quality_score,
+                live_divergence_bps,
+                live_mark_index_basis_bps,
+                row.get("market_slug", row.get("market_title", "market")),
+            )
+        elif live_bias_aligns and live_confluence >= 0.60 and live_quality_score >= 0.50:
+            dynamic_min_score = max(0.05, dynamic_min_score - min(0.05, live_confluence * 0.05))
+        elif live_bias_conflicts and live_confluence >= 0.70 and live_quality_score >= 0.55:
+            dynamic_min_score = min(0.95, dynamic_min_score + min(0.08, live_confluence * 0.08))
 
         dynamic_min_score = max(0.02, dynamic_min_score - score_relax)
 
@@ -226,6 +252,13 @@ class EntryRuleLayer:
             "fractal_available": fractal_available,
             "long_fractal_breakout": long_fractal_breakout,
             "short_fractal_breakout": short_fractal_breakout,
+            "btc_live_bias": live_bias,
+            "btc_live_confluence": live_confluence,
+            "btc_live_source_quality": live_source_quality,
+            "btc_live_source_quality_score": live_quality_score,
+            "btc_live_source_divergence_bps": live_divergence_bps,
+            "btc_live_mark_index_basis_bps": live_mark_index_basis_bps,
+            "btc_live_index_ready": live_index_ready,
         }
 
     def should_enter(self, row: dict) -> bool:
