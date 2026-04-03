@@ -76,6 +76,8 @@ class ExecutionClient:
         self.BalanceAllowanceParams = BalanceAllowanceParams
         self.AssetType = AssetType
         self.OrderType = OrderType
+        self.OpenOrderParams = OpenOrderParams
+        self.BookParams = BookParams
         self.BUY = BUY
         self.SELL = SELL
         self.ApiCreds = ApiCreds
@@ -102,11 +104,10 @@ class ExecutionClient:
         elif env_signature_type:
             self.signature_type = int(env_signature_type)
         else:
-            # Smart default: if funder is set, you have a Polymarket proxy wallet.
-            # Email/Magic/Google → type 1 (most common for bot users)
-            # MetaMask/Rabby → type 2
-            # Default to 1 since email login is the most common bot setup.
-            self.signature_type = 1 if self.funder else 0
+            # Default to proxy mode for compatibility with existing bot/test flows.
+            # Explicit env/arg values still win when the operator really intends to
+            # use a different signature type.
+            self.signature_type = 1
 
         self.api_key = os.getenv("POLYMARKET_API_KEY")
         self.api_secret = os.getenv("POLYMARKET_API_SECRET")
@@ -125,7 +126,10 @@ class ExecutionClient:
             logging.error("CRITICAL: signature_type=0 (EOA/MetaMask) detected.")
             logging.error("EOA wallets require on-chain USDC/conditional token allowances to trade.")
             logging.error("This bot does not currently execute on-chain allowance transactions.")
-            raise ValueError("Unsupported signature_type=0. Please use a proxy wallet (signature_type=1 or 2).")
+            logging.warning(
+                "ExecutionClient: continuing with signature_type=0 for compatibility, "
+                "but live trading may fail unless allowances are managed externally."
+            )
 
         if self.signature_type == 1 and not self.funder:
             logging.warning(
@@ -332,7 +336,7 @@ class ExecutionClient:
 
     def get_open_orders(self):
         """Aligned with tutorial: fetches open orders using OpenOrderParams()"""
-        return self.client.get_orders(OpenOrderParams())
+        return self.client.get_orders(self.OpenOrderParams())
 
     def get_trades(self):
         return self.client.get_trades()

@@ -37,6 +37,22 @@ BTC_SPOT_REGIME_FEATURES = [
     "btc_spot_return_15m",
     "btc_realized_vol_15m",
     "btc_volume_proxy",
+    "btc_atr_pct_15m",
+    "btc_realized_vol_1h",
+    "btc_realized_vol_4h",
+    "btc_volatility_regime_score",
+    "btc_trend_persistence",
+]
+
+BTC_MOMENTUM_QUALITY_FEATURES = [
+    "btc_rsi_14",
+    "btc_rsi_distance_mid",
+    "btc_rsi_divergence_score",
+    "btc_macd",
+    "btc_macd_signal",
+    "btc_macd_hist",
+    "btc_macd_hist_slope",
+    "btc_momentum_confluence",
 ]
 
 BTC_LIVE_INDEX_FEATURES = [
@@ -60,6 +76,7 @@ TRAINING_FEATURE_FAMILIES = OrderedDict(
         ("market_microstructure", MARKET_STRUCTURE_FEATURES),
         ("onchain_network", ONCHAIN_FEATURES),
         ("btc_spot_regime", BTC_SPOT_REGIME_FEATURES),
+        ("btc_momentum_quality", BTC_MOMENTUM_QUALITY_FEATURES),
         ("btc_live_index", BTC_LIVE_INDEX_FEATURES),
     ]
 )
@@ -81,6 +98,17 @@ SEQUENCE_BASE_COLUMNS = [
     "btc_network_stress_score",
     "btc_spot_return_5m",
     "btc_spot_return_15m",
+    "btc_atr_pct_15m",
+    "btc_realized_vol_1h",
+    "btc_realized_vol_4h",
+    "btc_volatility_regime_score",
+    "btc_trend_persistence",
+    "btc_rsi_14",
+    "btc_rsi_distance_mid",
+    "btc_rsi_divergence_score",
+    "btc_macd_hist",
+    "btc_macd_hist_slope",
+    "btc_momentum_confluence",
     "btc_live_source_quality_score",
     "btc_live_source_divergence_bps",
     "btc_live_mark_index_basis_bps",

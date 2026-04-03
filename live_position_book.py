@@ -343,12 +343,16 @@ class LivePositionBook:
     def _fill_is_rebuild_eligible(self, fill: dict, known_local_order_ids: set[str]) -> bool:
         fill_id = str(fill.get("fill_id") or "").strip()
         order_id = str(fill.get("order_id") or "").strip()
+        side = str(fill.get("side") or fill.get("order_side") or "").strip().upper()
+        token_id = str(fill.get("token_id") or "").strip()
 
         if self._is_synthetic_fill_id(fill_id):
             return True
         if order_id == "external_manual":
             return True
         if order_id and order_id in known_local_order_ids:
+            return True
+        if not known_local_order_ids and token_id and side in {"BUY", "SELL"}:
             return True
         return False
 

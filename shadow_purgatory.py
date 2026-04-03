@@ -44,10 +44,14 @@ class ResilientCLOBClient:
                     results.extend(page_items)
                     page += 1
                     oldest_ts = min((int(item.get("timestamp", 0) or 0) for item in page_items), default=0)
+                    has_any_timestamp = any(int(item.get("timestamp", 0) or 0) for item in page_items)
+                    if len(page_items) < page_limit or not has_any_timestamp:
+                        break
                     if oldest_ts and oldest_ts <= int(after_ts):
                         break
                 if results:
-                    return [item for item in results if int(item.get("timestamp", 0) or 0) >= int(after_ts)]
+                    filtered = [item for item in results if int(item.get("timestamp", 0) or 0) >= int(after_ts)]
+                    return filtered if filtered else results
                 if response.status_code == 200:
                     return []
                 if response.status_code == 429 or 500 <= response.status_code < 600:

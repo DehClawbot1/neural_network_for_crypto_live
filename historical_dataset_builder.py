@@ -75,6 +75,7 @@ class HistoricalDatasetBuilder:
         wallet_alpha_history_df = self._safe_read("wallet_alpha_history.csv")
         btc_targets_df = self._safe_read("btc_targets.csv")
         btc_live_df = self._safe_read("btc_live_snapshot.csv")
+        technical_regime_df = self._safe_read("technical_regime_snapshot.csv")
 
         if signals_df.empty:
             return pd.DataFrame()
@@ -206,6 +207,38 @@ class HistoricalDatasetBuilder:
                 ]
                 live_view = btc_live_df[live_cols].sort_values(ts_col).rename(columns={ts_col: "timestamp"})
                 dataset = pd.merge_asof(dataset.sort_values("timestamp"), live_view, on="timestamp", direction="backward")
+                dataset = self._dedupe_columns(dataset)
+
+        if not technical_regime_df.empty and "timestamp" in dataset.columns:
+            technical_regime_df = technical_regime_df.copy()
+            ts_col = "technical_timestamp" if "technical_timestamp" in technical_regime_df.columns else "timestamp" if "timestamp" in technical_regime_df.columns else None
+            if ts_col:
+                technical_regime_df[ts_col] = pd.to_datetime(technical_regime_df[ts_col], utc=True, errors="coerce")
+                technical_regime_df = technical_regime_df[technical_regime_df[ts_col].notna()].copy()
+                regime_cols = [
+                    c
+                    for c in [
+                        ts_col,
+                        "btc_atr_pct_15m",
+                        "btc_realized_vol_1h",
+                        "btc_realized_vol_4h",
+                        "btc_volatility_regime",
+                        "btc_volatility_regime_score",
+                        "btc_trend_persistence",
+                        "btc_rsi_14",
+                        "btc_rsi_distance_mid",
+                        "btc_rsi_divergence_score",
+                        "btc_macd",
+                        "btc_macd_signal",
+                        "btc_macd_hist",
+                        "btc_macd_hist_slope",
+                        "btc_momentum_regime",
+                        "btc_momentum_confluence",
+                    ]
+                    if c in technical_regime_df.columns
+                ]
+                regime_view = technical_regime_df[regime_cols].sort_values(ts_col).rename(columns={ts_col: "timestamp"})
+                dataset = pd.merge_asof(dataset.sort_values("timestamp"), regime_view, on="timestamp", direction="backward")
                 dataset = self._dedupe_columns(dataset)
 
         if "best_ask" in dataset.columns and "best_bid" in dataset.columns:

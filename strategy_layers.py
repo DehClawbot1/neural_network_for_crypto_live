@@ -109,6 +109,15 @@ class EntryRuleLayer:
         live_divergence_bps = abs(_finite_float(row.get("btc_live_source_divergence_bps"), default=0.0) or 0.0)
         live_mark_index_basis_bps = _finite_float(row.get("btc_live_mark_index_basis_bps"), default=0.0) or 0.0
         live_index_ready = bool(row.get("btc_live_index_ready", False))
+        volatility_regime = str(row.get("btc_volatility_regime", "NORMAL") or "NORMAL").strip().upper()
+        volatility_regime_score = _finite_float(row.get("btc_volatility_regime_score"), default=0.0) or 0.0
+        trend_persistence = _finite_float(row.get("btc_trend_persistence"), default=0.0) or 0.0
+        rsi_value = _finite_float(row.get("btc_rsi_14"), default=50.0) or 50.0
+        rsi_divergence_score = _finite_float(row.get("btc_rsi_divergence_score"), default=0.0) or 0.0
+        macd_hist = _finite_float(row.get("btc_macd_hist"), default=0.0) or 0.0
+        macd_hist_slope = _finite_float(row.get("btc_macd_hist_slope"), default=0.0) or 0.0
+        momentum_regime = str(row.get("btc_momentum_regime", "NEUTRAL") or "NEUTRAL").strip().upper()
+        momentum_confluence = _finite_float(row.get("btc_momentum_confluence"), default=0.0) or 0.0
         ta_bias_conflicts = (
             (ta_bias == "LONG" and target_direction == "SHORT")
             or (ta_bias == "SHORT" and target_direction == "LONG")
@@ -182,6 +191,33 @@ class EntryRuleLayer:
             dynamic_min_score = max(0.05, dynamic_min_score - min(0.05, live_confluence * 0.05))
         elif live_bias_conflicts and live_confluence >= 0.70 and live_quality_score >= 0.55:
             dynamic_min_score = min(0.95, dynamic_min_score + min(0.08, live_confluence * 0.08))
+
+        momentum_aligns = (
+            (target_direction == "LONG" and momentum_regime in {"BULLISH", "OVERSOLD_EXHAUSTION"})
+            or (target_direction == "SHORT" and momentum_regime in {"BEARISH", "OVERBOUGHT_EXHAUSTION"})
+        )
+        momentum_conflicts = (
+            (target_direction == "LONG" and momentum_regime in {"BEARISH", "OVERBOUGHT_EXHAUSTION"})
+            or (target_direction == "SHORT" and momentum_regime in {"BULLISH", "OVERSOLD_EXHAUSTION"})
+        )
+        if volatility_regime == "EXTREME" and volatility_regime_score >= 0.90 and momentum_conflicts and target_direction in {"LONG", "SHORT"}:
+            macro_veto = True
+            logging.info(
+                "StrategyLayer: Volatility/momentum veto. target=%s vol_regime=%s vol_score=%.2f momentum=%s market=%s",
+                target_direction,
+                volatility_regime,
+                volatility_regime_score,
+                momentum_regime,
+                row.get("market_slug", row.get("market_title", "market")),
+            )
+        elif momentum_aligns and momentum_confluence >= 0.45 and trend_persistence >= 0.55:
+            dynamic_min_score = max(0.05, dynamic_min_score - min(0.05, momentum_confluence * 0.05))
+        elif momentum_conflicts and momentum_confluence >= 0.45:
+            dynamic_min_score = min(0.95, dynamic_min_score + min(0.07, momentum_confluence * 0.07))
+        if target_direction == "LONG" and rsi_value >= 78 and rsi_divergence_score < -0.20 and macd_hist_slope <= 0:
+            dynamic_min_score = min(0.95, dynamic_min_score + 0.08)
+        elif target_direction == "SHORT" and rsi_value <= 22 and rsi_divergence_score > 0.20 and macd_hist_slope >= 0:
+            dynamic_min_score = min(0.95, dynamic_min_score + 0.08)
 
         dynamic_min_score = max(0.02, dynamic_min_score - score_relax)
 
@@ -259,6 +295,15 @@ class EntryRuleLayer:
             "btc_live_source_divergence_bps": live_divergence_bps,
             "btc_live_mark_index_basis_bps": live_mark_index_basis_bps,
             "btc_live_index_ready": live_index_ready,
+            "btc_volatility_regime": volatility_regime,
+            "btc_volatility_regime_score": volatility_regime_score,
+            "btc_trend_persistence": trend_persistence,
+            "btc_rsi_14": rsi_value,
+            "btc_rsi_divergence_score": rsi_divergence_score,
+            "btc_macd_hist": macd_hist,
+            "btc_macd_hist_slope": macd_hist_slope,
+            "btc_momentum_regime": momentum_regime,
+            "btc_momentum_confluence": momentum_confluence,
         }
 
     def should_enter(self, row: dict) -> bool:

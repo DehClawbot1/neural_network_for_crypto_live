@@ -17,9 +17,11 @@ class ContractTargetBuilder:
     def __init__(self, logs_dir="logs"):
         self.logs_dir = Path(logs_dir)
         self.signals_file = self.logs_dir / "signals.csv"
+        self.raw_candidates_file = self.logs_dir / "raw_candidates.csv"
         self.markets_file = self.logs_dir / "markets.csv"
         self.clob_history_file = self.logs_dir / "clob_price_history.csv"
         self.btc_live_file = self.logs_dir / "btc_live_snapshot.csv"
+        self.technical_regime_file = self.logs_dir / "technical_regime_snapshot.csv"
         self.output_file = self.logs_dir / "contract_targets.csv"
 
     def _safe_read(self, path):
@@ -60,9 +62,12 @@ class ContractTargetBuilder:
 
     def build(self, forward_minutes=15, max_hold_minutes=60, tp_move=0.04, sl_move=0.03):
         signals_df = self._safe_read(self.signals_file)
+        if signals_df.empty:
+            signals_df = self._safe_read(self.raw_candidates_file)
         markets_df = self._safe_read(self.markets_file)
         history_df = self._safe_read(self.clob_history_file)
         btc_live_df = self._safe_read(self.btc_live_file)
+        technical_regime_df = self._safe_read(self.technical_regime_file)
 
         if signals_df.empty or markets_df.empty or history_df.empty:
             return pd.DataFrame()
@@ -113,7 +118,43 @@ class ContractTargetBuilder:
                     on="timestamp",
                     direction="backward",
                 )
+        if not technical_regime_df.empty:
+            technical_regime_df = technical_regime_df.copy()
+            ts_col = "technical_timestamp" if "technical_timestamp" in technical_regime_df.columns else "timestamp" if "timestamp" in technical_regime_df.columns else None
+            if ts_col:
+                technical_regime_df[ts_col] = pd.to_datetime(technical_regime_df[ts_col], utc=True, errors="coerce")
+                technical_regime_df = technical_regime_df[technical_regime_df[ts_col].notna()].copy()
+                regime_cols = [
+                    c
+                    for c in [
+                        ts_col,
+                        "btc_atr_pct_15m",
+                        "btc_realized_vol_1h",
+                        "btc_realized_vol_4h",
+                        "btc_volatility_regime",
+                        "btc_volatility_regime_score",
+                        "btc_trend_persistence",
+                        "btc_rsi_14",
+                        "btc_rsi_distance_mid",
+                        "btc_rsi_divergence_score",
+                        "btc_macd",
+                        "btc_macd_signal",
+                        "btc_macd_hist",
+                        "btc_macd_hist_slope",
+                        "btc_momentum_regime",
+                        "btc_momentum_confluence",
+                    ]
+                    if c in technical_regime_df.columns
+                ]
+                regime_view = technical_regime_df[regime_cols].sort_values(ts_col).rename(columns={ts_col: "timestamp"})
+                signals_df = pd.merge_asof(
+                    signals_df.sort_values("timestamp"),
+                    regime_view,
+                    on="timestamp",
+                    direction="backward",
+                )
         history_df = history_df.copy()
+        history_df["token_id"] = history_df["token_id"].astype(str)
         history_df["timestamp"] = pd.to_datetime(history_df["timestamp"], utc=True, errors="coerce")
         history_df = history_df.dropna(subset=["timestamp", "token_id"]).sort_values(["token_id", "timestamp"]).reset_index(drop=True)
         markets_latest = markets_df.drop_duplicates(subset=[market_lookup_col], keep="last")
@@ -132,8 +173,9 @@ class ContractTargetBuilder:
             token_id = signal_row.get("token_id") or self._select_token_id(signal_row.to_dict(), market_row)
             if not token_id:
                 continue
+            token_id = str(token_id)
 
-            token_history = history_groups.get(str(token_id), pd.DataFrame()).copy() # BUG FIX 1: Prevent pipeline freeze
+            token_history = history_groups.get(token_id, pd.DataFrame()).copy() # BUG FIX 1: Prevent pipeline freeze
             if token_history.empty:
                 continue
 

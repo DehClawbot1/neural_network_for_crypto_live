@@ -421,7 +421,8 @@ class OrderManager:
             if bool(bypass_risk_checks)
             else self.risk.pre_trade_check(token_id=token_id, price=price, size=notional_usdc, spread=spread, open_orders=open_orders, daily_pnl=daily_pnl)
         )
-        idempotency_key = f"{token_id}|{condition_id}|{side}|{size}|{round(float(price), 4)}"
+        idempotency_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
+        idempotency_key = f"{idempotency_ts}|{token_id}|{condition_id}|{side}|{size}|{round(float(price), 4)}"
         existing = self.list_orders()
         if not existing.empty and "idempotency_key" in existing.columns:
             candidates = existing[existing["idempotency_key"].astype(str) == idempotency_key].copy()
@@ -433,7 +434,7 @@ class OrderManager:
                     cutoff = datetime.now(timezone.utc) - pd.Timedelta(minutes=2)
                     candidates = candidates[ts >= cutoff]
                 if not candidates.empty:
-                    return {"status": "REJECTED", "reason": "duplicate_idempotency_key_active", "idempotency_key": idempotency_key}, None
+                    return {"status": "REJECTED", "reason": "duplicate_idempotency_key", "idempotency_key": idempotency_key}, None
         if not decision.allowed:
             row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "idempotency_key": idempotency_key, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": decision.reason}
             self._append(self.orders_file, row)
@@ -654,7 +655,7 @@ class OrderManager:
         self._append(self.orders_file, row)
         self.db.execute(
             "INSERT OR REPLACE INTO orders (order_id, token_id, condition_id, outcome_side, order_side, price, size, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (row.get("order_id"), row.get("token_id"), row.get("condition_id"), row.get("outcome_side"), row.get("order_side"), row.get("price"), row.get("order_size_shares"), row.get("status"), row.get("timestamp")),
+            (row.get("order_id"), row.get("token_id"), row.get("condition_id"), row.get("outcome_side"), row.get("order_side"), row.get("price"), row.get("size"), row.get("status"), row.get("timestamp")),
         )
         return row, response
 
