@@ -4,6 +4,8 @@ from datetime import datetime
 
 import pandas as pd
 
+from csv_utils import safe_csv_append
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 
@@ -30,8 +32,7 @@ class SimulationEngine:
             "entry_price": fill_price,
             "status": "OPEN",
         }
-        df = pd.DataFrame([record])
-        df.to_csv(self.positions_file, mode="a", header=not self.positions_file.exists(), index=False)
+        safe_csv_append(self.positions_file, pd.DataFrame([record]))
         logging.info("Opened simulated position on %s", record["market"])
 
     def summarize_open_positions(self):

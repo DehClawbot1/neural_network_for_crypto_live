@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from csv_utils import safe_csv_append
+
 from trade_quality import classify_exit_reason_family
 
 logger = logging.getLogger(__name__)
@@ -170,4 +172,4 @@ class PerformanceGovernor:
         flat["windows_json"] = json.dumps(state.get("windows", []), separators=(",", ":"))
         flat.pop("windows", None)
         df = pd.DataFrame([flat])
-        df.to_csv(self.output_file, mode="a", header=not self.output_file.exists(), index=False)
+        safe_csv_append(self.output_file, df)

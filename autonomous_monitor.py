@@ -3,6 +3,8 @@ from pathlib import Path
 from datetime import datetime
 
 import pandas as pd
+
+from csv_utils import safe_csv_append
 from incident_manager import IncidentManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -32,7 +34,7 @@ class AutonomousMonitor:
         return None
 
     def _append(self, path: Path, record: dict):
-        pd.DataFrame([record]).to_csv(path, mode="a", header=not path.exists(), index=False)
+        safe_csv_append(path, pd.DataFrame([record]))
 
     def write_heartbeat(self, service: str, status: str = "ok", message: str = "", extra: dict | None = None):
         record = {

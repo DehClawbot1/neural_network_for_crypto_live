@@ -6,6 +6,8 @@ from pathlib import Path
 import pandas as pd
 import requests
 
+from csv_utils import safe_csv_append
+
 CLOB_URL = "https://clob.polymarket.com/prices-history"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -64,6 +66,6 @@ class CLOBHistoryClient:
                 continue
         df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         if not df.empty:
-            df.to_csv(self.output_file, mode="a", header=not self.output_file.exists(), index=False)
+            safe_csv_append(self.output_file, df)
         logging.info("CLOB history: fetched %d rows across %d/%d tokens.", len(df), len(frames), total)
         return df

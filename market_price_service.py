@@ -232,38 +232,59 @@ class MarketPriceService:
         except Exception:
             return
 
-        async with websockets.connect(self.CLOB_WS_URL) as ws:
-            await ws.send(json.dumps({
-                "assets_ids": [str(t) for t in token_ids if t],
-                "type": "market",
-            }))
+        max_retries = 10
+        base_delay = 2
+        for attempt in range(max_retries):
+            try:
+                async with websockets.connect(
+                    self.CLOB_WS_URL,
+                    ping_interval=20,
+                    ping_timeout=10,
+                    close_timeout=5,
+                ) as ws:
+                    await ws.send(json.dumps({
+                        "assets_ids": [str(t) for t in token_ids if t],
+                        "type": "market",
+                    }))
+                    logging.info("WebSocket connected (attempt %d)", attempt + 1)
 
-            while True:
-                msg = json.loads(await ws.recv())
-                token_id = str(msg.get("asset_id") or msg.get("market") or "")
-                if not token_id:
-                    continue
-                best_bid = msg.get("best_bid")
-                best_ask = msg.get("best_ask")
-                midpoint = msg.get("mid") or msg.get("midpoint")
-                last_trade_price = msg.get("price")
-                spread = None
-                try:
-                    if best_bid is not None and best_ask is not None:
-                        spread = abs(float(best_ask) - float(best_bid))
-                except Exception:
-                    spread = None
-                self.cache[token_id] = {
-                    "price": float(midpoint or last_trade_price or 0.0),
-                    "best_bid": float(best_bid) if best_bid is not None else None,
-                    "best_ask": float(best_ask) if best_ask is not None else None,
-                    "midpoint": float(midpoint) if midpoint is not None else None,
-                    "spread": spread,
-                    "last_trade_price": float(last_trade_price) if last_trade_price is not None else None,
-                    "timestamp": datetime.now(timezone.utc),
-                }
-                if update_callback is not None:
-                    update_callback(token_id, self.cache[token_id])
+                    while True:
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=60)
+                        except asyncio.TimeoutError:
+                            logging.warning("WebSocket recv timeout (60s), reconnecting...")
+                            break
+                        msg = json.loads(raw)
+                        token_id = str(msg.get("asset_id") or msg.get("market") or "")
+                        if not token_id:
+                            continue
+                        best_bid = msg.get("best_bid")
+                        best_ask = msg.get("best_ask")
+                        midpoint = msg.get("mid") or msg.get("midpoint")
+                        last_trade_price = msg.get("price")
+                        spread = None
+                        try:
+                            if best_bid is not None and best_ask is not None:
+                                spread = abs(float(best_ask) - float(best_bid))
+                        except Exception:
+                            spread = None
+                        self.cache[token_id] = {
+                            "price": float(midpoint or last_trade_price or 0.0),
+                            "best_bid": float(best_bid) if best_bid is not None else None,
+                            "best_ask": float(best_ask) if best_ask is not None else None,
+                            "midpoint": float(midpoint) if midpoint is not None else None,
+                            "spread": spread,
+                            "last_trade_price": float(last_trade_price) if last_trade_price is not None else None,
+                            "timestamp": datetime.now(timezone.utc),
+                        }
+                        if update_callback is not None:
+                            update_callback(token_id, self.cache[token_id])
+            except Exception as exc:
+                delay = min(base_delay * (2 ** attempt), 60)
+                logging.warning("WebSocket error (attempt %d/%d): %s — retrying in %ds",
+                                attempt + 1, max_retries, exc, delay)
+                await asyncio.sleep(delay)
+        logging.error("WebSocket gave up after %d attempts", max_retries)
 
     def stream_prices_forever(self, token_ids, update_callback=None):
         asyncio.run(self.stream_prices(token_ids, update_callback=update_callback))

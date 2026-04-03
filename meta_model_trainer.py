@@ -5,6 +5,7 @@ from pathlib import Path
 
 import joblib
 import pandas as pd
+from csv_utils import safe_csv_append
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import roc_auc_score
@@ -139,7 +140,7 @@ class MetaModelTrainer:
             "train_rows": train_rows,
             "test_rows": test_rows,
         }])
-        new_row.to_csv(registry_path, mode="a", header=not registry_path.exists(), index=False)
+        safe_csv_append(registry_path, new_row)
 
 
 if __name__ == "__main__":

@@ -93,7 +93,8 @@ class Database:
 
     def _init_schema(self):
         cur = self.conn.cursor()
-        cur.executescript(
+        try:
+            cur.executescript(
             """
             CREATE TABLE IF NOT EXISTS positions (
                 position_id TEXT PRIMARY KEY,
@@ -278,18 +279,27 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_external_position_syncs_observed_at ON external_position_syncs(observed_at);
             """
         )
-        self.conn.commit()
+            self.conn.commit()
+        finally:
+            cur.close()
 
     def execute(self, query, params=()):
         cur = self.conn.cursor()
-        cur.execute(query, params)
-        self.conn.commit()
-        return cur
+        try:
+            cur.execute(query, params)
+            self.conn.commit()
+            return cur
+        except Exception:
+            cur.close()
+            raise
 
     def query_all(self, query, params=()):
         cur = self.conn.cursor()
-        cur.execute(query, params)
-        return [dict(row) for row in cur.fetchall()]
+        try:
+            cur.execute(query, params)
+            return [dict(row) for row in cur.fetchall()]
+        finally:
+            cur.close()
 
     def integrity_report(self):
         report = {"ok": True, "checks": {}, "errors": []}

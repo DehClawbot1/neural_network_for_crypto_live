@@ -5,6 +5,7 @@ from datetime import datetime
 import pandas as pd
 
 from config import TradingConfig
+from csv_utils import safe_csv_append
 from pnl_engine import PNLEngine
 from market_price_service import MarketPriceService
 
@@ -255,8 +256,8 @@ class PositionManager:
         remaining = positions[~mask]
         self._write_positions(remaining)
         closed_df = pd.DataFrame([row])
-        closed_df.to_csv(self.closed_file, mode="a", header=not self.closed_file.exists(), index=False)
-        closed_df.to_csv(self.episode_file, mode="a", header=not self.episode_file.exists(), index=False)
+        safe_csv_append(self.closed_file, closed_df)
+        safe_csv_append(self.episode_file, closed_df)
         return closed_df
 
     def get_exit_reason(self, row: dict, alerts_df: pd.DataFrame | None = None):
@@ -335,8 +336,8 @@ class PositionManager:
 
         if closed:
             closed_df = pd.DataFrame(closed)
-            closed_df.to_csv(self.closed_file, mode="a", header=not self.closed_file.exists(), index=False)
-            closed_df.to_csv(self.episode_file, mode="a", header=not self.episode_file.exists(), index=False)
+            safe_csv_append(self.closed_file, closed_df)
+            safe_csv_append(self.episode_file, closed_df)
             logging.info("Closed %s paper positions.", len(closed_df))
             return closed_df
 

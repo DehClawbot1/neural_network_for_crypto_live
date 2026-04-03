@@ -47,8 +47,11 @@ def _market_to_row(market: dict) -> dict:
     spread = None
     if best_bid is not None and best_ask is not None:
         try:
-            midpoint = (_safe_float(best_bid, 0.0) + _safe_float(best_ask, 0.0)) / 2.0
-            spread = abs(_safe_float(best_ask, 0.0) - _safe_float(best_bid, 0.0)) # BUG FIX 9: Handle empty strings gracefully
+            bid_f = _safe_float(best_bid, None)
+            ask_f = _safe_float(best_ask, None)
+            if bid_f is not None and ask_f is not None and (bid_f + ask_f) > 0:
+                midpoint = (bid_f + ask_f) / 2.0
+                spread = abs(ask_f - bid_f)
         except Exception:
             midpoint = None
             spread = None

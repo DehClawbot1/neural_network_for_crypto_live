@@ -7,6 +7,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from csv_utils import safe_csv_append
+
 
 def _safe_float(value, default=0.0) -> float:
     try:
@@ -173,7 +175,7 @@ class PositionTelemetry:
 
         now = datetime.now(timezone.utc).isoformat()
         df = self._project_snapshot_frame(positions_df, timestamp=now)
-        df.to_csv(self.snapshots_file, mode="a", header=not self.snapshots_file.exists(), index=False)
+        safe_csv_append(self.snapshots_file, df)
 
         portfolio_row = pd.DataFrame(
             [
@@ -193,7 +195,7 @@ class PositionTelemetry:
             ]
         )
         portfolio_row["total_pnl"] = portfolio_row["realized_pnl"] + portfolio_row["unrealized_pnl"]
-        portfolio_row.to_csv(self.portfolio_file, mode="a", header=not self.portfolio_file.exists(), index=False)
+        safe_csv_append(self.portfolio_file, portfolio_row)
 
     def load_snapshots(self, hours: int = 24) -> pd.DataFrame:
         if not self.snapshots_file.exists():

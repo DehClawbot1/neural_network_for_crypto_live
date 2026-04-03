@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from csv_utils import safe_csv_append
 from pnl_engine import PNLEngine
 from trade_quality import build_quality_context, resolve_entry_signal_label
 
@@ -74,7 +75,7 @@ class TradeLifecycle:
         # Keep lifecycle events isolated from execution_log.csv so fill/trade logs
         # keep a stable schema for dashboards, dataset builders, and reconciliations.
         events_file = logs_path / "trade_events.csv"
-        pd.DataFrame([payload]).to_csv(events_file, mode="a", header=not events_file.exists(), index=False)
+        safe_csv_append(events_file, pd.DataFrame([payload]))
 
     def on_signal(self, signal_row: dict):
         normalized_signal_row = dict(signal_row or {})

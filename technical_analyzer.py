@@ -166,7 +166,10 @@ class TechnicalAnalyzer:
         atr_pct = max(0.0, self._safe_float(atr_pct, 0.0))
         realized_vol_1h = max(0.0, self._safe_float(realized_vol_1h, 0.0))
         realized_vol_4h = max(0.0, self._safe_float(realized_vol_4h, 0.0))
-        score = min(1.0, (atr_pct / 0.012) * 0.45 + (realized_vol_1h / 0.010) * 0.35 + (realized_vol_4h / 0.020) * 0.20)
+        atr_term = (atr_pct / 0.012) * 0.45 if atr_pct == atr_pct else 0.0
+        vol1h_term = (realized_vol_1h / 0.010) * 0.35 if realized_vol_1h == realized_vol_1h else 0.0
+        vol4h_term = (realized_vol_4h / 0.020) * 0.20 if realized_vol_4h == realized_vol_4h else 0.0
+        score = min(1.0, atr_term + vol1h_term + vol4h_term)
         if score >= 0.90:
             return "EXTREME", score
         if score >= 0.65:

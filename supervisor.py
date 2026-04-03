@@ -186,14 +186,15 @@ def safe_read_csv(path):
 
 
 def append_csv_record(path, record):
-    df = pd.DataFrame([record])
-    df.to_csv(path, mode="a", header=not os.path.exists(path), index=False)
+    from csv_utils import safe_csv_append
+    safe_csv_append(path, pd.DataFrame([record]))
 
 
 def append_csv_frame(path, df):
     if df is None or df.empty:
         return
-    df.to_csv(path, mode="a", header=not os.path.exists(path), index=False)
+    from csv_utils import safe_csv_append
+    safe_csv_append(path, df)
 
 
 def _is_truthy(value) -> bool:
@@ -3147,7 +3148,8 @@ def main_loop():
                         _ob = orderbook_guard.analyze_book(_tid, depth=1)
                         if _ob.get("best_bid"):
                             _tr.update_market(_ob["best_bid"])
-                    except: pass
+                    except Exception as exc:
+                        logging.debug("Orderbook fallback ping failed for %s: %s", _tid, exc)
 
             # If in live mode, reconcile with exchange before making decisions
             if trading_mode == "live" and execution_client is not None:

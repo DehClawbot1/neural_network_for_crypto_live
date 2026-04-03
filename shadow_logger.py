@@ -5,6 +5,8 @@ from pathlib import Path
 import joblib
 import pandas as pd
 
+from csv_utils import safe_csv_append
+
 
 class ShadowLogger:
     def __init__(self, model_bundle_path=None, log_path="logs/shadow_results.csv"):
@@ -53,7 +55,7 @@ class ShadowLogger:
             "outcome": "PENDING",
             "realized_return": None,
         }
-        pd.DataFrame([shadow_row]).to_csv(self.log_path, mode="a", header=not self.log_path.exists(), index=False)
+        safe_csv_append(self.log_path, pd.DataFrame([shadow_row]))
         logging.info("👻 Shadow Entry: %s | Meta-Prob: %.2f%%", shadow_row["market"], meta_prob * 100)
         return meta_prob
 

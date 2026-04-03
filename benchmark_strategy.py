@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from csv_utils import safe_csv_append
+
 
 class BenchmarkStrategy:
     def __init__(self, logs_dir="logs"):
@@ -72,5 +74,5 @@ class BenchmarkStrategy:
             "main_live_win_rate": float(governor_state.get("live_win_rate", 0.0) or 0.0),
             "main_live_profit_factor": float(governor_state.get("live_profit_factor", 0.0) or 0.0),
         }
-        pd.DataFrame([row]).to_csv(self.output_file, mode="a", header=not self.output_file.exists(), index=False)
+        safe_csv_append(self.output_file, pd.DataFrame([row]))
         return row

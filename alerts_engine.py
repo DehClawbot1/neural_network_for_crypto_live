@@ -5,6 +5,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 import pandas as pd
+
+from csv_utils import safe_csv_append
 from incident_manager import IncidentManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -78,8 +80,7 @@ class AlertsEngine:
                         return
             except Exception:
                 pass
-        df = pd.DataFrame([normalized])
-        df.to_csv(self.alerts_file, mode="a", header=not self.alerts_file.exists(), index=False)
+        safe_csv_append(self.alerts_file, pd.DataFrame([normalized]))
         self.incident_manager.raise_incident(
             dedupe_key=f"{normalized.get('alert_type')}|{normalized.get('market')}|{normalized.get('message')}",
             source_module=normalized.get("source_module", "alerts_engine"),

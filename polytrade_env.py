@@ -7,6 +7,7 @@ from gymnasium import spaces
 import numpy as np
 import pandas as pd
 
+from csv_utils import safe_csv_append
 from pnl_engine import PNLEngine
 
 
@@ -436,7 +437,7 @@ class LivePolyTradeEnv(gym.Env):
             "obs_before": list(np.asarray(obs_before, dtype=float)),
             "obs_after": list(np.asarray(obs_after, dtype=float)),
         }
-        pd.DataFrame([row]).to_csv(self.experience_file, mode="a", header=not self.experience_file.exists(), index=False)
+        safe_csv_append(self.experience_file, pd.DataFrame([row]))
 
     def step(self, action):
         logged_action = float(np.asarray(action).reshape(-1)[0]) if self.continuous_actions else int(action)

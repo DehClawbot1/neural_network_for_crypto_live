@@ -8,6 +8,8 @@ from pathlib import Path
 
 import joblib
 import pandas as pd
+
+from csv_utils import safe_csv_append
 import requests
 
 from config import TradingConfig
@@ -222,7 +224,7 @@ class ShadowPurgatory:
 
     def _write_shadow_row(self, row: dict):
         with self.lock:
-            pd.DataFrame([row]).to_csv(self.log_path, mode="a", header=not self.log_path.exists(), index=False)
+            safe_csv_append(self.log_path, pd.DataFrame([row]))
 
     def _write_feature_blocked_row(self, signal, missing, imputed):
         row = {

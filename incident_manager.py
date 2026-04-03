@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from csv_utils import safe_csv_append
+
 
 class IncidentManager:
     def __init__(self, logs_dir="logs"):
@@ -38,7 +40,7 @@ class IncidentManager:
             "last_seen": now,
             "message": message,
         }
-        pd.DataFrame([row]).to_csv(self.incidents_file, mode="a", header=not self.incidents_file.exists(), index=False)
+        safe_csv_append(self.incidents_file, pd.DataFrame([row]))
 
     def resolve_incident(self, dedupe_key: str):
         df = self._load()
