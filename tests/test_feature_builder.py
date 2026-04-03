@@ -62,6 +62,18 @@ class TestFeatureLogic(unittest.TestCase):
             "btc_mempool_tx_count": 245000,
             "btc_mempool_vsize": 14000000,
             "onchain_network_health": "BUSY",
+            "alligator_alignment": "BULLISH",
+            "alligator_bullish": True,
+            "alligator_bearish": False,
+            "adx_value": 27.4,
+            "adx_threshold": 18.0,
+            "adx_trending": True,
+            "anchored_vwap": 66123.0,
+            "price_vs_anchored_vwap": 0.0084,
+            "price_above_anchored_vwap": True,
+            "price_below_anchored_vwap": False,
+            "btc_trend_bias": "LONG",
+            "btc_trend_confluence": 1.0,
         }
         market = {
             "condition_id": "cond_1",
@@ -82,6 +94,10 @@ class TestFeatureLogic(unittest.TestCase):
         self.assertEqual(row["btc_network_stress_score"], 0.71)
         self.assertEqual(row["btc_fee_fastest_satvb"], 12.0)
         self.assertEqual(row["onchain_network_health"], "BUSY")
+        self.assertEqual(row["alligator_alignment"], "BULLISH")
+        self.assertEqual(row["adx_value"], 27.4)
+        self.assertTrue(row["price_above_anchored_vwap"])
+        self.assertEqual(row["btc_trend_bias"], "LONG")
 
 
 if __name__ == "__main__":

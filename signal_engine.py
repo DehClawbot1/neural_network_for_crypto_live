@@ -33,6 +33,15 @@ class SignalEngine:
         3: "HIGHEST-RANKED PAPER SIGNAL",
     }
 
+    @staticmethod
+    def _target_direction(row: dict) -> str:
+        side = str(row.get("outcome_side", row.get("side", "UNKNOWN"))).strip().upper()
+        if side in {"YES", "UP", "LONG", "BULLISH"}:
+            return "LONG"
+        if side in {"NO", "DOWN", "SHORT", "BEARISH"}:
+            return "SHORT"
+        return "NEUTRAL"
+
     def score_row(self, row: dict):
         whale_pressure = float(np.clip(_safe_float(row.get("whale_pressure", 0.5), default=0.5), 0.0, 1.0))
         market_structure_score = float(np.clip(_safe_float(row.get("market_structure_score", 0.5), default=0.5), 0.0, 1.0))
@@ -43,6 +52,21 @@ class SignalEngine:
         p_tp = float(np.clip(_safe_float(row.get("p_tp_before_sl", 0.0), default=0.0), 0.0, 1.0))
         expected_return = _safe_float(row.get("expected_return", 0.0), default=0.0)
         edge_score = _safe_float(row.get("edge_score"), default=p_tp * expected_return)
+        ta_bias = str(row.get("btc_trend_bias", "NEUTRAL")).strip().upper()
+        target_direction = self._target_direction(row)
+        trend_confluence = float(np.clip(_safe_float(row.get("btc_trend_confluence", 0.0), default=0.0), 0.0, 1.0))
+        long_fractal_breakout = bool(row.get("long_fractal_breakout"))
+        short_fractal_breakout = bool(row.get("short_fractal_breakout"))
+        fractal_trigger_ready = (
+            (target_direction == "LONG" and long_fractal_breakout)
+            or (target_direction == "SHORT" and short_fractal_breakout)
+        )
+        fractal_trigger_pending = ta_bias in {"LONG", "SHORT"} and ta_bias == target_direction and not fractal_trigger_ready
+        ta_conflict = (
+            (ta_bias == "LONG" and target_direction == "SHORT")
+            or (ta_bias == "SHORT" and target_direction == "LONG")
+        )
+        ta_support = ta_bias in {"LONG", "SHORT"} and ta_bias == target_direction
 
         network_regime_bonus = 0.0
         if network_activity_score >= 0.55:
@@ -60,6 +84,12 @@ class SignalEngine:
             + network_activity_score * 0.03
             + network_regime_bonus
         )
+        if ta_support:
+            heuristic_confidence += min(0.08, trend_confluence * 0.08)
+            if fractal_trigger_ready:
+                heuristic_confidence += 0.04
+        elif ta_conflict:
+            heuristic_confidence -= min(0.12, max(0.06, trend_confluence * 0.12))
         model_confidence = np.clip(
             (p_tp * 0.70)
             + np.clip(expected_return * 5.0, -1.0, 1.0) * 0.15
@@ -78,6 +108,10 @@ class SignalEngine:
             confidence = min(confidence, 0.59)
         if expected_return < 0 and p_tp < 0.48:
             confidence = min(confidence, 0.44)
+        if ta_conflict:
+            confidence = min(confidence, 0.39)
+        if fractal_trigger_pending:
+            confidence = min(confidence, 0.42)
 
         if confidence < 0.45:
             action_code = 0

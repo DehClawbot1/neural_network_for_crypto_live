@@ -36,6 +36,12 @@ class TradeLifecycle:
     close_reason: str | None = None
     confidence_at_entry: float = 0.0
     signal_label: str = "UNKNOWN"
+    entry_btc_trend_bias: str = "NEUTRAL"
+    entry_alligator_alignment: str = "NEUTRAL"
+    entry_adx_value: float = 0.0
+    entry_adx_threshold: float = 0.0
+    entry_anchored_vwap: float = 0.0
+    entry_fractal_trigger_direction: str = "NEUTRAL"
     ledger: list = field(default_factory=list)
 
     def _write_execution_event(self, payload: dict):
@@ -60,6 +66,12 @@ class TradeLifecycle:
         self.state = TradeState.NEW_SIGNAL
         self.confidence_at_entry = float(signal_row.get("confidence", 0.0) or 0.0)
         self.signal_label = str(signal_row.get("signal_label", "UNKNOWN") or "UNKNOWN")
+        self.entry_btc_trend_bias = str(signal_row.get("btc_trend_bias", "NEUTRAL") or "NEUTRAL")
+        self.entry_alligator_alignment = str(signal_row.get("alligator_alignment", "NEUTRAL") or "NEUTRAL")
+        self.entry_adx_value = float(signal_row.get("adx_value", 0.0) or 0.0)
+        self.entry_adx_threshold = float(signal_row.get("adx_threshold", 0.0) or 0.0)
+        self.entry_anchored_vwap = float(signal_row.get("anchored_vwap", 0.0) or 0.0)
+        self.entry_fractal_trigger_direction = str(signal_row.get("fractal_trigger_direction", "NEUTRAL") or "NEUTRAL")
 
     def enter(self, size_usdc: float, entry_price: float):
         self.size_usdc = float(size_usdc)

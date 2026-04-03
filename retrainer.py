@@ -98,7 +98,13 @@ class Retrainer:
         if sort_by and sort_by in updated.columns:
             try:
                 sort_key = pd.to_datetime(updated[sort_by], errors="coerce", utc=True)
-                updated = updated.assign(_sort_key=sort_key).sort_values("_sort_key").drop(columns=["_sort_key"])
+                # Keep legacy rows with blank timestamps at the top so the newest
+                # real attempt remains at the bottom for tail-based inspection.
+                updated = (
+                    updated.assign(_sort_key=sort_key)
+                    .sort_values("_sort_key", na_position="first")
+                    .drop(columns=["_sort_key"])
+                )
             except Exception:
                 pass
         updated.to_csv(path, index=False)

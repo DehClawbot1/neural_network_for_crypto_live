@@ -40,6 +40,15 @@ class EntryRuleLayer:
         self.min_liquidity = min_liquidity
         self.min_liquidity_score = min_liquidity_score
 
+    @staticmethod
+    def _target_direction(row: dict) -> str:
+        side = str(row.get("outcome_side", row.get("side", "UNKNOWN"))).strip().upper()
+        if side in {"YES", "UP", "LONG", "BULLISH"}:
+            return "LONG"
+        if side in {"NO", "DOWN", "SHORT", "BEARISH"}:
+            return "SHORT"
+        return "NEUTRAL"
+
     def evaluate(self, row: dict) -> dict:
         import logging
         
@@ -79,6 +88,75 @@ class EntryRuleLayer:
             elif target_side == "YES":
                 dynamic_min_score = min(0.95, self.min_score + 0.15)
         # --------------------------------
+
+        ta_bias = str(row.get("btc_trend_bias", "NEUTRAL")).strip().upper()
+        alligator_alignment = str(row.get("alligator_alignment", "NEUTRAL")).strip().upper()
+        adx_value = _finite_float(row.get("adx_value"), default=0.0) or 0.0
+        adx_threshold = _finite_float(row.get("adx_threshold"), default=18.0) or 18.0
+        adx_trending = bool(row.get("adx_trending")) or adx_value >= adx_threshold
+        price_above_anchored_vwap = bool(row.get("price_above_anchored_vwap"))
+        price_below_anchored_vwap = bool(row.get("price_below_anchored_vwap"))
+        target_direction = self._target_direction(row)
+        trend_confluence = _finite_float(row.get("btc_trend_confluence"), default=0.0) or 0.0
+        latest_bullish_fractal = _finite_float(row.get("latest_bullish_fractal"), default=None)
+        latest_bearish_fractal = _finite_float(row.get("latest_bearish_fractal"), default=None)
+        long_fractal_breakout = bool(row.get("long_fractal_breakout"))
+        short_fractal_breakout = bool(row.get("short_fractal_breakout"))
+        ta_bias_conflicts = (
+            (ta_bias == "LONG" and target_direction == "SHORT")
+            or (ta_bias == "SHORT" and target_direction == "LONG")
+        )
+        fractal_available = (
+            (target_direction == "LONG" and latest_bullish_fractal is not None)
+            or (target_direction == "SHORT" and latest_bearish_fractal is not None)
+        )
+        fractal_trigger_ready = (
+            (target_direction == "LONG" and long_fractal_breakout)
+            or (target_direction == "SHORT" and short_fractal_breakout)
+            or target_direction == "NEUTRAL"
+        )
+        ta_entry_ready = (
+            ta_bias in {"LONG", "SHORT"}
+            and target_direction == ta_bias
+            and alligator_alignment in {"BULLISH", "BEARISH"}
+            and adx_trending
+            and (price_above_anchored_vwap or price_below_anchored_vwap)
+            and (not fractal_available or fractal_trigger_ready)
+        )
+        ta_trigger_blocked = (
+            ta_bias in {"LONG", "SHORT"}
+            and target_direction == ta_bias
+            and alligator_alignment in {"BULLISH", "BEARISH"}
+            and adx_trending
+            and (price_above_anchored_vwap or price_below_anchored_vwap)
+            and fractal_available
+            and not fractal_trigger_ready
+        )
+        if ta_bias_conflicts:
+            macro_veto = True
+            logging.info(
+                "StrategyLayer: Trend veto. target=%s bias=%s alligator=%s adx=%.2f/%.2f avwap_above=%s avwap_below=%s market=%s",
+                target_direction,
+                ta_bias,
+                alligator_alignment,
+                adx_value,
+                adx_threshold,
+                price_above_anchored_vwap,
+                price_below_anchored_vwap,
+                row.get("market_slug", row.get("market_title", "market")),
+            )
+        elif ta_entry_ready:
+            dynamic_min_score = max(0.05, dynamic_min_score - min(0.08, trend_confluence * 0.08))
+        elif ta_trigger_blocked:
+            logging.info(
+                "StrategyLayer: Fractal trigger pending. target=%s bias=%s long_breakout=%s short_breakout=%s market=%s",
+                target_direction,
+                ta_bias,
+                long_fractal_breakout,
+                short_fractal_breakout,
+                row.get("market_slug", row.get("market_title", "market")),
+            )
+
         dynamic_min_score = max(0.02, dynamic_min_score - score_relax)
 
         spread = _finite_float(row.get("spread"), default=None)
@@ -117,7 +195,7 @@ class EntryRuleLayer:
         score_ok = score >= dynamic_min_score
         spread_threshold = self.max_spread + spread_relax
         spread_ok = spread <= spread_threshold
-        allow = score_ok and spread_ok and liquidity_ok and not macro_veto
+        allow = score_ok and spread_ok and liquidity_ok and not macro_veto and not ta_trigger_blocked
 
         return {
             "allow": allow,
@@ -135,6 +213,19 @@ class EntryRuleLayer:
             "score_relax": score_relax,
             "spread_relax": spread_relax,
             "liquidity_relax_factor": liquidity_relax_factor,
+            "ta_bias": ta_bias,
+            "target_direction": target_direction,
+            "ta_entry_ready": ta_entry_ready,
+            "ta_bias_conflicts": ta_bias_conflicts,
+            "ta_trigger_blocked": ta_trigger_blocked,
+            "alligator_alignment": alligator_alignment,
+            "adx_value": adx_value,
+            "adx_threshold": adx_threshold,
+            "price_above_anchored_vwap": price_above_anchored_vwap,
+            "price_below_anchored_vwap": price_below_anchored_vwap,
+            "fractal_available": fractal_available,
+            "long_fractal_breakout": long_fractal_breakout,
+            "short_fractal_breakout": short_fractal_breakout,
         }
 
     def should_enter(self, row: dict) -> bool:
