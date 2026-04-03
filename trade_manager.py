@@ -101,6 +101,63 @@ class TradeManager:
         thresholds["open_count"] = open_count
         return thresholds
 
+    @staticmethod
+    def _trade_direction(outcome_side: str | None) -> str:
+        side = str(outcome_side or "").strip().upper()
+        if side in {"YES", "UP", "LONG", "BULLISH"}:
+            return "LONG"
+        if side in {"NO", "DOWN", "SHORT", "BEARISH"}:
+            return "SHORT"
+        return "NEUTRAL"
+
+    def _technical_exit_reason(self, trade: TradeLifecycle, technical_context: dict | None, minutes_open: float) -> str | None:
+        if not technical_context:
+            return None
+
+        min_minutes = self._env_int("TECHNICAL_EXIT_MIN_MINUTES", 10, minimum=0, maximum=10_000)
+        if minutes_open < min_minutes:
+            return None
+
+        direction = self._trade_direction(getattr(trade, "outcome_side", None))
+        if direction == "NEUTRAL":
+            return None
+
+        alligator_alignment = str(technical_context.get("alligator_alignment", "NEUTRAL") or "NEUTRAL").strip().upper()
+        price_above_vwap = bool(technical_context.get("price_above_anchored_vwap", False))
+        price_below_vwap = bool(technical_context.get("price_below_anchored_vwap", False))
+
+        try:
+            adx_value = float(technical_context.get("adx_value", 0.0) or 0.0)
+        except Exception:
+            adx_value = 0.0
+        try:
+            adx_threshold = float(technical_context.get("adx_threshold", 0.0) or 0.0)
+        except Exception:
+            adx_threshold = 0.0
+        try:
+            entry_adx_value = float(getattr(trade, "entry_adx_value", 0.0) or 0.0)
+        except Exception:
+            entry_adx_value = 0.0
+
+        opposite_alligator = (
+            (direction == "LONG" and alligator_alignment == "BEARISH")
+            or (direction == "SHORT" and alligator_alignment == "BULLISH")
+        )
+        vwap_recross = (
+            (direction == "LONG" and price_below_vwap)
+            or (direction == "SHORT" and price_above_vwap)
+        )
+        adx_floor = max(adx_threshold, entry_adx_value * 0.85 if entry_adx_value > 0 else 0.0)
+        adx_weakening = adx_value > 0 and adx_floor > 0 and adx_value < adx_floor
+
+        if opposite_alligator:
+            return "technical_alligator_reversal"
+        if vwap_recross:
+            return "technical_vwap_recross"
+        if adx_weakening:
+            return "technical_adx_weakening"
+        return None
+
     def _compose_trade_key(self, token_id=None, condition_id=None, outcome_side=None, market=None) -> Optional[str]:
         token_id = str(token_id).strip() if token_id not in [None, ""] else ""
         condition_id = str(condition_id).strip() if condition_id not in [None, ""] else ""
@@ -204,6 +261,7 @@ class TradeManager:
         persist_closed: bool = True,
         predictive_exit_targets: Dict[str, float] | None = None,
         trajectory_metrics: Dict[str, dict] | None = None,
+        technical_context: dict | None = None,
     ):
         closed_trades: List[TradeLifecycle] = []
         close_reasons: Dict[str, str] = {}
@@ -337,7 +395,9 @@ class TradeManager:
                 close_reason = "trajectory_liquidity_stress"
             elif close_reason is None and roi > 0 and bool(trajectory_signal.get("profit_lock_signal")):
                 close_reason = "trajectory_profit_lock"
-            elif close_reason is None and (entry_price - current_price) >= exit_thresholds["sl_delta"]:
+            if close_reason is None:
+                close_reason = self._technical_exit_reason(trade, technical_context, minutes_open)
+            if close_reason is None and (entry_price - current_price) >= exit_thresholds["sl_delta"]:
                 close_reason = "stop_loss"
             elif close_reason is None and minutes_open >= exit_thresholds["time_stop_minutes"]:
                 close_reason = "time_stop"

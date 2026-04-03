@@ -1,9 +1,9 @@
 import logging
 import os
 import time
-import requests
 import pandas as pd
 import numpy as np
+from candle_data_service import CandleDataService
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -15,11 +15,12 @@ class TechnicalAnalyzer:
     the macro trend configuration (e.g. above/below the 200-day SMA).
     """
 
-    def __init__(self, cache_ttl_seconds=300):
+    def __init__(self, cache_ttl_seconds=300, candle_data_service: CandleDataService | None = None):
         # Cache TA context briefly so intraday trend signals stay relevant.
         self.cache_ttl = cache_ttl_seconds
         self._cached_context = None
         self._last_fetch_time = 0
+        self.candle_data_service = candle_data_service or CandleDataService(symbol="BTCUSDT")
 
     def _safe_float(self, value, default=0.0):
         try:
@@ -132,23 +133,12 @@ class TechnicalAnalyzer:
             "fractal_entry_ready": False,
         }
 
-        url = "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=15m&limit=400"
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        if len(data) < 80:
-            return context
-
-        intraday = pd.DataFrame(
-            {
-                "open_time": pd.to_datetime([row[0] for row in data], unit="ms", utc=True, errors="coerce"),
-                "high": [self._safe_float(row[2], np.nan) for row in data],
-                "low": [self._safe_float(row[3], np.nan) for row in data],
-                "close": [self._safe_float(row[4], np.nan) for row in data],
-                "volume": [self._safe_float(row[5], np.nan) for row in data],
-            }
-        ).dropna(subset=["open_time", "high", "low", "close"])
-        if intraday.empty:
+        intraday = self.candle_data_service.refresh_latest_closed_candles(
+            "15m",
+            limit=400,
+            timezone_name="UTC",
+        )
+        if intraday is None or intraday.empty or len(intraday) < 80:
             return context
 
         intraday["median_price"] = (intraday["high"] + intraday["low"]) / 2.0
@@ -260,20 +250,17 @@ class TechnicalAnalyzer:
         }
         context.update(self._compute_intraday_trend_context())
 
-        url = "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1d&limit=250"
         try:
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-
-            if len(data) < 200:
+            daily_df = self.candle_data_service.refresh_latest_closed_candles(
+                "1d",
+                limit=250,
+                timezone_name="UTC",
+            )
+            if daily_df is None or daily_df.empty or len(daily_df) < 200:
                 logging.warning("TechnicalAnalyzer: Not enough daily candles returned to calculate 200 SMA.")
                 return context
 
-            # Binance Kline format: [Open time, Open, High, Low, Close, Volume, Close time, Quote asset volume, Number of trades, Taker buy base asset volume, Taker buy quote asset volume, Ignore]
-            # Extract just the Close prices
-            closes = [self._safe_float(candle[4]) for candle in data]
-            df = pd.DataFrame({"close": closes})
+            df = daily_df[["close"]].copy()
 
             # Calculate Moving Averages
             df["sma_200"] = df["close"].rolling(window=200).mean()
@@ -313,7 +300,8 @@ class TechnicalAnalyzer:
                 f"TechnicalAnalyzer Evaluated: Price=${current_price:.0f} | 200SMA=${sma_200:.0f} | "
                 f"Trend: {structure} | Distance to 200SMA: {distance:.2%} | "
                 f"Alligator={context.get('alligator_alignment')} | ADX={context.get('adx_value')} | "
-                f"AVWAP={context.get('anchored_vwap')} | Bias={context.get('btc_trend_bias')}"
+                f"AVWAP={context.get('anchored_vwap')} | Bias={context.get('btc_trend_bias')} | "
+                f"FractalReady={context.get('fractal_entry_ready')}"
             )
 
             self._cached_context = context
@@ -321,5 +309,5 @@ class TechnicalAnalyzer:
             return context
 
         except Exception as e:
-            logging.warning(f"TechnicalAnalyzer: Failed to fetch Binance klines: {e}")
+            logging.warning(f"TechnicalAnalyzer: Failed to fetch closed BTC candles: {e}")
             return context

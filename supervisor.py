@@ -3061,6 +3061,7 @@ def main_loop():
                 persist_closed=(trading_mode != "live"),
                 predictive_exit_targets=predictive_exit_targets,
                 trajectory_metrics=trajectory_metrics,
+                technical_context=ta_context,
             )
             if closed_trades:
                 logging.info("[%s] Processed %s closed trades.", trading_mode.upper(), len(closed_trades))

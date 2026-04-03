@@ -74,6 +74,12 @@ class TestFeatureLogic(unittest.TestCase):
             "price_below_anchored_vwap": False,
             "btc_trend_bias": "LONG",
             "btc_trend_confluence": 1.0,
+            "latest_bullish_fractal": 66550.0,
+            "latest_bearish_fractal": 65910.0,
+            "long_fractal_breakout": True,
+            "short_fractal_breakout": False,
+            "fractal_trigger_direction": "LONG",
+            "fractal_entry_ready": True,
         }
         market = {
             "condition_id": "cond_1",
@@ -98,6 +104,9 @@ class TestFeatureLogic(unittest.TestCase):
         self.assertEqual(row["adx_value"], 27.4)
         self.assertTrue(row["price_above_anchored_vwap"])
         self.assertEqual(row["btc_trend_bias"], "LONG")
+        self.assertEqual(row["latest_bullish_fractal"], 66550.0)
+        self.assertTrue(row["long_fractal_breakout"])
+        self.assertTrue(row["fractal_entry_ready"])
 
 
 if __name__ == "__main__":
