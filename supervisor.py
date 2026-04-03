@@ -643,6 +643,21 @@ run_scraper_cycle = safe_run_scraper_cycle
 fetch_btc_markets = safe_fetch_btc_markets
 # --------------------------------
 
+
+def choose_cycle_sleep_interval(
+    *,
+    open_positions_count: int,
+    entry_freeze_active: bool,
+    active_position_poll_seconds: float,
+    idle_poll_seconds: float,
+    entry_freeze_poll_seconds: float,
+) -> tuple[float, str]:
+    if int(open_positions_count or 0) > 0:
+        return max(1.0, float(active_position_poll_seconds)), "fast-polling active trades"
+    if bool(entry_freeze_active):
+        return max(1.0, float(entry_freeze_poll_seconds)), "entry freeze active; rechecking soon"
+    return max(1.0, float(idle_poll_seconds)), "idle market scan"
+
 def main_loop():
     """The continuous autonomous loop (research + paper-trading mode)."""
     logging.info("Initializing LIVE PolyMarket Supervisor...")
@@ -707,6 +722,13 @@ def main_loop():
         minimum=1,
         maximum=25,
     )
+    active_position_poll_seconds = _env_float("ACTIVE_POSITION_POLL_SECONDS", 5.0)
+    idle_poll_seconds = _env_float("IDLE_POLL_SECONDS", 15.0)
+    entry_freeze_poll_seconds = _env_float(
+        "ENTRY_FREEZE_POLL_SECONDS",
+        min(idle_poll_seconds, 10.0),
+    )
+    error_backoff_seconds = _env_float("ERROR_BACKOFF_SECONDS", 15.0)
     entry_rule = EntryRuleLayer(
         min_score=entry_min_score,
         max_spread=entry_max_spread,
@@ -721,6 +743,13 @@ def main_loop():
         entry_min_liquidity_score,
         target_entry_interval_minutes,
         entry_aggression_top_k,
+    )
+    logging.info(
+        "Loop cadence configured: active_poll=%.1fs idle_poll=%.1fs freeze_poll=%.1fs error_backoff=%.1fs",
+        active_position_poll_seconds,
+        idle_poll_seconds,
+        entry_freeze_poll_seconds,
+        error_backoff_seconds,
     )
     whale_tracker = WhaleTracker()
     alerts_engine = AlertsEngine()
@@ -3598,20 +3627,32 @@ def main_loop():
             else:
                 open_positions_count_for_sleep = len(open_positions_for_status)
 
-            if open_positions_count_for_sleep > 0:
-                logging.info("Cycle complete. Fast-polling active trades. Sleeping for 5 seconds...")
-                time.sleep(5)
-            else:
-                logging.info("Cycle complete. Sleeping for 60 seconds...")
-                time.sleep(60)
+            sleep_seconds, sleep_reason = choose_cycle_sleep_interval(
+                open_positions_count=open_positions_count_for_sleep,
+                entry_freeze_active=previous_entry_freeze_active,
+                active_position_poll_seconds=active_position_poll_seconds,
+                idle_poll_seconds=idle_poll_seconds,
+                entry_freeze_poll_seconds=entry_freeze_poll_seconds,
+            )
+            logging.info(
+                "Cycle complete. %s. Sleeping for %.1f seconds...",
+                sleep_reason.capitalize(),
+                sleep_seconds,
+            )
+            time.sleep(sleep_seconds)
 
         except KeyboardInterrupt:
             logging.info("Supervisor halted manually by user.")
             break
         except Exception as e:
             autonomous_monitor.write_failure("supervisor", str(e))
-            logging.error(f"Critical error in main loop: {e}. Relaxing for 60 seconds to respect API limits (Memory state is completely preserved).")
-            time.sleep(60)
+            logging.error(
+                "Critical error in main loop: %s. Relaxing for %.1f seconds to respect API limits "
+                "(Memory state is completely preserved).",
+                e,
+                error_backoff_seconds,
+            )
+            time.sleep(max(1.0, error_backoff_seconds))
 
 
 if __name__ == "__main__":
