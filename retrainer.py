@@ -156,6 +156,23 @@ class Retrainer:
         }
         logging.info("LATEST_RETRAIN_VERDICT %s", json.dumps(payload, separators=(",", ":"), sort_keys=True))
 
+    def _retrain_btc_forecast(self, candidate_weights_dir):
+        """Retrain BTC price forecast model if dataset exists."""
+        try:
+            from btc_forecast_model import BTCForecastModel
+            from btc_price_dataset import BTCPriceDatasetBuilder
+
+            builder = BTCPriceDatasetBuilder(logs_dir=str(self.logs_dir))
+            dataset = builder.load_dataset()
+            if dataset.empty or len(dataset) < 100:
+                logging.info("BTC forecast retrain skipped: dataset has %d rows (need >=100)", len(dataset))
+                return
+            model = BTCForecastModel(weights_dir=str(candidate_weights_dir), logs_dir=str(self.logs_dir))
+            metrics = model.train(dataset)
+            logging.info("BTC forecast retrained: %s", metrics)
+        except Exception as exc:
+            logging.warning("BTC forecast retrain failed (non-blocking): %s", exc)
+
     def _write_status(self, closed_rows: int, replay_rows: int, action: str):
         self.status_file.write_text(action + "\n", encoding="utf-8")
         progress_closed = round(closed_rows / self.closed_trade_threshold, 4) if self.closed_trade_threshold else 0
@@ -584,6 +601,7 @@ class Retrainer:
         Stage1Models(logs_dir=self.logs_dir, weights_dir=candidate_weights_dir).train()
         Stage2TemporalModels(logs_dir=self.logs_dir, weights_dir=candidate_weights_dir).train()
         train_model(timesteps=rl_timesteps, save_path=candidate_weights_dir / "ppo_polytrader")
+        self._retrain_btc_forecast(candidate_weights_dir)
 
         candidate_row, champion, error_message = self._build_candidate_registry_row(closed_rows, replay_rows)
         attempted_at = pd.Timestamp.utcnow().isoformat()
