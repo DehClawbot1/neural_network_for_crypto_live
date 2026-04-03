@@ -138,6 +138,10 @@ class Retrainer:
             "live_closed_trades": int(candidate_row.get("live_closed_trades", 0) or 0),
             "live_average_pnl": round(self._safe_float(candidate_row.get("live_average_pnl"), 0.0), 4),
             "live_profit_factor": round(self._safe_float(candidate_row.get("live_profit_factor"), 0.0), 4),
+            "live_learning_eligible_ratio": round(self._safe_float(candidate_row.get("live_learning_eligible_ratio"), 0.0), 4),
+            "live_entry_context_complete_ratio": round(self._safe_float(candidate_row.get("live_entry_context_complete_ratio"), 0.0), 4),
+            "live_unknown_signal_label_ratio": round(self._safe_float(candidate_row.get("live_unknown_signal_label_ratio"), 0.0), 4),
+            "live_operational_close_ratio": round(self._safe_float(candidate_row.get("live_operational_close_ratio"), 0.0), 4),
             "promotion_gate_passed": bool(candidate_row.get("promotion_gate_passed", False)),
             "promotion_gate_failures": candidate_row.get("promotion_gate_failures", ""),
         }
@@ -202,6 +206,10 @@ class Retrainer:
             "live_win_rate": self._safe_float(candidate_row.get("live_win_rate"), 0.0),
             "live_average_pnl": self._safe_float(candidate_row.get("live_average_pnl"), 0.0),
             "live_profit_factor": self._safe_float(candidate_row.get("live_profit_factor"), 0.0),
+            "live_learning_eligible_ratio": self._safe_float(candidate_row.get("live_learning_eligible_ratio"), 0.0),
+            "live_entry_context_complete_ratio": self._safe_float(candidate_row.get("live_entry_context_complete_ratio"), 0.0),
+            "live_unknown_signal_label_ratio": self._safe_float(candidate_row.get("live_unknown_signal_label_ratio"), 0.0),
+            "live_operational_close_ratio": self._safe_float(candidate_row.get("live_operational_close_ratio"), 0.0),
             "promotion_gate_passed": bool(candidate_row.get("promotion_gate_passed", False)),
             "promotion_gate_failures": candidate_row.get("promotion_gate_failures", ""),
             "status_schema": "base_retrainer_v3",
@@ -229,6 +237,10 @@ class Retrainer:
             "live_average_pnl": 0.0,
             "live_profit_factor": 0.0,
             "live_validation_window": 0,
+            "live_learning_eligible_ratio": 0.0,
+            "live_entry_context_complete_ratio": 0.0,
+            "live_unknown_signal_label_ratio": 0.0,
+            "live_operational_close_ratio": 0.0,
         }
         if closed_df.empty:
             return summary
@@ -249,6 +261,15 @@ class Retrainer:
 
         lookback = max(1, self._env_int("PROMOTION_LIVE_LOOKBACK_TRADES", 200))
         work = work.tail(lookback).copy()
+        learning_eligible_mask = work.get("learning_eligible", pd.Series(False, index=work.index)).astype(str).str.strip().str.lower().isin({"true", "1", "yes"})
+        complete_mask = work.get("entry_context_complete", pd.Series(False, index=work.index)).astype(str).str.strip().str.lower().isin({"true", "1", "yes"})
+        operational_mask = work.get("operational_close_flag", pd.Series(False, index=work.index)).astype(str).str.strip().str.lower().isin({"true", "1", "yes"})
+        signal_label = work.get("signal_label", pd.Series("", index=work.index)).fillna("").astype(str).str.strip().str.upper()
+        summary["live_learning_eligible_ratio"] = float(learning_eligible_mask.mean()) if len(work.index) else 0.0
+        summary["live_entry_context_complete_ratio"] = float(complete_mask.mean()) if len(work.index) else 0.0
+        summary["live_unknown_signal_label_ratio"] = float(signal_label.isin({"", "UNKNOWN"}).mean()) if len(work.index) else 0.0
+        summary["live_operational_close_ratio"] = float(operational_mask.mean()) if len(work.index) else 0.0
+        work = work[learning_eligible_mask & complete_mask].copy()
 
         pnl_column = "net_realized_pnl" if "net_realized_pnl" in work.columns else "realized_pnl"
         pnl = pd.to_numeric(work.get(pnl_column), errors="coerce").dropna()
@@ -271,6 +292,10 @@ class Retrainer:
         min_live_closed_trades = max(1, self._env_int("PROMOTION_MIN_LIVE_CLOSED_TRADES", 25))
         min_live_profit_factor = self._env_float("PROMOTION_MIN_LIVE_PROFIT_FACTOR", 1.00)
         min_live_average_pnl = self._env_float("PROMOTION_MIN_LIVE_AVERAGE_PNL", 0.0)
+        min_learning_eligible_ratio = self._env_float("PROMOTION_MIN_LEARNING_ELIGIBLE_RATIO", 0.65)
+        min_entry_context_complete_ratio = self._env_float("PROMOTION_MIN_ENTRY_CONTEXT_COMPLETE_RATIO", 0.80)
+        max_operational_close_ratio = self._env_float("PROMOTION_MAX_OPERATIONAL_CLOSE_RATIO", 0.30)
+        max_unknown_signal_label_ratio = self._env_float("PROMOTION_MAX_UNKNOWN_SIGNAL_LABEL_RATIO", 0.20)
 
         failures = []
         candidate_profit_factor = self._safe_float(candidate_row.get("profit_factor"), 0.0)
@@ -287,6 +312,10 @@ class Retrainer:
         live_closed_trades = int(candidate_row.get("live_closed_trades", 0) or 0)
         live_profit_factor = self._safe_float(candidate_row.get("live_profit_factor"), 0.0)
         live_average_pnl = self._safe_float(candidate_row.get("live_average_pnl"), 0.0)
+        live_learning_eligible_ratio = self._safe_float(candidate_row.get("live_learning_eligible_ratio"), 0.0)
+        live_entry_context_complete_ratio = self._safe_float(candidate_row.get("live_entry_context_complete_ratio"), 0.0)
+        live_operational_close_ratio = self._safe_float(candidate_row.get("live_operational_close_ratio"), 1.0)
+        live_unknown_signal_label_ratio = self._safe_float(candidate_row.get("live_unknown_signal_label_ratio"), 1.0)
         if live_closed_trades < min_live_closed_trades:
             failures.append(
                 f"live_closed_trades {live_closed_trades} < required {min_live_closed_trades}"
@@ -298,6 +327,22 @@ class Retrainer:
         if live_average_pnl <= min_live_average_pnl:
             failures.append(
                 f"live_average_pnl {live_average_pnl:.4f} <= required {min_live_average_pnl:.4f}"
+            )
+        if live_learning_eligible_ratio < min_learning_eligible_ratio:
+            failures.append(
+                f"live_learning_eligible_ratio {live_learning_eligible_ratio:.3f} < required {min_learning_eligible_ratio:.3f}"
+            )
+        if live_entry_context_complete_ratio < min_entry_context_complete_ratio:
+            failures.append(
+                f"live_entry_context_complete_ratio {live_entry_context_complete_ratio:.3f} < required {min_entry_context_complete_ratio:.3f}"
+            )
+        if live_operational_close_ratio > max_operational_close_ratio:
+            failures.append(
+                f"live_operational_close_ratio {live_operational_close_ratio:.3f} > allowed {max_operational_close_ratio:.3f}"
+            )
+        if live_unknown_signal_label_ratio > max_unknown_signal_label_ratio:
+            failures.append(
+                f"live_unknown_signal_label_ratio {live_unknown_signal_label_ratio:.3f} > allowed {max_unknown_signal_label_ratio:.3f}"
             )
 
         candidate_row["promotion_gate_passed"] = not failures

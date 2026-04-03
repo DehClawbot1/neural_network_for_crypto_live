@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from pnl_engine import PNLEngine
+from trade_quality import build_quality_context
 
 
 class TradeState(str, Enum):
@@ -42,6 +43,24 @@ class TradeLifecycle:
     entry_adx_threshold: float = 0.0
     entry_anchored_vwap: float = 0.0
     entry_fractal_trigger_direction: str = "NEUTRAL"
+    entry_model_family: str = ""
+    entry_model_version: str = ""
+    performance_governor_level: int = 0
+    market_family: str = "other"
+    horizon_bucket: str = "unknown"
+    liquidity_bucket: str = "unknown"
+    volatility_bucket: str = "unknown"
+    technical_regime_bucket: str = "neutral"
+    entry_context_complete: bool = False
+    operational_close_flag: bool = False
+    learning_eligible: bool = False
+    exit_reason_family: str = "unknown"
+    intended_exit_reason: str | None = None
+    actual_execution_path: str | None = None
+    exit_fill_latency_seconds: float = 0.0
+    exit_cancel_count: int = 0
+    exit_partial_fill_ratio: float = 0.0
+    exit_realized_slippage_bps: float = 0.0
     max_adverse_excursion_pct: float = 0.0
     max_favorable_excursion_pct: float = 0.0
     max_drawdown_from_peak_pct: float = 0.0
@@ -77,6 +96,18 @@ class TradeLifecycle:
         self.entry_adx_threshold = float(signal_row.get("adx_threshold", 0.0) or 0.0)
         self.entry_anchored_vwap = float(signal_row.get("anchored_vwap", 0.0) or 0.0)
         self.entry_fractal_trigger_direction = str(signal_row.get("fractal_trigger_direction", "NEUTRAL") or "NEUTRAL")
+        self.entry_model_family = str(signal_row.get("entry_model_family", "") or "")
+        self.entry_model_version = str(signal_row.get("entry_model_version", "") or "")
+        self.performance_governor_level = int(signal_row.get("performance_governor_level", 0) or 0)
+        quality_context = build_quality_context(signal_row)
+        self.market_family = str(signal_row.get("market_family", quality_context.get("market_family", "other")) or "other")
+        self.horizon_bucket = str(signal_row.get("horizon_bucket", quality_context.get("horizon_bucket", "unknown")) or "unknown")
+        self.liquidity_bucket = str(signal_row.get("liquidity_bucket", quality_context.get("liquidity_bucket", "unknown")) or "unknown")
+        self.volatility_bucket = str(signal_row.get("volatility_bucket", quality_context.get("volatility_bucket", "unknown")) or "unknown")
+        self.technical_regime_bucket = str(signal_row.get("technical_regime_bucket", quality_context.get("technical_regime_bucket", "neutral")) or "neutral")
+        self.entry_context_complete = bool(
+            signal_row.get("entry_context_complete", quality_context.get("entry_context_complete", False))
+        )
 
     def enter(self, size_usdc: float, entry_price: float):
         self.size_usdc = float(size_usdc)
@@ -177,6 +208,25 @@ class TradeLifecycle:
         # self.size_usdc = 0.0
         self.state = TradeState.CLOSED
         self.close_reason = reason
+        quality_context = build_quality_context(
+            {
+                "close_reason": reason,
+                "signal_label": self.signal_label,
+                "confidence_at_entry": self.confidence_at_entry,
+                "entry_model_family": self.entry_model_family,
+                "entry_model_version": self.entry_model_version,
+                "market_family": self.market_family,
+                "horizon_bucket": self.horizon_bucket,
+                "liquidity_bucket": self.liquidity_bucket,
+                "volatility_bucket": self.volatility_bucket,
+                "technical_regime_bucket": self.technical_regime_bucket,
+            }
+        )
+        self.exit_reason_family = quality_context.get("exit_reason_family", "unknown")
+        self.operational_close_flag = bool(quality_context.get("operational_close_flag", False))
+        self.entry_context_complete = bool(quality_context.get("entry_context_complete", self.entry_context_complete))
+        self.learning_eligible = bool(quality_context.get("learning_eligible", False))
+        self.intended_exit_reason = self.intended_exit_reason or reason
         self.ledger.append({
             "event": "close",
             "timestamp": self.closed_at,

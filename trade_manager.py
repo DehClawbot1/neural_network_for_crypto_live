@@ -12,6 +12,7 @@ import pandas as pd
 from balance_normalization import maybe_trace_allowance_payload
 from db import Database
 from trade_lifecycle import TradeLifecycle, TradeState
+from trade_quality import build_quality_context, classify_exit_reason_family
 from config import TradingConfig
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,33 @@ class TradeManager:
         if side in {"NO", "DOWN", "SHORT", "BEARISH"}:
             return "SHORT"
         return "NEUTRAL"
+
+    def _apply_closed_trade_metadata(self, trade: TradeLifecycle):
+        quality_context = build_quality_context(
+            {
+                "market": trade.market,
+                "signal_label": getattr(trade, "signal_label", None),
+                "confidence_at_entry": getattr(trade, "confidence_at_entry", None),
+                "entry_model_family": getattr(trade, "entry_model_family", None),
+                "entry_model_version": getattr(trade, "entry_model_version", None),
+                "market_family": getattr(trade, "market_family", None),
+                "horizon_bucket": getattr(trade, "horizon_bucket", None),
+                "liquidity_bucket": getattr(trade, "liquidity_bucket", None),
+                "volatility_bucket": getattr(trade, "volatility_bucket", None),
+                "technical_regime_bucket": getattr(trade, "technical_regime_bucket", None),
+                "close_reason": getattr(trade, "close_reason", None),
+            }
+        )
+        trade.market_family = quality_context.get("market_family", getattr(trade, "market_family", "other"))
+        trade.horizon_bucket = quality_context.get("horizon_bucket", getattr(trade, "horizon_bucket", "unknown"))
+        trade.liquidity_bucket = quality_context.get("liquidity_bucket", getattr(trade, "liquidity_bucket", "unknown"))
+        trade.volatility_bucket = quality_context.get("volatility_bucket", getattr(trade, "volatility_bucket", "unknown"))
+        trade.technical_regime_bucket = quality_context.get("technical_regime_bucket", getattr(trade, "technical_regime_bucket", "neutral"))
+        trade.exit_reason_family = quality_context.get("exit_reason_family", classify_exit_reason_family(getattr(trade, "close_reason", None)))
+        trade.operational_close_flag = bool(quality_context.get("operational_close_flag", False))
+        trade.entry_context_complete = bool(quality_context.get("entry_context_complete", False))
+        trade.learning_eligible = bool(quality_context.get("learning_eligible", False))
+        return trade
 
     def _technical_exit_reason(self, trade: TradeLifecycle, technical_context: dict | None, minutes_open: float) -> str | None:
         if not technical_context:
@@ -380,32 +408,37 @@ class TradeManager:
                 pass # Safely ignore if API rate limits or client ref not found
             # -------------------------------------------------------
 
-            # Keep external/manual-close reason sticky: do not overwrite with rule exits.
-            if close_reason is None and roi >= exit_thresholds["tp_roi"]:
+            hard_emergency_delta = self._env_float("EXIT_HARD_EMERGENCY_DELTA", 0.035, minimum=0.001, maximum=1.0)
+            if close_reason is None and (entry_price - current_price) >= hard_emergency_delta:
+                close_reason = "hard_emergency_stop"
+            elif close_reason is None and bool(trajectory_signal.get("panic_exit_signal")):
+                close_reason = "trajectory_panic_exit"
+            elif close_reason is None and (entry_price - current_price) >= exit_thresholds["sl_delta"]:
+                close_reason = "stop_loss"
+            elif close_reason is None and bool(trajectory_signal.get("reversal_exit_signal")):
+                close_reason = "trajectory_reversal_exit"
+            elif close_reason is None:
+                close_reason = self._technical_exit_reason(trade, technical_context, minutes_open)
+            if close_reason is None and minutes_open >= exit_thresholds["time_stop_minutes"]:
+                close_reason = "time_stop"
+            elif close_reason is None and roi >= exit_thresholds["tp_roi"]:
                 close_reason = "take_profit_roi"
             elif close_reason is None and (current_price - entry_price) >= exit_thresholds["tp_delta"]:
                 close_reason = "take_profit_price_move"
             elif close_reason is None and predicted_target_price is not None and current_price >= predicted_target_price:
                 close_reason = "take_profit_model_target"
-            elif close_reason is None and bool(trajectory_signal.get("panic_exit_signal")):
-                close_reason = "trajectory_panic_exit"
-            elif close_reason is None and bool(trajectory_signal.get("reversal_exit_signal")):
-                close_reason = "trajectory_reversal_exit"
+            elif close_reason is None and trailing_drop >= exit_thresholds["trailing_stop"] and minutes_open > 15:
+                close_reason = "trailing_stop"
             elif close_reason is None and roi > 0 and bool(trajectory_signal.get("liquidity_stress_signal")):
                 close_reason = "trajectory_liquidity_stress"
             elif close_reason is None and roi > 0 and bool(trajectory_signal.get("profit_lock_signal")):
                 close_reason = "trajectory_profit_lock"
-            if close_reason is None:
-                close_reason = self._technical_exit_reason(trade, technical_context, minutes_open)
-            if close_reason is None and (entry_price - current_price) >= exit_thresholds["sl_delta"]:
-                close_reason = "stop_loss"
-            elif close_reason is None and minutes_open >= exit_thresholds["time_stop_minutes"]:
-                close_reason = "time_stop"
-            elif close_reason is None and trailing_drop >= exit_thresholds["trailing_stop"] and minutes_open > 15:
-                close_reason = "trailing_stop"
 
             if close_reason:
+                trade.intended_exit_reason = close_reason
+                trade.actual_execution_path = trade.actual_execution_path or "rule_exit_pending_execution"
                 trade.close(current_price, reason=close_reason)
+                self._apply_closed_trade_metadata(trade)
                 logger.info("[->] Closed trade for %s (%s). Reason: %s. PnL: %.4f",
                             trade.market, trade.outcome_side, close_reason, trade.realized_pnl)
                 closed_trades.append(trade)
@@ -533,6 +566,24 @@ class TradeManager:
             "confidence": trade.confidence_at_entry,
             "confidence_at_entry": trade.confidence_at_entry,
             "signal_label": trade.signal_label,
+            "entry_model_family": getattr(trade, "entry_model_family", ""),
+            "entry_model_version": getattr(trade, "entry_model_version", ""),
+            "performance_governor_level": getattr(trade, "performance_governor_level", 0),
+            "market_family": getattr(trade, "market_family", "other"),
+            "horizon_bucket": getattr(trade, "horizon_bucket", "unknown"),
+            "liquidity_bucket": getattr(trade, "liquidity_bucket", "unknown"),
+            "volatility_bucket": getattr(trade, "volatility_bucket", "unknown"),
+            "technical_regime_bucket": getattr(trade, "technical_regime_bucket", "neutral"),
+            "entry_context_complete": getattr(trade, "entry_context_complete", False),
+            "learning_eligible": getattr(trade, "learning_eligible", False),
+            "operational_close_flag": getattr(trade, "operational_close_flag", False),
+            "exit_reason_family": getattr(trade, "exit_reason_family", "unknown"),
+            "intended_exit_reason": getattr(trade, "intended_exit_reason", None),
+            "actual_execution_path": getattr(trade, "actual_execution_path", None),
+            "exit_fill_latency_seconds": getattr(trade, "exit_fill_latency_seconds", 0.0),
+            "exit_cancel_count": getattr(trade, "exit_cancel_count", 0),
+            "exit_partial_fill_ratio": getattr(trade, "exit_partial_fill_ratio", 0.0),
+            "exit_realized_slippage_bps": getattr(trade, "exit_realized_slippage_bps", 0.0),
             "mark_price": trade.current_price,
             "best_bid": None,
             "best_ask": None,
@@ -626,6 +677,24 @@ class TradeManager:
         row["close_fingerprint"] = close_fingerprint
         row["is_reconciliation_close"] = str(trade.close_reason or "").strip().lower() == "external_manual_close"
         row["lifecycle_source"] = "trade_manager_closed"
+        row["entry_model_family"] = getattr(trade, "entry_model_family", "")
+        row["entry_model_version"] = getattr(trade, "entry_model_version", "")
+        row["performance_governor_level"] = getattr(trade, "performance_governor_level", 0)
+        row["market_family"] = getattr(trade, "market_family", "other")
+        row["horizon_bucket"] = getattr(trade, "horizon_bucket", "unknown")
+        row["liquidity_bucket"] = getattr(trade, "liquidity_bucket", "unknown")
+        row["volatility_bucket"] = getattr(trade, "volatility_bucket", "unknown")
+        row["technical_regime_bucket"] = getattr(trade, "technical_regime_bucket", "neutral")
+        row["entry_context_complete"] = getattr(trade, "entry_context_complete", False)
+        row["learning_eligible"] = getattr(trade, "learning_eligible", False)
+        row["operational_close_flag"] = getattr(trade, "operational_close_flag", False)
+        row["exit_reason_family"] = getattr(trade, "exit_reason_family", classify_exit_reason_family(trade.close_reason))
+        row["intended_exit_reason"] = getattr(trade, "intended_exit_reason", trade.close_reason)
+        row["actual_execution_path"] = getattr(trade, "actual_execution_path", "local_rule_close")
+        row["exit_fill_latency_seconds"] = getattr(trade, "exit_fill_latency_seconds", 0.0)
+        row["exit_cancel_count"] = getattr(trade, "exit_cancel_count", 0)
+        row["exit_partial_fill_ratio"] = getattr(trade, "exit_partial_fill_ratio", 0.0)
+        row["exit_realized_slippage_bps"] = getattr(trade, "exit_realized_slippage_bps", 0.0)
         return row
 
     def _ledger_presence_key(self, row: dict) -> str:
@@ -788,6 +857,11 @@ class TradeManager:
                 "market_value", "unrealized_pnl", "realized_pnl",
                 "net_realized_pnl", "opened_at", "status",
                 "confidence", "confidence_at_entry", "signal_label",
+                "entry_model_family", "entry_model_version", "performance_governor_level",
+                "market_family", "horizon_bucket", "liquidity_bucket", "volatility_bucket", "technical_regime_bucket",
+                "entry_context_complete", "learning_eligible", "operational_close_flag", "exit_reason_family",
+                "intended_exit_reason", "actual_execution_path", "exit_fill_latency_seconds", "exit_cancel_count",
+                "exit_partial_fill_ratio", "exit_realized_slippage_bps",
                 "mark_price", "best_bid", "best_ask", "spread", "mid_price", "spread_pct", "mark_source",
                 "trajectory_state", "drawdown_from_peak", "recent_return_3", "runup_from_entry",
                 "volatility_short", "fallback_ratio",
@@ -864,6 +938,42 @@ class TradeManager:
             df["confidence_at_entry"] = df["confidence"]
         if "signal_label" not in df.columns:
             df["signal_label"] = None
+        if "entry_model_family" not in df.columns:
+            df["entry_model_family"] = ""
+        if "entry_model_version" not in df.columns:
+            df["entry_model_version"] = ""
+        if "performance_governor_level" not in df.columns:
+            df["performance_governor_level"] = 0
+        if "market_family" not in df.columns:
+            df["market_family"] = "other"
+        if "horizon_bucket" not in df.columns:
+            df["horizon_bucket"] = "unknown"
+        if "liquidity_bucket" not in df.columns:
+            df["liquidity_bucket"] = "unknown"
+        if "volatility_bucket" not in df.columns:
+            df["volatility_bucket"] = "unknown"
+        if "technical_regime_bucket" not in df.columns:
+            df["technical_regime_bucket"] = "neutral"
+        if "entry_context_complete" not in df.columns:
+            df["entry_context_complete"] = False
+        if "learning_eligible" not in df.columns:
+            df["learning_eligible"] = False
+        if "operational_close_flag" not in df.columns:
+            df["operational_close_flag"] = False
+        if "exit_reason_family" not in df.columns:
+            df["exit_reason_family"] = "unknown"
+        if "intended_exit_reason" not in df.columns:
+            df["intended_exit_reason"] = None
+        if "actual_execution_path" not in df.columns:
+            df["actual_execution_path"] = None
+        if "exit_fill_latency_seconds" not in df.columns:
+            df["exit_fill_latency_seconds"] = 0.0
+        if "exit_cancel_count" not in df.columns:
+            df["exit_cancel_count"] = 0
+        if "exit_partial_fill_ratio" not in df.columns:
+            df["exit_partial_fill_ratio"] = 0.0
+        if "exit_realized_slippage_bps" not in df.columns:
+            df["exit_realized_slippage_bps"] = 0.0
         if "close_reason" not in df.columns:
             df["close_reason"] = None
         if "exit_price" not in df.columns:
@@ -914,6 +1024,7 @@ class TradeManager:
             return
         rows = []
         for trade in closed_trades:
+            self._apply_closed_trade_metadata(trade)
             rows.append(self._build_closed_trade_row(trade))
         self._append_closed_rows(rows)
 

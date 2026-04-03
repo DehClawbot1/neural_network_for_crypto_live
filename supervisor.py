@@ -66,6 +66,10 @@ from macro_analyzer import MacroAnalyzer
 from onchain_analyzer import OnChainAnalyzer
 from trade_feedback_learner import TradeFeedbackLearner
 from position_telemetry import PositionTelemetry
+from performance_governor import PerformanceGovernor
+from trade_lifecycle_audit import TradeLifecycleAuditor
+from benchmark_strategy import BenchmarkStrategy
+from trade_quality import build_quality_context
 try:
     from inference_runtime_guard import (
         reset_cycle as _reset_inference_runtime_guard,
@@ -739,6 +743,29 @@ def main_loop():
     retrainer = Retrainer()
     feedback_learner = TradeFeedbackLearner()
     position_telemetry = PositionTelemetry()
+    performance_governor = PerformanceGovernor(logs_dir="logs")
+    lifecycle_auditor = TradeLifecycleAuditor(logs_dir="logs")
+    benchmark_strategy = BenchmarkStrategy(logs_dir="logs")
+    def _get_active_model_version():
+        registry_path = Path("weights/model_registry.csv")
+        if not registry_path.exists():
+            return ""
+        try:
+            registry_df = pd.read_csv(registry_path, engine="python", on_bad_lines="skip")
+        except Exception:
+            return ""
+        if registry_df.empty:
+            return ""
+        if "activation_status" in registry_df.columns:
+            promoted = registry_df[registry_df["activation_status"].astype(str).str.strip().str.lower() == "promoted"]
+            if not promoted.empty:
+                registry_df = promoted
+        sort_col = "promoted_at" if "promoted_at" in registry_df.columns else "attempted_at" if "attempted_at" in registry_df.columns else None
+        if sort_col is not None:
+            registry_df[sort_col] = pd.to_datetime(registry_df[sort_col], errors="coerce", utc=True)
+            registry_df = registry_df.sort_values(sort_col)
+        latest = registry_df.iloc[-1].to_dict()
+        return str(latest.get("model_version", "") or "")
     def _refresh_runtime_model_handles(reason="runtime_artifacts_reloaded"):
         nonlocal entry_brain, position_brain, legacy_brain
         nonlocal entry_model_name, position_model_name
@@ -1661,6 +1688,15 @@ def main_loop():
             scored_df = feedback_learner.apply_to_scored_df(scored_df, signal_engine)
             if scored_df is not None: scored_df = scored_df.loc[:, ~scored_df.columns.duplicated()].copy()
             if scored_df is not None and not scored_df.empty: scored_df = scored_df.loc[:, ~scored_df.columns.duplicated()]
+            if scored_df is not None and not scored_df.empty:
+                scored_df["entry_model_family"] = "runtime_live_stack"
+                scored_df["entry_model_version"] = _get_active_model_version()
+                scored_df["performance_governor_level"] = 0
+                scored_df["market_family"] = scored_df.apply(lambda row: build_quality_context(row.to_dict()).get("market_family", "other"), axis=1)
+                scored_df["horizon_bucket"] = scored_df.apply(lambda row: build_quality_context(row.to_dict()).get("horizon_bucket", "unknown"), axis=1)
+                scored_df["liquidity_bucket"] = scored_df.apply(lambda row: build_quality_context(row.to_dict()).get("liquidity_bucket", "unknown"), axis=1)
+                scored_df["volatility_bucket"] = scored_df.apply(lambda row: build_quality_context(row.to_dict()).get("volatility_bucket", "unknown"), axis=1)
+                scored_df["technical_regime_bucket"] = scored_df.apply(lambda row: build_quality_context(row.to_dict()).get("technical_regime_bucket", "neutral"), axis=1)
 
             if shadow_purgatory is not None:
                 try:
@@ -1762,6 +1798,12 @@ def main_loop():
                 )
 
             _refresh_local_active_trade_state()
+            governor_state = performance_governor.evaluate()
+            active_model_version = _get_active_model_version()
+            try:
+                benchmark_strategy.evaluate_cycle(ta_context, governor_state=governor_state)
+            except Exception as exc:
+                logging.warning("Benchmark/governor cycle failed: %s", exc)
 
             cached_entry_available_balance: float | None = None
 
@@ -1889,6 +1931,10 @@ def main_loop():
                         "remaining_exchange_shares": initial_available_shares,
                         "attempts": [],
                         "analysis": {},
+                        "elapsed_seconds": 0.0,
+                        "cancel_count": 0,
+                        "partial_fill_ratio": 0.0,
+                        "slippage_bps": 0.0,
                     }
 
                 per_attempt_timeout = max(2.0, float(os.getenv("LIVE_EXIT_ATTEMPT_TIMEOUT_SECONDS", "6") or 6))
@@ -1897,6 +1943,8 @@ def main_loop():
                 filled_total_shares = 0.0
                 filled_total_notional = 0.0
                 available_before = initial_available_shares
+                cancel_count = 0
+                started_at = datetime.now(timezone.utc)
 
                 for attempt_index, attempt_price in enumerate(ladder_prices, start=1):
                     remaining_target_shares = min(max(requested_shares - filled_total_shares, 0.0), available_before)
@@ -1941,6 +1989,7 @@ def main_loop():
                         )
                         try:
                             order_manager.cancel_stale_order(exit_order_id)
+                            cancel_count += 1
                         except Exception as exc:
                             logging.warning("Failed to cancel stale live exit order %s: %s", exit_order_id, exc)
 
@@ -1974,6 +2023,11 @@ def main_loop():
 
                 remaining_exchange_shares = _get_live_available_token_shares(token_id)
                 avg_fill_price = (filled_total_notional / filled_total_shares) if filled_total_shares > 0 else fallback_price
+                elapsed_seconds = max(0.0, (datetime.now(timezone.utc) - started_at).total_seconds())
+                partial_fill_ratio = float(filled_total_shares / requested_shares) if requested_shares > 1e-9 else 0.0
+                slippage_bps = 0.0
+                if reference_price and avg_fill_price:
+                    slippage_bps = ((float(reference_price) - float(avg_fill_price)) / max(float(reference_price), 1e-9)) * 10_000.0
                 return {
                     "status": "filled" if filled_total_shares >= (requested_shares - 1e-6) else ("partial" if filled_total_shares > 0 else "unfilled"),
                     "filled_shares": float(filled_total_shares),
@@ -1981,7 +2035,22 @@ def main_loop():
                     "remaining_exchange_shares": float(remaining_exchange_shares),
                     "attempts": attempts,
                     "analysis": analysis,
+                    "elapsed_seconds": float(elapsed_seconds),
+                    "cancel_count": int(cancel_count),
+                    "partial_fill_ratio": float(partial_fill_ratio),
+                    "slippage_bps": float(slippage_bps),
                 }
+
+            def _apply_exit_execution_metrics(trade, exit_result, intended_reason: str, reference_price: float):
+                if trade is None:
+                    return
+                trade.intended_exit_reason = intended_reason
+                status = str((exit_result or {}).get("status", "unknown") or "unknown")
+                trade.actual_execution_path = f"live_exit_{status}"
+                trade.exit_fill_latency_seconds = float((exit_result or {}).get("elapsed_seconds", 0.0) or 0.0)
+                trade.exit_cancel_count = int((exit_result or {}).get("cancel_count", 0) or 0)
+                trade.exit_partial_fill_ratio = float((exit_result or {}).get("partial_fill_ratio", 0.0) or 0.0)
+                trade.exit_realized_slippage_bps = float((exit_result or {}).get("slippage_bps", 0.0) or 0.0)
             live_entry_freeze = pre_cycle_entry_freeze
             freeze_reason = pre_cycle_freeze_reason
             freeze_detail = pre_cycle_freeze_detail or {}
@@ -2090,7 +2159,12 @@ def main_loop():
                     "order_id": str(order_id) if order_id is not None else None,
                     "created_at": datetime.now(timezone.utc).isoformat(),
                 }
-                details_json = json.dumps(extra or {}, default=str, separators=(",", ":"))
+                detail_payload = dict(extra or {})
+                detail_payload.setdefault("performance_governor_level", int(governor_state.get("governor_level", 0) or 0))
+                detail_payload.setdefault("performance_governor_reason", governor_state.get("reason", ""))
+                detail_payload.setdefault("entry_model_version", active_model_version)
+                detail_payload.setdefault("entry_model_family", "runtime_live_stack")
+                details_json = json.dumps(detail_payload, default=str, separators=(",", ":"))
                 try:
                     db.execute(
                         """
@@ -2440,6 +2514,48 @@ def main_loop():
                         )
                         continue
                     confidence = _safe_float(signal_row.get("confidence", 0.0), default=0.0)
+                    signal_row["performance_governor_level"] = int(governor_state.get("governor_level", 0) or 0)
+                    signal_row["entry_model_family"] = "runtime_live_stack"
+                    signal_row["entry_model_version"] = active_model_version
+                    signal_row["entry_context_complete"] = bool(
+                        signal_row.get("signal_label") not in [None, "", "UNKNOWN"] and confidence > 0 and bool(active_model_version)
+                    )
+                    governor_min_conf = float(governor_state.get("min_confidence", 0.0) or 0.0)
+                    if governor_min_conf > 0 and confidence < governor_min_conf:
+                        _log_candidate_skip(
+                            signal_row,
+                            "performance_governor_min_confidence",
+                            gate="performance_governor",
+                            model_action=action_map.get(action_val, "UNKNOWN"),
+                            governor_level=int(governor_state.get("governor_level", 0) or 0),
+                            required_confidence=round(governor_min_conf, 4),
+                        )
+                        continue
+                    governor_min_liquidity = float(governor_state.get("min_liquidity_score", 0.0) or 0.0)
+                    liquidity_score = _safe_float(
+                        signal_row.get("liquidity_score", signal_row.get("liquidity_depth_score", signal_row.get("market_liquidity_score", 1.0))),
+                        default=1.0,
+                    )
+                    if governor_min_liquidity > 0 and liquidity_score < governor_min_liquidity:
+                        _log_candidate_skip(
+                            signal_row,
+                            "performance_governor_liquidity_floor",
+                            gate="performance_governor",
+                            model_action=action_map.get(action_val, "UNKNOWN"),
+                            governor_level=int(governor_state.get("governor_level", 0) or 0),
+                            liquidity_score=round(liquidity_score, 4),
+                            required_liquidity_score=round(governor_min_liquidity, 4),
+                        )
+                        continue
+                    if bool(governor_state.get("top_signal_only")) and str(signal_row.get("signal_label", "") or "") != "HIGHEST-RANKED PAPER SIGNAL":
+                        _log_candidate_skip(
+                            signal_row,
+                            "performance_governor_top_signal_only",
+                            gate="performance_governor",
+                            model_action=action_map.get(action_val, "UNKNOWN"),
+                            governor_level=int(governor_state.get("governor_level", 0) or 0),
+                        )
+                        continue
 
                     # ── Get balance (with paper mode fallback) ──
                     _available_bal = _get_entry_available_balance()
@@ -2454,6 +2570,7 @@ def main_loop():
                         confidence=confidence,
                         current_exposure=_current_exposure,
                     )
+                    size_usdc *= float(governor_state.get("size_multiplier", 1.0) or 1.0)
                     min_bet_usdc = float(getattr(TradingConfig, "MIN_BET_USDC", 1.0))
                     configured_min_entry = max(
                         min_bet_usdc,
@@ -2477,6 +2594,9 @@ def main_loop():
                         # strategic floor rejects every entry. Fall back to the
                         # exchange minimum when the risk cap itself sits below the
                         # strategic anti-micro threshold.
+                        effective_min_entry = min_bet_usdc
+                    if bool(governor_state.get("force_min_size")):
+                        size_usdc = min_bet_usdc
                         effective_min_entry = min_bet_usdc
                     if size_usdc <= 0:
                         logging.info(
@@ -2665,6 +2785,7 @@ def main_loop():
                             condition_id=signal_row.get("condition_id"),
                             outcome_side=signal_row.get("outcome_side", signal_row.get("side", "YES")),
                         )
+                        trade.on_signal(signal_row)
                         trade.confidence_at_entry = confidence # BUG 6 FIX
                         trade.signal_label = signal_row.get("signal_label", "UNKNOWN")
                         trade.enter(size_usdc=size_usdc, entry_price=actual_fill_price)
@@ -3018,6 +3139,7 @@ def main_loop():
                                 actual_fill_size = min(float(exit_result.get("filled_shares", 0.0) or 0.0), pre_exit_shares)
                                 if actual_fill_size > 1e-6:
                                     actual_fill_price = float(exit_result.get("avg_price", exit_price) or exit_price)
+                                    _apply_exit_execution_metrics(trade, exit_result, "rl_exit", exit_price)
                                     log_live_fill_event(pos_dict, actual_fill_price, actual_fill_size, action_type="LIVE_EXIT")
                                     if actual_fill_size >= pre_exit_shares - 1e-6:
                                         trade.close(exit_price=actual_fill_price, reason="rl_exit") # Update TradeLifecycle
@@ -3043,6 +3165,8 @@ def main_loop():
                             else:
                                 logging.warning("Live EXIT skipped for %s due to invalid exit price/size", token_id)
                         else:
+                            trade.actual_execution_path = "paper_rl_exit"
+                            trade.intended_exit_reason = "rl_exit"
                             trade.close(exit_price=trade.current_price, reason="rl_exit") # FIX M2: real reason
                             logging.info("Paper EXIT for %s. Realized PnL: %.2f", token_id, trade.realized_pnl)
                             trade_manager.active_trades.pop(_make_position_key(token_id=trade.token_id, condition_id=trade.condition_id, outcome_side=trade.outcome_side, market=trade.market), None) # Remove from active trades
@@ -3122,6 +3246,7 @@ def main_loop():
                             _filled_ct_shares = min(float(_exit_result.get("filled_shares", 0.0) or 0.0), _pre_ct_shares)
                             if _filled_ct_shares > 1e-6:
                                 _actual_exit_price = float(_exit_result.get("avg_price", _exit_p) or _exit_p)
+                                _apply_exit_execution_metrics(ct, _exit_result, getattr(ct, "close_reason", None) or "policy_exit", _exit_p)
                                 log_live_fill_event(
                                     {"token_id": _ct_token, "market_title": ct.market, "outcome_side": ct.outcome_side, "current_price": _actual_exit_price},
                                     _actual_exit_price,
@@ -3163,6 +3288,10 @@ def main_loop():
                         _money_mgr.record_loss(ct.realized_pnl)
             finalized_closed_trades = [ct for ct in closed_trades if getattr(ct, "state", None) == TradeState.CLOSED]
             closed_trade_feedback_count = feedback_learner.record_closed_trades(finalized_closed_trades)
+            try:
+                lifecycle_auditor.build_reports()
+            except Exception as exc:
+                logging.warning("Trade lifecycle audit failed: %s", exc)
 
             # 5. Phase 2 analytics outputs
             trades_df = safe_read_csv(EXECUTION_FILE)

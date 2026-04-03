@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from db import Database
+from trade_quality import build_quality_context
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -320,6 +321,14 @@ class TradeFeedbackLearner:
         min_samples = max(2, int(os.getenv("TRADE_FEEDBACK_MIN_SAMPLES", "3") or 3))
 
         work = reports_df.copy()
+        if "learning_eligible" in work.columns:
+            eligible_mask = work["learning_eligible"].astype(str).str.strip().str.lower().isin({"true", "1", "yes"})
+            work = work[eligible_mask].copy()
+        if "entry_context_complete" in work.columns:
+            complete_mask = work["entry_context_complete"].astype(str).str.strip().str.lower().isin({"true", "1", "yes"})
+            work = work[complete_mask].copy()
+        if work.empty:
+            return pd.DataFrame()
         if "closed_at" in work.columns:
             work["closed_at"] = pd.to_datetime(work["closed_at"], utc=True, errors="coerce")
             work = work.sort_values("closed_at")
@@ -334,13 +343,15 @@ class TradeFeedbackLearner:
             "generated_at": datetime.now(timezone.utc).isoformat(),
         })
 
-        if "signal_label" in recent.columns:
-            for signal_label, group in recent.groupby("signal_label", dropna=True):
+        for scope in ["signal_label", "market_family", "horizon_bucket", "liquidity_bucket", "volatility_bucket", "technical_regime_bucket", "exit_reason_family"]:
+            if scope not in recent.columns:
+                continue
+            for scope_value, group in recent.groupby(scope, dropna=True):
                 if len(group.index) < min_samples:
                     continue
                 summary_rows.append({
-                    "scope": "signal_label",
-                    "scope_value": str(signal_label),
+                    "scope": scope,
+                    "scope_value": str(scope_value),
                     **self._compute_feedback_factors(group),
                     "generated_at": datetime.now(timezone.utc).isoformat(),
                 })
@@ -560,42 +571,45 @@ class TradeFeedbackLearner:
             if not overall.empty:
                 overall_row = overall.iloc[0].to_dict()
 
-        label_rows = {}
-        label_df = summary_df[summary_df.get("scope") == "signal_label"] if "scope" in summary_df.columns else pd.DataFrame()
-        if not label_df.empty:
-            label_rows = {
-                str(row.get("scope_value")): row.to_dict()
-                for _, row in label_df.iterrows()
-            }
+        scope_rows = {}
+        if "scope" in summary_df.columns and "scope_value" in summary_df.columns:
+            for _, scope_row in summary_df.iterrows():
+                scope_rows[(str(scope_row.get("scope")), str(scope_row.get("scope_value")))] = scope_row.to_dict()
 
         pain_overall_row = {}
-        pain_label_rows = {}
+        pain_scope_rows = {}
         if not pain_summary_df.empty:
             overall_pain = pain_summary_df[
                 (pain_summary_df.get("scope") == "overall") & (pain_summary_df.get("scope_value") == "overall")
             ]
             if not overall_pain.empty:
                 pain_overall_row = overall_pain.iloc[0].to_dict()
-            pain_label_df = pain_summary_df[pain_summary_df.get("scope") == "signal_label"] if "scope" in pain_summary_df.columns else pd.DataFrame()
-            if not pain_label_df.empty:
-                pain_label_rows = {
-                    str(row.get("scope_value")): row.to_dict()
-                    for _, row in pain_label_df.iterrows()
-                }
+            if "scope" in pain_summary_df.columns and "scope_value" in pain_summary_df.columns:
+                for _, scope_row in pain_summary_df.iterrows():
+                    pain_scope_rows[(str(scope_row.get("scope")), str(scope_row.get("scope_value")))] = scope_row.to_dict()
 
         adjusted_rows = []
         for _, row in scored_df.iterrows():
             working = row.to_dict()
-            existing_label = str(working.get("signal_label", "") or "")
-            label_ctx = label_rows.get(existing_label, {})
-            pain_label_ctx = pain_label_rows.get(existing_label, {})
+            quality_context = build_quality_context(working)
 
-            conf_mult = self._safe_float(overall_row.get("confidence_multiplier"), 1.0) * self._safe_float(label_ctx.get("confidence_multiplier"), 1.0)
-            ret_mult = self._safe_float(overall_row.get("expected_return_multiplier"), 1.0) * self._safe_float(label_ctx.get("expected_return_multiplier"), 1.0)
-            edge_mult = self._safe_float(overall_row.get("edge_multiplier"), 1.0) * self._safe_float(label_ctx.get("edge_multiplier"), 1.0)
-            pain_conf_mult = self._safe_float(pain_overall_row.get("confidence_multiplier"), 1.0) * self._safe_float(pain_label_ctx.get("confidence_multiplier"), 1.0)
-            pain_ret_mult = self._safe_float(pain_overall_row.get("expected_return_multiplier"), 1.0) * self._safe_float(pain_label_ctx.get("expected_return_multiplier"), 1.0)
-            pain_edge_mult = self._safe_float(pain_overall_row.get("edge_multiplier"), 1.0) * self._safe_float(pain_label_ctx.get("edge_multiplier"), 1.0)
+            conf_mult = self._safe_float(overall_row.get("confidence_multiplier"), 1.0)
+            ret_mult = self._safe_float(overall_row.get("expected_return_multiplier"), 1.0)
+            edge_mult = self._safe_float(overall_row.get("edge_multiplier"), 1.0)
+            pain_conf_mult = self._safe_float(pain_overall_row.get("confidence_multiplier"), 1.0)
+            pain_ret_mult = self._safe_float(pain_overall_row.get("expected_return_multiplier"), 1.0)
+            pain_edge_mult = self._safe_float(pain_overall_row.get("edge_multiplier"), 1.0)
+
+            for scope in ["signal_label", "market_family", "horizon_bucket", "liquidity_bucket", "volatility_bucket", "technical_regime_bucket"]:
+                scope_value = str(working.get(scope, quality_context.get(scope, "")) or "")
+                scope_ctx = scope_rows.get((scope, scope_value), {})
+                pain_ctx = pain_scope_rows.get((scope, scope_value), {})
+                conf_mult *= self._safe_float(scope_ctx.get("confidence_multiplier"), 1.0)
+                ret_mult *= self._safe_float(scope_ctx.get("expected_return_multiplier"), 1.0)
+                edge_mult *= self._safe_float(scope_ctx.get("edge_multiplier"), 1.0)
+                pain_conf_mult *= self._safe_float(pain_ctx.get("confidence_multiplier"), 1.0)
+                pain_ret_mult *= self._safe_float(pain_ctx.get("expected_return_multiplier"), 1.0)
+                pain_edge_mult *= self._safe_float(pain_ctx.get("edge_multiplier"), 1.0)
 
             conf_mult *= pain_conf_mult
             ret_mult *= pain_ret_mult
@@ -606,9 +620,11 @@ class TradeFeedbackLearner:
             working["feedback_confidence_multiplier"] = round(conf_mult, 4)
             working["feedback_expected_return_multiplier"] = round(ret_mult, 4)
             working["feedback_edge_multiplier"] = round(edge_mult, 4)
-            working["feedback_recent_win_rate"] = self._safe_float(label_ctx.get("win_rate"), self._safe_float(overall_row.get("win_rate"), 0.5))
-            working["feedback_open_pain_score"] = self._safe_float(pain_label_ctx.get("pain_score"), self._safe_float(pain_overall_row.get("pain_score"), 0.0))
-            working["feedback_open_pain_rate"] = self._safe_float(pain_label_ctx.get("pain_rate"), self._safe_float(pain_overall_row.get("pain_rate"), 0.0))
+            signal_scope_ctx = scope_rows.get(("signal_label", str(working.get("signal_label", "") or "")), {})
+            signal_pain_ctx = pain_scope_rows.get(("signal_label", str(working.get("signal_label", "") or "")), {})
+            working["feedback_recent_win_rate"] = self._safe_float(signal_scope_ctx.get("win_rate"), self._safe_float(overall_row.get("win_rate"), 0.5))
+            working["feedback_open_pain_score"] = self._safe_float(signal_pain_ctx.get("pain_score"), self._safe_float(pain_overall_row.get("pain_score"), 0.0))
+            working["feedback_open_pain_rate"] = self._safe_float(signal_pain_ctx.get("pain_rate"), self._safe_float(pain_overall_row.get("pain_rate"), 0.0))
 
             working["expected_return"] = self._safe_float(working.get("expected_return"), 0.0) * ret_mult
             working["edge_score"] = self._safe_float(working.get("edge_score"), 0.0) * edge_mult
@@ -665,12 +681,6 @@ class TradeFeedbackLearner:
             if str(getattr(trade, "state", "")).upper().endswith("OPEN"):
                 continue
             close_reason = str(getattr(trade, "close_reason", "") or "").strip().lower()
-            if close_reason == "external_manual_close":
-                logging.info(
-                    "Skipping learning report for externally reconciled close token=%s.",
-                    str(getattr(trade, "token_id", "") or "")[:16],
-                )
-                continue
 
             entry_price = self._safe_float(getattr(trade, "entry_price", 0.0), 0.0)
             exit_price = self._safe_float(getattr(trade, "current_price", 0.0), entry_price)
@@ -708,6 +718,23 @@ class TradeFeedbackLearner:
                 getattr(trade, "signal_label", None)
                 or candidate_ctx.get("model_action")
                 or model_ctx.get("action")
+                or "UNKNOWN"
+            )
+            quality_context = build_quality_context(
+                {
+                    "market": getattr(trade, "market", None),
+                    "market_slug": candidate_ctx.get("market_slug"),
+                    "signal_label": signal_label,
+                    "confidence_at_entry": confidence_at_entry,
+                    "entry_model_family": getattr(trade, "entry_model_family", None) or "runtime_live_stack",
+                    "entry_model_version": getattr(trade, "entry_model_version", None),
+                    "market_family": getattr(trade, "market_family", None),
+                    "horizon_bucket": getattr(trade, "horizon_bucket", None),
+                    "liquidity_bucket": getattr(trade, "liquidity_bucket", None),
+                    "volatility_bucket": getattr(trade, "volatility_bucket", None),
+                    "technical_regime_bucket": getattr(trade, "technical_regime_bucket", None),
+                    "close_reason": close_reason,
+                }
             )
             grade = self._grade_trade(realized_pnl, roi)
             takeaways = self._extract_takeaways(
@@ -728,6 +755,9 @@ class TradeFeedbackLearner:
                 "condition_id": getattr(trade, "condition_id", None),
                 "outcome_side": getattr(trade, "outcome_side", None),
                 "signal_label": signal_label,
+                "entry_model_family": getattr(trade, "entry_model_family", None) or "runtime_live_stack",
+                "entry_model_version": getattr(trade, "entry_model_version", None) or "",
+                "performance_governor_level": int(getattr(trade, "performance_governor_level", 0) or 0),
                 "confidence_at_entry": confidence_at_entry,
                 "entry_price": entry_price,
                 "exit_price": exit_price,
@@ -759,6 +789,7 @@ class TradeFeedbackLearner:
                 "weaknesses": takeaways.get("weaknesses", []),
                 "adjustments": takeaways.get("adjustments", []),
                 "verdict": takeaways.get("verdict", ""),
+                **quality_context,
             }
 
             report_file = self.reports_dir / f"{report_id}.json"
@@ -783,6 +814,9 @@ class TradeFeedbackLearner:
                     "condition_id": report_payload["condition_id"],
                     "outcome_side": report_payload["outcome_side"],
                     "signal_label": report_payload["signal_label"],
+                    "entry_model_family": report_payload["entry_model_family"],
+                    "entry_model_version": report_payload["entry_model_version"],
+                    "performance_governor_level": report_payload["performance_governor_level"],
                     "confidence_at_entry": report_payload["confidence_at_entry"],
                     "entry_price": report_payload["entry_price"],
                     "exit_price": report_payload["exit_price"],
@@ -805,6 +839,15 @@ class TradeFeedbackLearner:
                     "latest_model_action": model_ctx.get("action"),
                     "latest_model_score": self._safe_float(model_ctx.get("score"), 0.0),
                     "verdict": report_payload["verdict"],
+                    "market_family": report_payload["market_family"],
+                    "horizon_bucket": report_payload["horizon_bucket"],
+                    "liquidity_bucket": report_payload["liquidity_bucket"],
+                    "volatility_bucket": report_payload["volatility_bucket"],
+                    "technical_regime_bucket": report_payload["technical_regime_bucket"],
+                    "entry_context_complete": report_payload["entry_context_complete"],
+                    "operational_close_flag": report_payload["operational_close_flag"],
+                    "learning_eligible": report_payload["learning_eligible"],
+                    "exit_reason_family": report_payload["exit_reason_family"],
                     "learning_tags": "|".join(report_payload["learning_tags"]),
                     "strength_count": len(report_payload["strengths"]),
                     "weakness_count": len(report_payload["weaknesses"]),
