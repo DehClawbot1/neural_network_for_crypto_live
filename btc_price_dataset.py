@@ -117,20 +117,27 @@ class BTCPriceDatasetBuilder:
         df = df.copy()
         # Handle common column name variants
         col_map = {}
+        targets_claimed = set()
         for col in df.columns:
             lc = str(col).strip().lower()
-            if lc in ("open", "open_price"):
+            if lc in ("open", "open_price") and "open" not in targets_claimed:
                 col_map[col] = "open"
-            elif lc in ("high", "high_price"):
+                targets_claimed.add("open")
+            elif lc in ("high", "high_price") and "high" not in targets_claimed:
                 col_map[col] = "high"
-            elif lc in ("low", "low_price"):
+                targets_claimed.add("high")
+            elif lc in ("low", "low_price") and "low" not in targets_claimed:
                 col_map[col] = "low"
-            elif lc in ("close", "close_price", "price"):
+                targets_claimed.add("low")
+            elif lc in ("close", "close_price", "price") and "close" not in targets_claimed:
                 col_map[col] = "close"
-            elif lc in ("volume", "vol", "quote_volume"):
+                targets_claimed.add("close")
+            elif lc in ("volume", "vol") and "volume" not in targets_claimed:
                 col_map[col] = "volume"
-            elif lc in ("timestamp", "date", "datetime", "time", "open_time", "close_time"):
+                targets_claimed.add("volume")
+            elif lc in ("timestamp", "date", "datetime", "open_time") and "timestamp" not in targets_claimed:
                 col_map[col] = "timestamp"
+                targets_claimed.add("timestamp")
         df.rename(columns=col_map, inplace=True)
 
         required = {"open", "high", "low", "close"}
