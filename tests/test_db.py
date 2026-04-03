@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from db import Database
+from db import Database, _instances, _instance_lock
 
 
 class TestDatabase(unittest.TestCase):
@@ -14,6 +14,11 @@ class TestDatabase(unittest.TestCase):
 
     def tearDown(self):
         self.db.conn.close()
+        # Clear the singleton so each test gets a fresh DB
+        resolved = str(self.db.db_path.resolve())
+        with _instance_lock:
+            _instances.pop(resolved, None)
+        self.db._initialized = False
         self.tmp_dir.cleanup()
 
     def test_schema_initialization(self):
@@ -63,10 +68,17 @@ class TestDatabase(unittest.TestCase):
         self.db.execute("INSERT INTO fills (fill_id, price) VALUES (?, ?)", ("fill-1", 0.42))
         self.db.conn.close()
 
+        # Clear singleton so a new Database() creates a fresh connection
+        resolved = str(self.db.db_path.resolve())
+        with _instance_lock:
+            _instances.pop(resolved, None)
+        self.db._initialized = False
+
         new_db = Database(self.db_path)
         results = new_db.query_all("SELECT price FROM fills WHERE fill_id = ?", ("fill-1",))
         self.assertEqual(results[0]["price"], 0.42)
-        new_db.conn.close()
+        # Reassign so tearDown closes the right connection
+        self.db = new_db
 
 
 class TestDatabaseLogging(unittest.TestCase):
@@ -77,6 +89,10 @@ class TestDatabaseLogging(unittest.TestCase):
 
     def tearDown(self):
         self.db.conn.close()
+        resolved = str(self.db.db_path.resolve())
+        with _instance_lock:
+            _instances.pop(resolved, None)
+        self.db._initialized = False
         self.tmp_dir.cleanup()
 
     def test_log_model_decision(self):

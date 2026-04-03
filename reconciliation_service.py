@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import sqlite3
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -7,6 +9,8 @@ from pathlib import Path
 import pandas as pd
 
 from db import Database
+
+logger = logging.getLogger(__name__)
 
 
 class ReconciliationService:
@@ -326,7 +330,8 @@ class ReconciliationService:
                 ORDER BY COALESCE(created_at, ''), order_id
                 """
             )
-        except Exception:
+        except sqlite3.Error as exc:
+            logger.warning("Order DB query failed: %s", exc)
             db_rows = []
 
         order_rows = []
@@ -416,7 +421,8 @@ class ReconciliationService:
                 ORDER BY COALESCE(filled_at, ''), fill_id
                 """
             )
-        except Exception:
+        except sqlite3.Error as exc:
+            logger.warning("Fill DB query failed: %s", exc)
             db_rows = []
 
         fill_rows = []
@@ -557,8 +563,10 @@ class ReconciliationService:
                 # BUG FIX 3: Removed blind FILLED overwrite. Open order sweep will handle terminal status naturally.
                 synced_fills += 1
             synced_fill_csv_rows = self._merge_live_fill_rows(fill_rows_to_mirror)
-        except Exception:
-            pass
+        except (sqlite3.Error, IOError) as exc:
+            logger.warning("Fill sync reconciliation failed: %s", exc)
+        except Exception as exc:
+            logger.error("Unexpected error in fill sync: %s", exc)
 
         return {
             "orders": synced_orders,

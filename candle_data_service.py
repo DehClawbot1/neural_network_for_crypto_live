@@ -1,4 +1,5 @@
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from datetime import timedelta
@@ -48,6 +49,7 @@ class CandleDataService:
         self.symbol = symbol
         self.cache_ttl_seconds = max(1, int(cache_ttl_seconds or 20))
         self._cache: dict[tuple[str, int, bool, str], tuple[float, pd.DataFrame]] = {}
+        self._cache_lock = threading.Lock()
 
     def _interval_to_timedelta(self, interval: str) -> timedelta:
         if interval not in self._INTERVAL_MAP:
@@ -177,17 +179,19 @@ class CandleDataService:
     ) -> pd.DataFrame:
         cache_key = (interval, int(limit), bool(closed_only), timezone_name)
         now = time.time()
-        if use_cache and cache_key in self._cache:
-            cached_at, cached_df = self._cache[cache_key]
-            if (now - cached_at) < self.cache_ttl_seconds:
-                return cached_df.copy()
+        with self._cache_lock:
+            if use_cache and cache_key in self._cache:
+                cached_at, cached_df = self._cache[cache_key]
+                if (now - cached_at) < self.cache_ttl_seconds:
+                    return cached_df.copy()
 
         raw = self._fetch_raw_klines(interval, limit)
         frame = self._klines_to_frame(raw)
         if closed_only:
             frame = self._drop_unfinished_candles(frame, interval)
         frame = self._convert_timezone(frame, timezone_name)
-        self._cache[cache_key] = (now, frame.copy())
+        with self._cache_lock:
+            self._cache[cache_key] = (now, frame.copy())
         return frame
 
     def refresh_latest_closed_candles(

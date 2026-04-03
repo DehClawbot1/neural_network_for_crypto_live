@@ -32,6 +32,7 @@ Usage in supervisor.py:
 
 import logging
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from token_utils import normalize_token_id
@@ -72,6 +73,7 @@ class OrderBookGuard:
         # Any token that returns 404 is suppressed for OB_NO_BOOK_CACHE_TTL_SECONDS
         # (default 30 min) — no HTTP request will be made for it until the TTL expires.
         self._no_book_cache: dict[str, float] = {}
+        self._cache_lock = threading.Lock()
 
     def _get_clob_client(self):
         """Lazy-init a read-only ClobClient for order book queries."""
@@ -92,7 +94,8 @@ class OrderBookGuard:
         # --- 404 cache check ---
         no_book_ttl = max(60, int(os.getenv("OB_NO_BOOK_CACHE_TTL_SECONDS", "1800") or 1800))
         now_mono = time.monotonic()
-        expiry = self._no_book_cache.get(token_id)
+        with self._cache_lock:
+            expiry = self._no_book_cache.get(token_id)
         if expiry is not None and now_mono < expiry:
             logging.debug("OrderBookGuard: skipping cached 404 token %s (%.0fs remaining)", token_id[:16], expiry - now_mono)
             return None
@@ -104,14 +107,16 @@ class OrderBookGuard:
         try:
             book = client.get_order_book(str(token_id))
             # Successful fetch — ensure this token is not in the 404 cache
-            self._no_book_cache.pop(token_id, None)
+            with self._cache_lock:
+                self._no_book_cache.pop(token_id, None)
             return book
         except Exception as exc:
             # 404 = no orderbook for this token (resolved/inactive market) — expected, not a warning
             _is_404 = "404" in str(exc) or "No orderbook exists" in str(exc)
             if _is_404:
                 logging.debug("OrderBookGuard: No orderbook for %s (404 — market likely inactive)", str(token_id))
-                self._no_book_cache[token_id] = now_mono + no_book_ttl
+                with self._cache_lock:
+                    self._no_book_cache[token_id] = now_mono + no_book_ttl
             else:
                 logging.warning("OrderBookGuard: Failed to fetch book for %s: %s", str(token_id), exc)
             return None
@@ -177,7 +182,8 @@ class OrderBookGuard:
 
         # --- 404 cache check (fast path before any HTTP) ---
         now_mono = time.monotonic()
-        expiry = self._no_book_cache.get(str(token_id))
+        with self._cache_lock:
+            expiry = self._no_book_cache.get(str(token_id))
         if expiry is not None and now_mono < expiry:
             logging.debug("OrderBookGuard.analyze_book: cached 404 for %s — skipping HTTP", str(token_id)[:16])
             return result
@@ -247,10 +253,11 @@ class OrderBookGuard:
         """Return the set of token IDs currently in the 404 cache (no orderbook exists).
         Safe to call at any time; expired entries are pruned on access."""
         now_mono = time.monotonic()
-        expired = [tid for tid, exp in self._no_book_cache.items() if now_mono >= exp]
-        for tid in expired:
-            del self._no_book_cache[tid]
-        return set(self._no_book_cache.keys())
+        with self._cache_lock:
+            expired = [tid for tid, exp in self._no_book_cache.items() if now_mono >= exp]
+            for tid in expired:
+                del self._no_book_cache[tid]
+            return set(self._no_book_cache.keys())
 
     def check_before_entry(self, token_id, side="BUY", intended_size_usdc=10.0):
         """

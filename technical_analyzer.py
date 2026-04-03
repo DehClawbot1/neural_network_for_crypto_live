@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +32,7 @@ class TechnicalAnalyzer:
         self.cache_ttl = cache_ttl_seconds
         self._cached_context = None
         self._last_fetch_time = 0
+        self._ctx_lock = threading.Lock()
         self.candle_data_service = candle_data_service or CandleDataService(symbol="BTCUSDT")
         self.btc_live_tracker = btc_live_tracker or BTCLivePriceTracker(
             candle_data_service=self.candle_data_service,
@@ -480,10 +482,11 @@ class TechnicalAnalyzer:
     def analyze(self) -> dict:
         now = time.time()
         live_context = self.btc_live_tracker.analyze()
-        if self._cached_context and (now - self._last_fetch_time) < self.cache_ttl:
-            cached = dict(self._cached_context)
-            cached.update(live_context)
-            return cached
+        with self._ctx_lock:
+            if self._cached_context and (now - self._last_fetch_time) < self.cache_ttl:
+                cached = dict(self._cached_context)
+                cached.update(live_context)
+                return cached
 
         context = {
             "btc_price": None,
@@ -521,8 +524,9 @@ class TechnicalAnalyzer:
                 logging.warning("TechnicalAnalyzer: Not enough daily candles returned to calculate 200 SMA.")
                 context.update(live_context)
                 self._write_snapshot(context)
-                self._cached_context = dict(context)
-                self._last_fetch_time = now
+                with self._ctx_lock:
+                    self._cached_context = dict(context)
+                    self._last_fetch_time = now
                 return context
 
             df = daily_df[["close"]].copy()
@@ -537,8 +541,9 @@ class TechnicalAnalyzer:
             if pd.isna(sma_200):
                 context.update(live_context)
                 self._write_snapshot(context)
-                self._cached_context = dict(context)
-                self._last_fetch_time = now
+                with self._ctx_lock:
+                    self._cached_context = dict(context)
+                    self._last_fetch_time = now
                 return context
 
             distance = (current_price - sma_200) / sma_200

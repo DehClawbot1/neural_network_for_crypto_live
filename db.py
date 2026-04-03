@@ -1,14 +1,32 @@
 import sqlite3
 import shutil
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+_instances: dict[str, "Database"] = {}
+_instance_lock = threading.Lock()
+
 
 class Database:
+    def __new__(cls, db_path="logs/trading.db"):
+        resolved = str(Path(db_path).resolve())
+        with _instance_lock:
+            if resolved in _instances:
+                return _instances[resolved]
+            inst = super().__new__(cls)
+            inst._initialized = False
+            _instances[resolved] = inst
+            return inst
+
     def __init__(self, db_path="logs/trading.db"):
+        if self._initialized:
+            return
+        self._initialized = True
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.db_path, timeout=30)
+        self.conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
+        self._lock = threading.Lock()
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL;")
         self.conn.execute("PRAGMA busy_timeout=30000;")
@@ -284,22 +302,24 @@ class Database:
             cur.close()
 
     def execute(self, query, params=()):
-        cur = self.conn.cursor()
-        try:
-            cur.execute(query, params)
-            self.conn.commit()
-            return cur
-        except Exception:
-            cur.close()
-            raise
+        with self._lock:
+            cur = self.conn.cursor()
+            try:
+                cur.execute(query, params)
+                self.conn.commit()
+                return cur
+            except Exception:
+                cur.close()
+                raise
 
     def query_all(self, query, params=()):
-        cur = self.conn.cursor()
-        try:
-            cur.execute(query, params)
-            return [dict(row) for row in cur.fetchall()]
-        finally:
-            cur.close()
+        with self._lock:
+            cur = self.conn.cursor()
+            try:
+                cur.execute(query, params)
+                return [dict(row) for row in cur.fetchall()]
+            finally:
+                cur.close()
 
     def integrity_report(self):
         report = {"ok": True, "checks": {}, "errors": []}
@@ -339,7 +359,12 @@ class Database:
         """
         Archive potentially-corrupted runtime state (DB + log CSVs) and rebuild a clean DB.
         Model artifacts in `weights/` are intentionally untouched.
+        Clears the singleton cache so subsequent Database() calls get a fresh instance.
         """
+        resolved = str(self.db_path.resolve())
+        with _instance_lock:
+            _instances.pop(resolved, None)
+        self._initialized = False
         logs_path = Path(logs_dir)
         logs_path.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")

@@ -1,6 +1,7 @@
 from trade_lifecycle import TradeState
 import os
 import json
+import signal
 import time
 import logging
 import re
@@ -13,7 +14,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 try:
     from sb3_contrib import RecurrentPPO
-except Exception:
+except (ImportError, ModuleNotFoundError):
     RecurrentPPO = None
 
 from leaderboard_scraper import run_scraper_cycle
@@ -76,7 +77,7 @@ try:
         has_errors as _inference_guard_has_errors,
         get_errors as _inference_guard_get_errors,
     )
-except Exception:
+except (ImportError, ModuleNotFoundError):
     def _reset_inference_runtime_guard():
         return None
 
@@ -644,7 +645,6 @@ run_scraper_cycle = safe_run_scraper_cycle
 fetch_btc_markets = safe_fetch_btc_markets
 # --------------------------------
 
-
 def choose_cycle_sleep_interval(
     *,
     open_positions_count: int,
@@ -659,8 +659,22 @@ def choose_cycle_sleep_interval(
         return max(1.0, float(entry_freeze_poll_seconds)), "entry freeze active; rechecking soon"
     return max(1.0, float(idle_poll_seconds)), "idle market scan"
 
+_shutdown_requested = False
+
+
+def _request_shutdown(signum, frame):
+    global _shutdown_requested
+    sig_name = signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum)
+    logging.info("Received %s — finishing current cycle then shutting down...", sig_name)
+    _shutdown_requested = True
+
 def main_loop():
     """The continuous autonomous loop (research + paper-trading mode)."""
+    global _shutdown_requested
+    _shutdown_requested = False
+    # Register graceful shutdown handlers for SIGINT and SIGTERM
+    signal.signal(signal.SIGINT, _request_shutdown)
+    signal.signal(signal.SIGTERM, _request_shutdown)
     logging.info("Initializing LIVE PolyMarket Supervisor...")
 
     def _env_int(name: str, default: int, minimum: int = 0, maximum: int = 100000) -> int:
@@ -1353,7 +1367,7 @@ def main_loop():
         return out_signals, out_markets
 
 
-    while True:
+    while not _shutdown_requested:
         try:
             cycle_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
             live_positions_df_for_cycle = pd.DataFrame()
@@ -3655,6 +3669,9 @@ def main_loop():
                 error_backoff_seconds,
             )
             time.sleep(max(1.0, error_backoff_seconds))
+
+    if _shutdown_requested:
+        logging.info("Supervisor shutting down gracefully after signal.")
 
 
 if __name__ == "__main__":

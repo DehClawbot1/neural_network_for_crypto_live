@@ -16,8 +16,10 @@ from db import Database
 try:
     from polymarket_capabilities import apply_execution_client_patch
     apply_execution_client_patch()
-except Exception:
+except (ImportError, ModuleNotFoundError):
     pass
+except Exception as exc:
+    logging.warning("Execution client patch failed: %s", exc)
 
 
 class OrderManager:
@@ -165,11 +167,17 @@ class OrderManager:
         try:
             if hasattr(self.client, "update_balance_allowance"):
                 self.client.update_balance_allowance(asset_type=asset_type, token_id=token_id)
-        except Exception:
-            pass
+        except (ConnectionError, TimeoutError, OSError) as exc:
+            logging.warning("Balance allowance sync failed: %s", exc)
+        except Exception as exc:
+            logging.debug("Balance allowance sync unexpected error: %s", exc)
         try:
             return self.client.get_balance_allowance(asset_type=asset_type, token_id=token_id)
-        except Exception:
+        except (ConnectionError, TimeoutError, OSError) as exc:
+            logging.warning("Balance query failed: %s", exc)
+            return None
+        except Exception as exc:
+            logging.warning("Balance query unexpected error: %s", exc)
             return None
 
     def _extract_orderbook_levels(self, orderbook):

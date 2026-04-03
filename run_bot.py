@@ -3,7 +3,7 @@ import sys
 import logging
 from pathlib import Path
 
-# â”€â”€ Only load .env if NOT in interactive mode â”€â”€
+# â"€â"€ Only load .env if NOT in interactive mode â"€â"€
 if not os.environ.get("_INTERACTIVE_MODE"):
     from dotenv import load_dotenv
     load_dotenv()
@@ -13,7 +13,7 @@ else:
 
 from api_setup import validate_environment
 
-# â”€â”€ BUG FIX I: Set CPU threading env vars BEFORE any numpy/sklearn import â”€â”€
+# â"€â"€ BUG FIX I: Set CPU threading env vars BEFORE any numpy/sklearn import â"€â"€
 try:
     from hardware_config import get_parallel_env_vars, get_sklearn_jobs, get_torch_device, PHYSICAL_CORES, LOGICAL_CORES
     get_parallel_env_vars()
@@ -71,24 +71,61 @@ def print_banner():
     print("This launcher validates the environment, checks model weights, and starts the supervisor.\n")
 
 
+def _preflight_env_check():
+    """Validate all required and recommended env vars at startup with clear diagnostics."""
+    errors = []
+    warnings = []
+
+    trading_mode = os.getenv("TRADING_MODE", "").strip().lower()
+    if not trading_mode:
+        errors.append("TRADING_MODE is not set (must be 'live')")
+    elif trading_mode != "live":
+        errors.append(f"TRADING_MODE='{trading_mode}' — this launcher requires 'live'")
+
+    if trading_mode == "live":
+        for var in ("PRIVATE_KEY", "POLYMARKET_FUNDER"):
+            val = os.getenv(var, "").strip()
+            if not val and not (var == "POLYMARKET_FUNDER" and is_interactive()):
+                errors.append(f"{var} is not set")
+
+        sig_type = os.getenv("POLYMARKET_SIGNATURE_TYPE", "").strip()
+        if sig_type and sig_type not in ("0", "1", "2"):
+            errors.append(f"POLYMARKET_SIGNATURE_TYPE='{sig_type}' — must be 0, 1, or 2")
+
+    # Recommended env vars
+    for var, desc in [
+        ("POLYMARKET_HOST", "Polymarket CLOB host URL"),
+        ("POLYMARKET_CHAIN_ID", "Polygon chain ID"),
+    ]:
+        if not os.getenv(var, "").strip():
+            warnings.append(f"{var} not set ({desc}) — using default")
+
+    return errors, warnings
+
+
 def ensure_environment():
     print("[1/5] Checking environment...")
-    trading_mode = os.getenv("TRADING_MODE", "").strip().lower()
-    if trading_mode != "live":
-        print(f"[!] Invalid TRADING_MODE='{trading_mode or 'missing'}'.")
-        print("[!] This launcher now requires TRADING_MODE=live.\n")
-        return False
+
+    errors, warnings = _preflight_env_check()
+    for w in warnings:
+        print(f"[~] {w}")
+
+    if errors:
+        for e in errors:
+            print(f"[!] {e}")
+        if not is_interactive():
+            valid = validate_environment()
+            if not valid:
+                print("[!] Environment template created or configuration needs review.")
+                print("    Re-run `python run_bot.py` after confirming your .env values.\n")
+                return False
+        else:
+            print("[!] Missing required credentials.\n")
+            return False
 
     if is_interactive():
-        # In interactive mode, skip .env file validation â€” creds are in memory
-        private_key = os.getenv("PRIVATE_KEY")
-        funder = os.getenv("POLYMARKET_FUNDER")
-        if private_key and funder:
-            print("[+] Environment OK (interactive mode â€” credentials in memory)\n")
-            return True
-        else:
-            print("[!] Missing PRIVATE_KEY or POLYMARKET_FUNDER.\n")
-            return False
+        print("[+] Environment OK (interactive mode — credentials in memory)\n")
+        return True
 
     valid = validate_environment()
     if not valid:
@@ -199,7 +236,7 @@ def ensure_optional_rl_model():
         print(f"    (Will resume training from these weights on retrain)\n")
         return True
 
-    # â”€â”€ BUG FIX A: Bootstrap initial RL weights so they persist â”€â”€
+    # â"€â"€ BUG FIX A: Bootstrap initial RL weights so they persist â"€â"€
     print("[!] No RL weights found. Training initial bootstrap weights (1000 steps)...")
     print("    This is a one-time operation. Future runs will resume from saved weights.")
     try:

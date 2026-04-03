@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import asyncio
 import json
 import logging
+import threading
 
 import requests
 
@@ -23,6 +24,7 @@ class MarketPriceService:
     def __init__(self, max_age_seconds=20):
         self.max_age_seconds = max_age_seconds
         self.cache = {}
+        self._cache_lock = threading.Lock()
         self._clob_client = None
 
     def _get_clob_client(self):
@@ -31,12 +33,23 @@ class MarketPriceService:
             try:
                 from py_clob_client.client import ClobClient
                 self._clob_client = ClobClient("https://clob.polymarket.com")
-            except Exception:
+            except (ImportError, ModuleNotFoundError):
+                self._clob_client = None
+            except Exception as exc:
+                logging.warning("ClobClient init failed: %s", exc)
                 self._clob_client = None
         return self._clob_client
 
+    def _cache_get(self, token_id):
+        with self._cache_lock:
+            return self.cache.get(str(token_id))
+
+    def _cache_set(self, token_id, value):
+        with self._cache_lock:
+            self.cache[str(token_id)] = value
+
     def _is_fresh(self, token_id):
-        record = self.cache.get(str(token_id))
+        record = self._cache_get(token_id)
         if not record:
             return False
         age = (datetime.now(timezone.utc) - record["timestamp"]).total_seconds()
@@ -122,11 +135,11 @@ class MarketPriceService:
         }
 
         # Update cache
-        self.cache[str(token_id)] = {
+        self._cache_set(token_id, {
             **result,
             "price": midpoint or best_bid or best_ask,
             "timestamp": datetime.now(timezone.utc),
-        }
+        })
 
         return result
 
@@ -147,8 +160,9 @@ class MarketPriceService:
         if not token_id:
             return None
         token_id = str(token_id)
-        if self._is_fresh(token_id) and "midpoint" in self.cache[token_id]:
-            return self.cache[token_id]["midpoint"]
+        cached = self._cache_get(token_id)
+        if cached and self._is_fresh(token_id) and "midpoint" in cached:
+            return cached["midpoint"]
 
         # Try order book analysis first (tutorial pattern)
         analysis = self.get_order_book_analysis(token_id)
@@ -164,14 +178,14 @@ class MarketPriceService:
             if best_bid is not None and best_ask is not None:
                 midpoint = (best_bid + best_ask) / 2.0
                 spread = abs(best_ask - best_bid)
-                self.cache[token_id] = {
+                self._cache_set(token_id, {
                     "price": midpoint,
                     "best_bid": best_bid,
                     "best_ask": best_ask,
                     "midpoint": midpoint,
                     "spread": spread,
                     "timestamp": datetime.now(timezone.utc),
-                }
+                })
                 return midpoint
         except Exception:
             pass
@@ -179,21 +193,22 @@ class MarketPriceService:
 
     def get_spread(self, token_id):
         self.get_midpoint(token_id)
-        record = self.cache.get(str(token_id), {})
+        record = self._cache_get(token_id) or {}
         return record.get("spread")
 
     def get_latest_price(self, token_id, interval="1m"):
         if not token_id:
             return None
         token_id = str(token_id)
-        if self._is_fresh(token_id):
-            return self.cache[token_id].get("midpoint") or self.cache[token_id].get("price")
+        cached = self._cache_get(token_id)
+        if cached and self._is_fresh(token_id):
+            return cached.get("midpoint") or cached.get("price")
         midpoint = self.get_midpoint(token_id)
         if midpoint is not None:
             return midpoint
         price = self._history_last_price(token_id, interval=interval)
         if price is not None:
-            self.cache[token_id] = {"price": price, "midpoint": price, "timestamp": datetime.now(timezone.utc)}
+            self._cache_set(token_id, {"price": price, "midpoint": price, "timestamp": datetime.now(timezone.utc)})
         return price
 
     def get_quote(self, token_id):
@@ -210,7 +225,7 @@ class MarketPriceService:
             "spread": spread,
             "last_trade_price": last_trade_price,
         }
-        self.cache[token_id] = {**quote, "price": midpoint or last_trade_price, "timestamp": datetime.now(timezone.utc)}
+        self._cache_set(token_id, {**quote, "price": midpoint or last_trade_price, "timestamp": datetime.now(timezone.utc)})
         return quote
 
     def get_batch_prices(self, token_ids):
@@ -229,7 +244,8 @@ class MarketPriceService:
     async def stream_prices(self, token_ids, update_callback=None):
         try:
             import websockets
-        except Exception:
+        except (ImportError, ModuleNotFoundError):
+            logging.warning("websockets package not available — streaming disabled")
             return
 
         max_retries = 10
@@ -268,7 +284,7 @@ class MarketPriceService:
                                 spread = abs(float(best_ask) - float(best_bid))
                         except Exception:
                             spread = None
-                        self.cache[token_id] = {
+                        entry = {
                             "price": float(midpoint or last_trade_price or 0.0),
                             "best_bid": float(best_bid) if best_bid is not None else None,
                             "best_ask": float(best_ask) if best_ask is not None else None,
@@ -277,8 +293,9 @@ class MarketPriceService:
                             "last_trade_price": float(last_trade_price) if last_trade_price is not None else None,
                             "timestamp": datetime.now(timezone.utc),
                         }
+                        self._cache_set(token_id, entry)
                         if update_callback is not None:
-                            update_callback(token_id, self.cache[token_id])
+                            update_callback(token_id, entry)
             except Exception as exc:
                 delay = min(base_delay * (2 ** attempt), 60)
                 logging.warning("WebSocket error (attempt %d/%d): %s — retrying in %ds",

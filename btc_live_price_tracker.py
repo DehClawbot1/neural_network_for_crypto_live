@@ -1,4 +1,5 @@
 import logging
+import threading
 import time
 from pathlib import Path
 
@@ -41,6 +42,7 @@ class BTCLivePriceTracker:
         self.snapshot_file = self.logs_dir / "btc_live_snapshot.csv"
         self._cached_context: dict | None = None
         self._last_fetch_time = 0.0
+        self._ctx_lock = threading.Lock()
 
     @staticmethod
     def _safe_float(value, default=None):
@@ -184,8 +186,9 @@ class BTCLivePriceTracker:
 
     def analyze(self) -> dict:
         now = time.time()
-        if self._cached_context and (now - self._last_fetch_time) < self.cache_ttl_seconds:
-            return dict(self._cached_context)
+        with self._ctx_lock:
+            if self._cached_context and (now - self._last_fetch_time) < self.cache_ttl_seconds:
+                return dict(self._cached_context)
 
         premium = self._fetch_binance_premium_index()
         spot_sources = {
@@ -270,8 +273,9 @@ class BTCLivePriceTracker:
             "btc_live_index_ready": bool(index_price not in (None, 0.0) and mark_price not in (None, 0.0)),
             "btc_live_sources_json": str({k: round(v, 2) for k, v in spot_sources.items() if v not in (None, 0.0)}),
         }
-        self._cached_context = dict(context)
-        self._last_fetch_time = now
+        with self._ctx_lock:
+            self._cached_context = dict(context)
+            self._last_fetch_time = now
         self._write_snapshot(context)
         logger.info(
             "BTCLivePriceTracker: live=%s index=%s mark=%s bias=%s confluence=%.2f divergence_bps=%.2f",
