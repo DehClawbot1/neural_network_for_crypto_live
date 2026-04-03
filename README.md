@@ -270,6 +270,124 @@ Still worth improving:
 - accumulate enough post-patch labeled rows so the BTC live/index family becomes active in fitted training samples
 - validate whether the family actually improves benchmarked model quality
 
+## Quick Start
+
+### 1. Live trading
+Use this when you want the full live runtime with exchange sync, candidate evaluation, and live order management.
+
+```bash
+python run_bot.py
+```
+
+Use this only after confirming:
+- live wallet credentials are loaded
+- the latest runtime audit is healthy
+- you are comfortable with the current governor level and balance state
+
+### 2. Paper mode
+Use this when you want to exercise the decision engine without sending real live orders.
+
+```bash
+python run_paper.py
+```
+
+This is the safest default when:
+- validating new strategy logic
+- checking candidate telemetry
+- testing new rule-layer behavior
+
+### 3. Research pipeline
+Use this to rebuild datasets, targets, benchmark outputs, and feature ablation reports.
+
+```bash
+python real_pipeline.py
+```
+
+Typical outputs refreshed by this step include:
+- `logs/historical_dataset.csv`
+- `logs/contract_targets.csv`
+- `logs/feature_ablation_report.csv`
+- `logs/benchmark_vs_main.csv`
+
+### 4. Debug runtime drift
+Use this when local runtime state may be out of sync with exchange truth, or when you suspect ghost positions / stale ledgers.
+
+Audit only:
+```bash
+python audit_runtime_state.py --logs-dir logs
+```
+
+Audit and reset only if corruption is detected:
+```bash
+python audit_runtime_state.py --logs-dir logs --reset-if-corrupt
+```
+
+Good times to run this:
+- after dead-orderbook incidents
+- after repeated mismatch freezes
+- after partial-fill or reconciliation anomalies
+
+## Environment and Required Config
+
+### Python and dependencies
+On a fresh machine, install the project dependencies first:
+
+```bash
+python -m venv .venv
+.venv\\Scripts\\activate
+pip install -r requirements.txt
+```
+
+If you also need development tooling:
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+### Live trading environment
+The repository includes a live template:
+- [.env.live.template](.env.live.template)
+
+For live mode, the most important variables are:
+- `TRADING_MODE=live`
+- `PRIVATE_KEY`
+- `POLYMARKET_FUNDER`
+- `POLYMARKET_PUBLIC_ADDRESS`
+- `POLYMARKET_SIGNATURE_TYPE`
+
+If you already have stored Polymarket L2 API credentials, also provide:
+- `POLYMARKET_API_KEY`
+- `POLYMARKET_API_SECRET`
+- `POLYMARKET_API_PASSPHRASE`
+
+Important signature type note:
+- `0`: direct EOA wallet
+- `1`: Magic / email / social Polymarket proxy wallet
+- `2`: MetaMask / Rabby Polymarket proxy wallet
+
+### Useful optional environment variables
+These are not strictly required for every run, but they matter in real operation:
+
+- `RESET_RUNTIME_STATE_ON_DB_CORRUPTION`
+  - if `true`, the runtime audit/reset path can archive and rebuild runtime state when corruption is detected
+- `BOT_LOG_LOCAL_TIMEZONE`
+  - used by dataset/target builders when normalizing naive local log timestamps
+  - current default in code is `Europe/Lisbon`
+- `GOV_LEVEL1_*` and `GOV_LEVEL2_*`
+  - tune performance-governor thresholds and degraded-mode behavior
+
+### Important built-in runtime defaults
+Several key defaults currently live in [config.py](config.py) under `TradingConfig`, including:
+- `MAX_RISK_PER_TRADE_PCT`
+- `MIN_BET_USDC`
+- `MIN_ENTRY_USDC`
+- `HARD_MAX_BET_USDC`
+- `CAPITAL_RESERVE_PCT`
+- `MAX_CONCURRENT_POSITIONS`
+- `TIME_STOP_MINUTES`
+
+These are code-level defaults, so if you change them, treat them like strategy changes rather than harmless environment tweaks.
+
 ## Useful Commands
 
 Run the live bot:
