@@ -1,5 +1,11 @@
 from trade_lifecycle import TradeState
 import os
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 import json
 import signal
 import time
@@ -20,6 +26,7 @@ except (ImportError, ModuleNotFoundError):
 from leaderboard_scraper import run_scraper_cycle
 from market_monitor import (
     fetch_btc_markets,
+    fetch_btc_updown_markets,
     save_market_snapshot,
     fetch_markets_by_slugs,
     fetch_markets_by_slug_prefix,
@@ -1639,6 +1646,20 @@ def main_loop():
                 markets_df = pd.concat([open_markets, closed_markets], ignore_index=True).drop_duplicates(subset=["market_id"])
             else:
                 markets_df = open_markets if not open_markets.empty else closed_markets
+            # Also fetch btc-updown rotating markets (they don't appear in bulk API)
+            for _updown_prefix in ("btc-updown-5m-", "btc-updown-15m-", "btc-updown-4h-"):
+                try:
+                    _updown_df = fetch_btc_updown_markets(prefix=_updown_prefix, closed=False)
+                    if _updown_df is not None and not _updown_df.empty:
+                        if markets_df is None or markets_df.empty:
+                            markets_df = _updown_df
+                        else:
+                            markets_df = pd.concat([markets_df, _updown_df], ignore_index=True)
+                            if "market_id" in markets_df.columns:
+                                markets_df = markets_df.drop_duplicates(subset=["market_id"], keep="last")
+                        logging.info("Added %d %s rotating markets to universe.", len(_updown_df), _updown_prefix)
+                except Exception as _updown_exc:
+                    logging.warning("Failed to fetch %s rotating markets: %s", _updown_prefix, _updown_exc)
             autonomous_monitor.write_heartbeat("market_monitor", status="ok", message="markets_fetched", extra={"rows": len(markets_df) if markets_df is not None else 0})
             if markets_df is not None and not markets_df.empty: markets_df = markets_df.loc[:, ~markets_df.columns.duplicated()]
             save_market_snapshot(markets_df)

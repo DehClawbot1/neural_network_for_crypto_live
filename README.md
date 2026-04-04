@@ -47,6 +47,7 @@ Core live runtime files:
 - [live_position_book.py](live_position_book.py): reconstructed live position ledger from fills and exchange balances
 - [reconciliation_service.py](reconciliation_service.py): exchange sync and runtime drift detection
 - [performance_governor.py](performance_governor.py): rolling live performance controls
+- [market_monitor.py](market_monitor.py): BTC market discovery including rotating btc-updown markets (5m/15m/4h) via Gamma Events API
 
 ### 2. Market Intelligence Layer
 Context and feature generation files:
@@ -422,37 +423,112 @@ If you also need development tooling:
 pip install -r requirements-dev.txt
 ```
 
-### Live trading environment
-The repository includes a live template:
-- [.env.live.template](.env.live.template)
+### .env Variable Reference
 
-For live mode, the most important variables are:
-- `TRADING_MODE=live`
-- `PRIVATE_KEY`
-- `POLYMARKET_FUNDER`
-- `POLYMARKET_PUBLIC_ADDRESS`
-- `POLYMARKET_SIGNATURE_TYPE`
+Create a `.env` file in the project root. The bot loads it automatically via `python-dotenv`.
 
-If you already have stored Polymarket L2 API credentials, also provide:
-- `POLYMARKET_API_KEY`
-- `POLYMARKET_API_SECRET`
-- `POLYMARKET_API_PASSPHRASE`
+#### Required for Live Trading
 
-Important signature type note:
-- `0`: direct EOA wallet
-- `1`: Magic / email / social Polymarket proxy wallet
-- `2`: MetaMask / Rabby Polymarket proxy wallet
+| Variable | Example | Description |
+|----------|---------|-------------|
+| `TRADING_MODE` | `live` | Set to `live` for real trading, `paper` for simulated |
+| `PRIVATE_KEY` | `b81c379f...` | Your wallet private key (hex, no 0x prefix). Used to sign orders on Polymarket CLOB |
+| `POLYMARKET_FUNDER` | `0x4d0CD2Fa...` | Your Polymarket proxy wallet address. This is the address that holds your USDC on Polygon |
+| `POLYMARKET_SIGNATURE_TYPE` | `2` | How your wallet connects to Polymarket: `0` = direct EOA, `1` = Magic/email login, `2` = MetaMask/Rabby browser wallet |
 
-### Useful optional environment variables
-These are not strictly required for every run, but they matter in real operation:
+#### Polymarket L2 API Credentials
 
-- `RESET_RUNTIME_STATE_ON_DB_CORRUPTION`
-  - if `true`, the runtime audit/reset path can archive and rebuild runtime state when corruption is detected
-- `BOT_LOG_LOCAL_TIMEZONE`
-  - used by dataset/target builders when normalizing naive local log timestamps
-  - current default in code is `Europe/Lisbon`
-- `GOV_LEVEL1_*` and `GOV_LEVEL2_*`
-  - tune performance-governor thresholds and degraded-mode behavior
+These are auto-derived on first run if you provide `PRIVATE_KEY`. You can also set them manually.
+
+| Variable | Example | Description |
+|----------|---------|-------------|
+| `POLYMARKET_API_KEY` | `ed0e82d6-...` | L2 CLOB API key for order placement and balance queries |
+| `POLYMARKET_API_SECRET` | `O9otKHB5C...` | L2 CLOB API secret (base64) |
+| `POLYMARKET_API_PASSPHRASE` | `49d58587f...` | L2 CLOB API passphrase (hex) |
+| `POLYMARKET_API_CREDS_SIGNATURE_TYPE` | `2` | Signature type used when the credentials were derived (should match `POLYMARKET_SIGNATURE_TYPE`) |
+| `POLYMARKET_API_CREDS_FUNDER` | `0x4d0CD2Fa...` | Funder address used when credentials were derived (should match `POLYMARKET_FUNDER`) |
+
+#### Sizing and Risk
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SIMULATED_STARTING_BALANCE` | `1000` | Starting balance for paper mode simulations (USDC) |
+| `MAX_RISK_PER_TRADE` | `50` | Maximum USDC risked per individual trade |
+
+#### Research and Refresh
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RESEARCH_REFRESH_MAX_AGE_MINUTES` | `30` | Maximum age (minutes) before research context is considered stale and refreshed |
+| `MARKET_SNAPSHOT_TTL_HOURS` | `48` | Hours before old market snapshot rows are purged from `logs/markets.csv` |
+
+#### Open Pain (Drawdown Sensitivity)
+
+These control the "open pain" system that penalizes new entries when existing positions are in drawdown.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OPEN_PAIN_SENSITIVITY` | `1.0` | Global multiplier for all open-pain effects (0 = disabled, >1 = more aggressive) |
+| `OPEN_PAIN_TRIGGER_OPEN_RETURN` | `-0.015` | Open position return threshold that activates pain penalties |
+| `OPEN_PAIN_TRIGGER_MAE` | `-0.03` | Maximum adverse excursion threshold |
+| `OPEN_PAIN_TRIGGER_DRAWDOWN` | `0.03` | Portfolio drawdown threshold |
+| `OPEN_PAIN_TRIGGER_FAST_COUNT` | `1` | Number of fast-losing positions to trigger pain |
+| `OPEN_PAIN_CONF_PENALTY_MAX` | `0.18` | Max confidence penalty applied under pain |
+| `OPEN_PAIN_RET_PENALTY_MAX` | `0.24` | Max expected-return penalty applied under pain |
+| `OPEN_PAIN_CONF_MULTIPLIER_FLOOR` | `0.82` | Minimum confidence multiplier (prevents over-penalizing) |
+| `OPEN_PAIN_RET_MULTIPLIER_FLOOR` | `0.76` | Minimum return multiplier floor |
+| `OPEN_PAIN_EDGE_MULTIPLIER_FLOOR` | `0.78` | Minimum edge multiplier floor |
+
+#### Performance Governor Level 1 (Degraded Mode)
+
+Activated when recent live performance drops below thresholds. Reduces position sizing and raises entry bars.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GOV_LEVEL1_MIN_WIN_RATE` | `0.38` | Trigger if rolling win rate drops below this |
+| `GOV_LEVEL1_MIN_PROFIT_FACTOR` | `0.80` | Trigger if profit factor drops below this |
+| `GOV_LEVEL1_MAX_NEGATIVE_AVG_PNL` | `-0.10` | Trigger if average PnL is more negative than this |
+| `GOV_LEVEL1_MAX_DRAWDOWN` | `30` | Trigger if realized drawdown exceeds this (%) |
+| `GOV_LEVEL1_MAX_RL_EXIT_RATE` | `0.45` | Trigger if RL-driven exit share exceeds this |
+| `GOV_LEVEL1_MAX_OPERATIONAL_CLOSE_RATE` | `0.15` | Trigger if operational close share exceeds this |
+| `GOV_LEVEL1_SIZE_MULTIPLIER` | `0.35` | Position size multiplier when Level 1 is active |
+| `GOV_LEVEL1_MIN_ENTRY_CONFIDENCE` | `0.68` | Minimum model confidence required to enter a trade |
+| `GOV_LEVEL1_MIN_LIQUIDITY_SCORE` | `0.50` | Minimum market liquidity score required |
+
+#### Performance Governor Level 2 (Maximum Protection)
+
+Most restrictive mode. Only the top signal is considered, minimum sizes enforced.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GOV_LEVEL2_MIN_WIN_RATE` | `0.30` | Trigger if rolling win rate drops below this |
+| `GOV_LEVEL2_MIN_PROFIT_FACTOR` | `0.60` | Trigger if profit factor drops below this |
+| `GOV_LEVEL2_MAX_NEGATIVE_AVG_PNL` | `-0.25` | Trigger if average PnL is more negative than this |
+| `GOV_LEVEL2_MAX_DRAWDOWN` | `60` | Trigger if realized drawdown exceeds this (%) |
+| `GOV_LEVEL2_MAX_RL_EXIT_RATE` | `0.60` | Trigger if RL-driven exit share exceeds this |
+| `GOV_LEVEL2_MAX_OPERATIONAL_CLOSE_RATE` | `0.10` | Trigger if operational close share exceeds this |
+| `GOV_LEVEL2_SIZE_MULTIPLIER` | `0.20` | Position size multiplier when Level 2 is active |
+| `GOV_LEVEL2_MIN_ENTRY_CONFIDENCE` | `0.35` | Minimum model confidence required to enter a trade |
+| `GOV_LEVEL2_MIN_LIQUIDITY_SCORE` | `0.70` | Minimum market liquidity score required |
+
+#### Model Promotion Gates
+
+Control when the retrainer is allowed to promote a new model to production.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PROMOTION_MIN_LEARNING_ELIGIBLE_RATIO` | `0.65` | Minimum share of recent trades that must be learning-eligible |
+| `PROMOTION_MIN_ENTRY_CONTEXT_COMPLETE_RATIO` | `0.70` | Minimum share of trades with complete entry context |
+| `PROMOTION_MAX_OPERATIONAL_CLOSE_RATIO` | `0.30` | Maximum share of operational/reconciliation closes allowed |
+| `PROMOTION_MAX_UNKNOWN_SIGNAL_LABEL_RATIO` | `0.20` | Maximum share of trades with unknown signal labels |
+
+#### Other Optional Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RESET_RUNTIME_STATE_ON_DB_CORRUPTION` | `false` | If `true`, runtime audit can archive and rebuild state when corruption is detected |
+| `BOT_LOG_LOCAL_TIMEZONE` | `Europe/Lisbon` | Timezone for normalizing naive local log timestamps in dataset builders |
+| `ALWAYS_ON_MARKET_SIDE` | `AUTO` | Force always-on market side (`YES`/`NO`), or `AUTO` for ML-driven 3-tier selection: BTC forecast > leaderboard consensus > price fallback |
 
 ### Important built-in runtime defaults
 Several key defaults currently live in [config.py](config.py) under `TradingConfig`, including:

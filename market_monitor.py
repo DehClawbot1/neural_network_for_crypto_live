@@ -9,6 +9,17 @@ from token_utils import parse_token_id_list
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
+GAMMA_EVENTS_URL = "https://gamma-api.polymarket.com/events"
+
+# Slug rotation intervals for btc-updown markets (prefix → seconds between rotations)
+_ROTATING_MARKET_INTERVALS = {
+    "btc-updown-5m-": 300,      # 5 minutes
+    "btc-updown-15m-": 900,     # 15 minutes
+    "btc-updown-4h-": 14400,    # 4 hours
+}
+
+# Daily BTC market slug pattern (date-based, not timestamp-based)
+_DAILY_BTC_PREFIX = "bitcoin-up-or-down-on-"
 BTC_KEYWORDS = [
     "bitcoin",
     "btc",
@@ -92,6 +103,115 @@ def _fetch_page(session: requests.Session, *, closed: bool, limit: int, offset: 
     return payload if isinstance(payload, list) else []
 
 
+def _generate_candidate_slugs(prefix: str, look_back: int = 6, look_ahead: int = 3) -> list[str]:
+    """
+    Generate candidate rotating-market slugs around the current time.
+
+    For btc-updown-5m- markets, timestamps are Unix epochs at 300-second boundaries.
+    For btc-updown-4h- markets, timestamps are at 14400-second boundaries.
+
+    look_back/look_ahead = how many intervals in each direction to check.
+    """
+    interval = None
+    for known_prefix, secs in _ROTATING_MARKET_INTERVALS.items():
+        if prefix.startswith(known_prefix) or known_prefix.startswith(prefix):
+            interval = secs
+            prefix = known_prefix  # normalise
+            break
+    if interval is None:
+        return []
+
+    import time
+    now = int(time.time())
+    # Align to interval boundary
+    base = (now // interval) * interval
+    slugs = []
+    for i in range(-look_back, look_ahead + 1):
+        ts = base + i * interval
+        if ts > 0:
+            slugs.append(f"{prefix}{ts}")
+    return slugs
+
+
+def _fetch_event_markets(session: requests.Session, event_slug: str) -> list[dict]:
+    """
+    Fetch markets from the Gamma events API by event slug.
+
+    Returns the list of market dicts nested under the event, or [].
+    The events endpoint returns markets that do NOT appear in bulk /markets listings.
+    """
+    try:
+        resp = session.get(GAMMA_EVENTS_URL, params={"slug": event_slug}, timeout=20)
+        resp.raise_for_status()
+        payload = resp.json()
+        # The events endpoint returns a list of event objects, each with a "markets" key
+        events = payload if isinstance(payload, list) else [payload] if isinstance(payload, dict) else []
+        markets = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            event_markets = event.get("markets") or []
+            if isinstance(event_markets, list):
+                markets.extend(event_markets)
+        return markets
+    except Exception as exc:
+        logging.debug("Events API query failed for slug=%s: %s", event_slug, exc)
+        return []
+
+
+def fetch_btc_updown_markets(prefix: str = "btc-updown-5m-", closed: bool = False,
+                              look_back: int = 6, look_ahead: int = 3) -> pd.DataFrame:
+    """
+    Fetch btc-updown rotating markets by generating candidate slugs and querying
+    both the events API and the direct markets API.
+
+    These markets do NOT appear in bulk /markets pagination — they must be queried
+    by exact slug or via the events endpoint.
+    """
+    candidate_slugs = _generate_candidate_slugs(prefix, look_back=look_back, look_ahead=look_ahead)
+    if not candidate_slugs:
+        logging.warning("No candidate slugs generated for prefix=%s", prefix)
+        return pd.DataFrame()
+
+    session = requests.Session()
+    rows = []
+    seen = set()
+
+    for slug in candidate_slugs:
+        # Try events API first (returns markets nested under event)
+        event_markets = _fetch_event_markets(session, slug)
+        if event_markets:
+            for market in event_markets:
+                if closed is False and str(market.get("closed", "")).lower() in ("true", "1", "yes"):
+                    continue
+                row = _market_to_row(market)
+                mid = str(row.get("market_id") or "")
+                if mid and mid not in seen:
+                    seen.add(mid)
+                    rows.append(row)
+
+        # Also try direct market slug query as fallback
+        try:
+            direct_markets = _fetch_page(session, closed=closed, limit=10, offset=0, slug=slug)
+            for market in direct_markets:
+                row = _market_to_row(market)
+                mid = str(row.get("market_id") or "")
+                if mid and mid not in seen:
+                    seen.add(mid)
+                    rows.append(row)
+        except Exception as exc:
+            logging.debug("Direct slug query failed for %s: %s", slug, exc)
+
+    df = pd.DataFrame(rows)
+    if not df.empty and "slug" in df.columns:
+        df = df.drop_duplicates(subset=["slug"], keep="last")
+    logging.info(
+        "Fetched %d btc-updown markets for prefix '%s' (candidates=%d, closed=%s).",
+        len(df), prefix, len(candidate_slugs), closed,
+    )
+    return df
+
+
 def fetch_btc_markets(limit=1000, closed=False, max_offset=0):
     """
     Fetch BTC-related public markets.
@@ -148,13 +268,30 @@ def fetch_markets_by_slugs(slugs):
 
 def fetch_markets_by_slug_prefix(prefix: str, limit: int = 500, max_offset: int = 2000, closed: bool = False):
     """
-    Fetch markets whose slug starts with the provided prefix by scanning paginated gamma markets.
-    Useful for rotating markets like btc-updown-5m-<timestamp>.
+    Fetch markets whose slug starts with the provided prefix.
+
+    Strategy:
+    1. For known rotating markets (btc-updown-5m-, btc-updown-4h-), use the events API
+       with generated candidate slugs — these markets do NOT appear in bulk pagination.
+    2. Fall back to scanning paginated gamma markets for other prefixes.
     """
     slug_prefix = str(prefix or "").strip().lower()
     if not slug_prefix:
         return pd.DataFrame()
 
+    # --- Strategy 1: Events API for known rotating markets ---
+    is_rotating = any(slug_prefix.startswith(p) or p.startswith(slug_prefix)
+                      for p in _ROTATING_MARKET_INTERVALS)
+    if is_rotating:
+        df = fetch_btc_updown_markets(prefix=slug_prefix, closed=closed)
+        if not df.empty:
+            return df
+        logging.info(
+            "Events API returned 0 results for rotating prefix '%s', trying bulk scan...",
+            slug_prefix,
+        )
+
+    # --- Strategy 2: Bulk pagination scan (original approach) ---
     session = requests.Session()
     rows = []
     seen = set()
