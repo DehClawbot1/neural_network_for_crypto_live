@@ -1,0 +1,41 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -l \"from db import\\\\|import db\\\\|Database\\(\\)\" *.py)",
+      "Bash(for dir:*)",
+      "Bash(do echo:*)",
+      "Read(//c/Users/Utilizador/.openclaw/workspace-trader_agent_n1/neural_network_for_crypto_live/.claude/worktrees/brave-bell/**)",
+      "Bash(done)",
+      "Bash(grep -n \"\\\\.execute\\\\|\\\\.query_all\" *.py)",
+      "Bash(ls -lh /c/Users/Utilizador/.openclaw/workspace-trader_agent_n1/neural_network_for_crypto_live/.claude/worktrees/brave-bell/*.py)",
+      "Bash(grep -l \"\\\\.csv\\\\|\\\\.db\\\\|\\\\.sqlite\\\\|csv\\\\|database\" /c/Users/Utilizador/.openclaw/workspace-trader_agent_n1/neural_network_for_crypto_live/.claude/worktrees/brave-bell/*.py)",
+      "Bash(grep -n \"except.*pass\" *.py)",
+      "Bash(/tmp/structure.txt:*)",
+      "Read(//tmp/**)",
+      "Bash(grep -v \"^--$\")",
+      "Bash(python -m py_compile csv_utils.py)",
+      "Bash(python -m py_compile db.py)",
+      "Bash(python -m py_compile market_monitor.py)",
+      "Bash(python -m py_compile market_price_service.py)",
+      "Bash(python -m py_compile supervisor.py)",
+      "Bash(python -m py_compile trade_lifecycle.py)",
+      "Bash(python -m py_compile simulation_engine.py)",
+      "Bash(python -m py_compile shadow_purgatory.py)",
+      "Bash(python -m py_compile shadow_logger.py)",
+      "Bash(python -m pytest tests/ -x -q --tb=short)",
+      "Bash(python -m pytest tests/ -x -q --tb=short --ignore=tests/test_stage2_temporal_models.py)",
+      "Bash(python -m pytest tests/test_db.py tests/test_trade_lifecycle.py tests/test_position_manager.py tests/test_core_trading_logic.py -x -q --tb=short)",
+      "Bash(grep -r \"btc.*price.*predict\\\\|btc.*forecast\\\\|price.*target\\\\|future.*price\" /c/Users/Utilizador/.openclaw/workspace-trader_agent_n1/neural_network_for_crypto_live/.claude/worktrees/brave-bell/*.py)",
+      "Bash(grep -r \"predict.*btc\\\\|forecast.*btc\" /c/Users/Utilizador/.openclaw/workspace-trader_agent_n1/neural_network_for_crypto_live/.claude/worktrees/brave-bell/*.py)",
+      "Bash(grep -r \"p_tp_before_sl\\\\|expected_return\\\\|forward_return_15m\\\\|tp_before_sl\" /c/Users/Utilizador/.openclaw/workspace-trader_agent_n1/neural_network_for_crypto_live/.claude/worktrees/brave-bell/*.py)",
+      "Bash(python -m pytest tests/test_db.py tests/test_csv_utils.py -q)",
+      "Bash(python -m pytest tests/test_db.py -q)",
+      "Bash(python -c \"from live_position_book import LivePositionBook; print\\(''import OK''\\)\")",
+      "Bash(python -m pytest tests/test_btc_forecast.py tests/test_db.py -v)",
+      "Read(//c/Users/Utilizador/.openclaw/workspace-trader_agent_n1/neural_network_for_crypto_live/**)",
+      "Bash(python -c \"import pandas as pd; df = pd.read_csv\\(''data/BTCUSDT_15m_730d.csv'', nrows=2\\); print\\(df.columns.tolist\\(\\)\\); print\\(df.dtypes\\)\")",
+      "Bash(python -c \":*)",
+      "Bash(python download_btc_dataset.py --interval 15m --days 730 --train)"
+    ]
+  }
+}
