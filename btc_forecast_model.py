@@ -664,4 +664,7 @@ class _ScaledModel:
         return self.model.predict_proba(self.scaler.transform(X))
 
     def __getattr__(self, name):
+        # Guard against infinite recursion during unpickling (self.model not yet set)
+        if name in ("model", "scaler"):
+            raise AttributeError(name)
         return getattr(self.model, name)
