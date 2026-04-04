@@ -1575,6 +1575,15 @@ def main_loop():
                     macro_context.update(btc_sentiment_snapshot)
             except Exception as exc:
                 logging.debug("BTC sentiment skipped: %s", exc)
+
+            # --- BTC Order Book Depth Features (Pillar 7) ---
+            try:
+                from orderbook_depth_features import fetch_btc_depth_snapshot
+                ob_features = fetch_btc_depth_snapshot()
+                if ob_features.get("ob_ready"):
+                    macro_context.update(ob_features)
+            except Exception as exc:
+                logging.debug("BTC order book depth skipped: %s", exc)
             # --------------------------------------------------
 
             if not signals_df.empty:
