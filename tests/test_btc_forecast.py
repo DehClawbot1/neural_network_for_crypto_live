@@ -62,13 +62,19 @@ class TestBTCPriceDatasetBuilder(unittest.TestCase):
         df = self.builder.build_from_candles(self.candles)
         self.assertGreater(len(df), 0, "Should produce non-empty dataset")
 
-        # Check feature columns exist
+        # Check basic feature columns exist
         for col in ["rsi_14", "macd", "atr_pct", "bb_position", "adx", "return_1"]:
             self.assertIn(col, df.columns, f"Missing feature: {col}")
 
         # Check label columns exist
         for col in ["fwd_return_15", "fwd_up_15", "fwd_direction_15"]:
             self.assertIn(col, df.columns, f"Missing label: {col}")
+
+        # Check advanced features exist
+        for col in ["rsi_14_lag_1", "rsi_14_roc_4", "return_mean_5", "return_skew_10",
+                     "up_streak", "donchian_pos_20", "williams_r_14", "cci_20",
+                     "mfi_14", "volume_force", "vol_ratio_20_60"]:
+            self.assertIn(col, df.columns, f"Missing advanced feature: {col}")
 
     def test_no_nan_in_output(self):
         df = self.builder.build_from_candles(self.candles)

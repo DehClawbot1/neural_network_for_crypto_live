@@ -258,12 +258,118 @@ class BTCPriceDatasetBuilder:
         # --- Price ---
         f["close"] = close
 
+        # ============================================================
+        # ADVANCED FEATURES (Phase 2 — accuracy improvement)
+        # ============================================================
+
+        # --- Lag features: let the model see how indicators evolved ---
+        lag_cols = ["rsi_14", "macd_hist", "adx", "bb_position", "volume_ratio", "atr_pct"]
+        for col in lag_cols:
+            if col in f.columns:
+                for lag in [1, 2, 4, 8]:
+                    f[f"{col}_lag_{lag}"] = f[col].shift(lag)
+                # Rate of change of the indicator itself
+                f[f"{col}_roc_4"] = f[col] - f[col].shift(4)
+
+        # --- Return sequences (momentum signature) ---
+        returns = close.pct_change()
+        for w in [5, 10, 20]:
+            f[f"return_mean_{w}"] = returns.rolling(w).mean()
+            f[f"return_std_{w}"] = returns.rolling(w).std()
+            f[f"return_skew_{w}"] = returns.rolling(w).skew()
+            f[f"return_kurt_{w}"] = returns.rolling(w).kurt()
+
+        # --- Trend strength / persistence ---
+        f["up_streak"] = self._compute_streak(returns > 0)
+        f["down_streak"] = self._compute_streak(returns < 0)
+        f["trend_consistency_10"] = returns.rolling(10).apply(
+            lambda x: (x > 0).sum() / len(x), raw=True
+        )
+        f["trend_consistency_20"] = returns.rolling(20).apply(
+            lambda x: (x > 0).sum() / len(x), raw=True
+        )
+
+        # --- Price relative to range (Donchian position) ---
+        for w in [20, 50]:
+            high_w = high.rolling(w).max()
+            low_w = low.rolling(w).min()
+            range_w = (high_w - low_w).replace(0, np.nan)
+            f[f"donchian_pos_{w}"] = (close - low_w) / range_w
+
+        # --- Williams %R ---
+        for w in [14, 28]:
+            hh = high.rolling(w).max()
+            ll = low.rolling(w).min()
+            f[f"williams_r_{w}"] = -100 * (hh - close) / (hh - ll).replace(0, np.nan)
+
+        # --- CCI (Commodity Channel Index) ---
+        typical_price = (high + low + close) / 3
+        tp_sma = typical_price.rolling(20).mean()
+        tp_mad = typical_price.rolling(20).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True)
+        f["cci_20"] = (typical_price - tp_sma) / (0.015 * tp_mad.replace(0, np.nan))
+
+        # --- MFI (Money Flow Index) — volume-weighted RSI ---
+        mf_raw = typical_price * volume
+        mf_pos = mf_raw.where(typical_price > typical_price.shift(1), 0.0)
+        mf_neg = mf_raw.where(typical_price < typical_price.shift(1), 0.0)
+        mf_ratio = mf_pos.rolling(14).sum() / mf_neg.rolling(14).sum().replace(0, np.nan)
+        f["mfi_14"] = 100.0 - (100.0 / (1.0 + mf_ratio))
+
+        # --- VWAP deviation ---
+        cumvol = volume.cumsum()
+        cum_tp_vol = (typical_price * volume).cumsum()
+        vwap = cum_tp_vol / cumvol.replace(0, np.nan)
+        f["vwap_deviation"] = (close - vwap) / vwap.replace(0, np.nan)
+
+        # --- Volume microstructure ---
+        f["volume_delta"] = volume - volume.shift(1)
+        f["volume_acceleration"] = f["volume_delta"] - f["volume_delta"].shift(1)
+        f["buy_volume_pct"] = (close - low) / (high - low).replace(0, np.nan)
+        f["sell_volume_pct"] = (high - close) / (high - low).replace(0, np.nan)
+        f["volume_force"] = returns * volume
+        f["volume_force_sma_10"] = f["volume_force"].rolling(10).mean()
+
+        # --- Volatility regime features ---
+        vol_20 = f["realized_vol_20"]
+        vol_60 = f["realized_vol_60"]
+        f["vol_ratio_20_60"] = vol_20 / vol_60.replace(0, np.nan)
+        f["vol_zscore_20"] = (vol_20 - vol_20.rolling(100).mean()) / vol_20.rolling(100).std().replace(0, np.nan)
+        f["atr_zscore"] = (f["atr_pct"] - f["atr_pct"].rolling(100).mean()) / f["atr_pct"].rolling(100).std().replace(0, np.nan)
+
+        # --- Garman-Klass volatility estimator ---
+        log_hl = np.log(high / low.replace(0, np.nan)) ** 2
+        log_co = np.log(close / df["open"].astype(float).replace(0, np.nan)) ** 2
+        gk_vol = (0.5 * log_hl - (2 * np.log(2) - 1) * log_co)
+        f["gk_volatility_20"] = gk_vol.rolling(20).mean().apply(np.sqrt)
+
+        # --- Cross-timeframe synthetic features ---
+        # Simulate higher timeframes by resampling within the 15m data
+        for mult, name in [(4, "1h"), (16, "4h")]:
+            close_htf = close.rolling(mult).apply(lambda x: x.iloc[-1], raw=False)
+            high_htf = high.rolling(mult).max()
+            low_htf = low.rolling(mult).min()
+            f[f"return_{name}"] = close_htf.pct_change(mult)
+            f[f"range_pct_{name}"] = (high_htf - low_htf) / close.replace(0, np.nan)
+            f[f"rsi_{name}"] = self._compute_rsi_series(close_htf, period=14)
+
+        # --- Hour-of-day cyclical encoding (if timestamp available) ---
+        if "timestamp" in df.columns:
+            ts = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+            hour = ts.dt.hour + ts.dt.minute / 60.0
+            f["hour_sin"] = np.sin(2 * np.pi * hour / 24.0)
+            f["hour_cos"] = np.cos(2 * np.pi * hour / 24.0)
+            dow = ts.dt.dayofweek.astype(float)
+            f["dow_sin"] = np.sin(2 * np.pi * dow / 7.0)
+            f["dow_cos"] = np.cos(2 * np.pi * dow / 7.0)
+
         return f
 
     def _compute_labels(self, df: pd.DataFrame) -> pd.DataFrame:
         """Compute forward-return labels at multiple horizons."""
         labels = pd.DataFrame(index=df.index)
         close = df["close"].astype(float)
+        high = df["high"].astype(float)
+        low = df["low"].astype(float)
 
         for name, periods in self.HORIZONS.items():
             future_close = close.shift(-periods)
@@ -277,11 +383,43 @@ class BTCPriceDatasetBuilder:
                 pct > 0.001, 1, np.where(pct < -0.001, -1, 0)
             )
 
+            # --- Advanced labels ---
+            # Volatility-normalised return (better target for varying regimes)
+            rolling_vol = close.pct_change().rolling(20).std().replace(0, np.nan)
+            labels[f"fwd_return_vol_adj_{name}"] = labels[f"fwd_return_{name}"] / rolling_vol
+
+            # Max adverse excursion — worst drawdown before reaching the horizon
+            if periods <= 60:
+                future_lows = pd.Series(np.nan, index=df.index)
+                future_highs = pd.Series(np.nan, index=df.index)
+                for i in range(len(df) - periods):
+                    future_lows.iloc[i] = low.iloc[i + 1: i + 1 + periods].min()
+                    future_highs.iloc[i] = high.iloc[i + 1: i + 1 + periods].max()
+                labels[f"fwd_max_drawdown_{name}"] = (future_lows - close) / close
+                labels[f"fwd_max_runup_{name}"] = (future_highs - close) / close
+
         return labels
 
     # ------------------------------------------------------------------
     # Indicator helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _compute_streak(condition: pd.Series) -> pd.Series:
+        """Count consecutive True values (resets on False)."""
+        groups = (~condition).cumsum()
+        return condition.groupby(groups).cumsum().astype(float)
+
+    @staticmethod
+    def _compute_rsi_series(series: pd.Series, period: int = 14) -> pd.Series:
+        """Compute RSI from any price series."""
+        delta = series.diff()
+        gain = delta.clip(lower=0)
+        loss = (-delta).clip(lower=0)
+        avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+        rs = avg_gain / avg_loss.replace(0, np.nan)
+        return 100.0 - (100.0 / (1.0 + rs))
 
     @staticmethod
     def _compute_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:

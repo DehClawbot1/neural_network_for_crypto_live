@@ -129,18 +129,30 @@ def download_binance_klines(
     return output_path
 
 
-def build_labelled_dataset(csv_path: Path, logs_dir: str = "logs") -> Path:
+def build_labelled_dataset(csv_path: Path, logs_dir: str = "logs", enrich_derivatives: bool = False) -> Path:
     """Build a labelled training dataset from downloaded candles."""
     from btc_price_dataset import BTCPriceDatasetBuilder
 
+    candle_df = pd.read_csv(csv_path, engine="python", on_bad_lines="skip")
+
+    if enrich_derivatives:
+        try:
+            from btc_onchain_features import BTCDerivativesFeatures
+            logger.info("Enriching candles with derivatives data (funding, OI, L/S ratio, taker volume)...")
+            fetcher = BTCDerivativesFeatures()
+            candle_df = fetcher.fetch_all_and_merge(candle_df, period="15m")
+            logger.info("Derivatives enrichment complete: %d columns", len(candle_df.columns))
+        except Exception as exc:
+            logger.warning("Derivatives enrichment failed (continuing without): %s", exc)
+
     builder = BTCPriceDatasetBuilder(logs_dir=logs_dir)
-    dataset = builder.build_from_csv(csv_path)
+    dataset = builder.build_from_candles(candle_df)
     if dataset.empty:
         logger.error("Failed to build dataset from %s", csv_path)
         return Path(logs_dir) / "btc_price_dataset.csv"
 
     builder.append_to_disk(dataset)
-    logger.info("Built labelled dataset: %d rows", len(dataset))
+    logger.info("Built labelled dataset: %d rows, %d features", len(dataset), len(dataset.columns))
     return builder.dataset_path
 
 
@@ -152,6 +164,7 @@ def main():
     parser.add_argument("--output-dir", default="data", help="Output directory (default: data)")
     parser.add_argument("--build-dataset", action="store_true", help="Also build labelled dataset for training")
     parser.add_argument("--train", action="store_true", help="Download + build dataset + train model")
+    parser.add_argument("--enrich", action="store_true", help="Enrich with derivatives data (funding rate, OI, L/S ratio)")
     args = parser.parse_args()
 
     csv_path = download_binance_klines(
@@ -162,7 +175,7 @@ def main():
     )
 
     if args.build_dataset or args.train:
-        dataset_path = build_labelled_dataset(csv_path)
+        dataset_path = build_labelled_dataset(csv_path, enrich_derivatives=args.enrich)
         logger.info("Labelled dataset at: %s", dataset_path)
 
     if args.train:
