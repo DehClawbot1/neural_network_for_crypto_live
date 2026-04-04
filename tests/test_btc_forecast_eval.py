@@ -41,6 +41,8 @@ class TestBTCForecastEvaluator(unittest.TestCase):
         pred = self._make_prediction()
         self.evaluator.record_prediction(pred, current_price=66000.0)
         self.assertEqual(self.evaluator.pending_count, 1)
+        pending_path = Path(self.tmpdir) / "btc_forecast_eval_pending.csv"
+        self.assertTrue(pending_path.exists())
 
     def test_record_skips_not_ready(self):
         pred = {"btc_forecast_ready": False}
@@ -95,6 +97,8 @@ class TestBTCForecastEvaluator(unittest.TestCase):
         time.sleep(2.5)
         self.evaluator.evaluate_matured(current_price=66100.0)
         self.assertEqual(self.evaluator.pending_count, 0)
+        pending_path = Path(self.tmpdir) / "btc_forecast_eval_pending.csv"
+        self.assertFalse(pending_path.exists())
 
     def test_immature_predictions_stay_pending(self):
         pred = self._make_prediction()
@@ -104,6 +108,22 @@ class TestBTCForecastEvaluator(unittest.TestCase):
         results = self.evaluator.evaluate_matured(current_price=66100.0)
         self.assertEqual(len(results), 0)
         self.assertEqual(self.evaluator.pending_count, 1)
+
+    def test_pending_predictions_reload_from_disk(self):
+        pred = self._make_prediction(direction=-1, confidence=0.61)
+        self.evaluator.record_prediction(pred, current_price=66000.0)
+
+        restored = BTCForecastEvaluator(
+            logs_dir=self.tmpdir,
+            horizon_seconds=2,
+            confidence_threshold=0.52,
+        )
+        self.assertEqual(restored.pending_count, 1)
+
+        time.sleep(2.5)
+        results = restored.evaluate_matured(current_price=65800.0)
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]["correct"])
 
     def test_rolling_stats_empty(self):
         stats = self.evaluator.rolling_stats()
@@ -177,6 +197,7 @@ class TestBTCForecastEvaluator(unittest.TestCase):
         self.assertIn("pending_predictions", summary)
         self.assertIn("n_evaluated", summary)
         self.assertIn("eval_log_path", summary)
+        self.assertIn("pending_log_path", summary)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,2 @@
+predict_ts,eval_ts,entry_price,exit_price,predicted_direction,predicted_return,confidence,actual_return,actual_direction,correct,is_confident,confident_correct,pnl_pct,horizon_seconds,source,mtf_agreement,mtf_n_agree,mtf_n_total,mtf_source
+2026-04-04T04:53:53.841591+00:00,2026-04-04T04:54:00.185709+00:00,66843.1,66843.1,1,0.0,0.5,0.0,0,False,False,,0.0,6.3,smoke_seed,0.0,0,0,smoke_seed

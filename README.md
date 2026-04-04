@@ -190,6 +190,8 @@ The walk-forward evaluator logs every prediction to `logs/btc_forecast_eval.csv`
 - `actual_return`, `actual_direction`, `correct`, `pnl_pct`
 - `mtf_agreement`, `mtf_source`
 
+Pending predictions waiting to mature are persisted to `logs/btc_forecast_eval_pending.csv`.
+
 Rolling accuracy is computed in-memory and logged each cycle.
 
 ## BTC Live Price and Index Tracking

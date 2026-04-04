@@ -30,11 +30,13 @@ Usage in supervisor.py:
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
+import tempfile
 
 import numpy as np
 import pandas as pd
@@ -59,6 +61,7 @@ class BTCForecastEvaluator:
         self.logs_dir = Path(logs_dir)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.eval_path = self.logs_dir / "btc_forecast_eval.csv"
+        self.pending_path = self.logs_dir / "btc_forecast_eval_pending.csv"
         self.horizon_seconds = horizon_seconds
         self.confidence_threshold = confidence_threshold
 
@@ -68,6 +71,10 @@ class BTCForecastEvaluator:
 
         # Rolling accuracy tracking (in-memory)
         self._recent_results: deque[dict] = deque(maxlen=200)
+
+        # Load persisted pending predictions first so matured items can be
+        # evaluated even after process restarts.
+        self._load_pending()
 
         # Load existing eval data to seed rolling stats
         self._load_recent_results()
@@ -110,6 +117,7 @@ class BTCForecastEvaluator:
 
         with self._lock:
             self._pending.append(entry)
+            self._persist_pending()
 
         logger.debug(
             "BTCForecastEval: recorded prediction dir=%d conf=%.3f price=%.2f",
@@ -145,6 +153,7 @@ class BTCForecastEvaluator:
                 else:
                     remaining.append(entry)
             self._pending = remaining
+            self._persist_pending()
 
         # Append results to CSV and rolling tracker
         for result in matured:
@@ -298,6 +307,79 @@ class BTCForecastEvaluator:
         except Exception as exc:
             logger.warning("BTCForecastEval: failed to append result: %s", exc)
 
+    @staticmethod
+    def _pending_columns() -> list[str]:
+        return [
+            "predict_ts",
+            "predict_epoch",
+            "entry_price",
+            "predicted_direction",
+            "predicted_return",
+            "confidence",
+            "source",
+            "mtf_agreement",
+            "mtf_n_agree",
+            "mtf_n_total",
+            "mtf_source",
+        ]
+
+    def _persist_pending(self) -> None:
+        """Rewrite the pending prediction queue to disk atomically."""
+        columns = self._pending_columns()
+        rows = []
+        for entry in list(self._pending):
+            rows.append({col: entry.get(col) for col in columns})
+
+        fd, tmp = tempfile.mkstemp(dir=str(self.logs_dir), suffix=".pending.tmp")
+        try:
+            os.close(fd)
+            if rows:
+                pd.DataFrame(rows, columns=columns).to_csv(tmp, index=False, encoding="utf-8")
+                os.replace(tmp, self.pending_path)
+            else:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                if self.pending_path.exists():
+                    self.pending_path.unlink()
+        except Exception as exc:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            logger.warning("BTCForecastEval: failed to persist pending queue: %s", exc)
+
+    def _load_pending(self) -> None:
+        """Load pending predictions from disk so evaluation survives restarts."""
+        try:
+            if not self.pending_path.exists() or self.pending_path.stat().st_size == 0:
+                return
+
+            df = pd.read_csv(self.pending_path, engine="python", on_bad_lines="skip")
+            if df.empty:
+                return
+
+            for _, row in df.tail(self._pending.maxlen).iterrows():
+                entry = row.to_dict()
+                entry["predict_epoch"] = float(entry.get("predict_epoch", 0.0) or 0.0)
+                entry["entry_price"] = float(entry.get("entry_price", 0.0) or 0.0)
+                entry["predicted_direction"] = int(entry.get("predicted_direction", 0) or 0)
+                entry["predicted_return"] = float(entry.get("predicted_return", 0.0) or 0.0)
+                entry["confidence"] = float(entry.get("confidence", 0.0) or 0.0)
+                entry["mtf_agreement"] = float(entry.get("mtf_agreement", 0.0) or 0.0)
+                entry["mtf_n_agree"] = int(entry.get("mtf_n_agree", 0) or 0)
+                entry["mtf_n_total"] = int(entry.get("mtf_n_total", 0) or 0)
+                self._pending.append(entry)
+
+            logger.info(
+                "BTCForecastEval: loaded %d pending predictions from %s",
+                len(self._pending),
+                self.pending_path,
+            )
+        except Exception as exc:
+            logger.debug("BTCForecastEval: could not load pending queue: %s", exc)
+
     def _load_recent_results(self) -> None:
         """Load recent evaluation results from disk to seed rolling stats."""
         try:
@@ -328,4 +410,5 @@ class BTCForecastEvaluator:
         stats = self.rolling_stats()
         stats["pending_predictions"] = self.pending_count
         stats["eval_log_path"] = str(self.eval_path)
+        stats["pending_log_path"] = str(self.pending_path)
         return stats

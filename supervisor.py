@@ -65,6 +65,7 @@ from technical_analyzer import TechnicalAnalyzer
 from btc_forecast_model import BTCForecastModel
 from btc_multitimeframe import BTCMultiTimeframeForecaster
 from btc_forecast_eval import BTCForecastEvaluator
+from supervisor_btc_pipeline import apply_btc_pipeline
 from sentiment_analyzer import SentimentAnalyzer
 from macro_analyzer import MacroAnalyzer
 from onchain_analyzer import OnChainAnalyzer
@@ -1548,59 +1549,14 @@ def main_loop():
             macro_context = {**ta_context, **sent_context, **mach_context, **onc_context}
 
             # --- BTC Price Forecast (Pillar 5) — Multi-Timeframe ---
-            try:
-                cds = technical_analyzer.candle_data_service
-                if btc_mtf_forecaster.is_ready:
-                    candle_dfs = {}
-                    for tf_interval, tf_limit in [("15m", 250), ("1h", 250), ("4h", 250)]:
-                        try:
-                            candle_dfs[tf_interval] = cds.refresh_latest_closed_candles(
-                                tf_interval, limit=tf_limit, timezone_name="UTC"
-                            )
-                        except Exception:
-                            pass
-                    btc_fc = btc_mtf_forecaster.predict(candle_dfs)
-                    macro_context.update(btc_fc)
-                elif btc_forecast_model.is_ready:
-                    btc_fc = btc_forecast_model.predict_from_candles(
-                        cds.refresh_latest_closed_candles("15m", limit=250, timezone_name="UTC")
-                    )
-                    macro_context.update(btc_fc)
-            except Exception as exc:
-                logging.debug("BTC forecast skipped: %s", exc)
+            macro_context, _btc_pipeline_audit = apply_btc_pipeline(
+                macro_context,
+                technical_analyzer,
+                btc_mtf_forecaster,
+                btc_forecast_model,
+                btc_forecast_evaluator,
+            )
 
-            # --- BTC Sentiment Features (Pillar 6) ---
-            try:
-                from btc_sentiment_features import BTCSentimentFeatures
-                btc_sentiment_snapshot = BTCSentimentFeatures().fetch_current_snapshot()
-                if btc_sentiment_snapshot:
-                    macro_context.update(btc_sentiment_snapshot)
-            except Exception as exc:
-                logging.debug("BTC sentiment skipped: %s", exc)
-
-            # --- BTC Order Book Depth Features (Pillar 7) ---
-            try:
-                from orderbook_depth_features import fetch_btc_depth_snapshot
-                ob_features = fetch_btc_depth_snapshot()
-                if ob_features.get("ob_ready"):
-                    macro_context.update(ob_features)
-            except Exception as exc:
-                logging.debug("BTC order book depth skipped: %s", exc)
-
-            # --- BTC Forecast Walk-Forward Evaluation (Pillar 8) ---
-            try:
-                btc_live_price = macro_context.get("btc_live_price") or macro_context.get("ob_midpoint") or 0
-                if btc_live_price > 0:
-                    # Evaluate any matured predictions from previous cycles
-                    btc_forecast_evaluator.evaluate_matured(btc_live_price)
-                    # Record current prediction for future evaluation
-                    btc_fc_for_eval = {k: v for k, v in macro_context.items() if k.startswith("btc_")}
-                    btc_forecast_evaluator.record_prediction(
-                        btc_fc_for_eval, btc_live_price,
-                        source=macro_context.get("btc_mtf_source", "unknown"),
-                    )
-            except Exception as exc:
-                logging.debug("BTC forecast eval skipped: %s", exc)
             # --------------------------------------------------
 
             if not signals_df.empty:

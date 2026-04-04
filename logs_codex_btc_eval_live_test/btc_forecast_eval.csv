@@ -1,0 +1,2 @@
+predict_ts,eval_ts,entry_price,exit_price,predicted_direction,predicted_return,confidence,actual_return,actual_direction,correct,is_confident,confident_correct,pnl_pct,horizon_seconds,source,mtf_agreement,mtf_n_agree,mtf_n_total,mtf_source
+2026-04-04T04:39:48.570981+00:00,2026-04-04T04:39:50.776814+00:00,66000.0,66250.0,1,0.0031,0.67,0.003788,1,True,True,True,0.003788,2.2,codex_live_smoke,0.82,3,3,multi_timeframe
