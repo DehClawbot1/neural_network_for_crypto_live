@@ -129,7 +129,12 @@ def download_binance_klines(
     return output_path
 
 
-def build_labelled_dataset(csv_path: Path, logs_dir: str = "logs", enrich_derivatives: bool = False) -> Path:
+def build_labelled_dataset(
+    csv_path: Path,
+    logs_dir: str = "logs",
+    enrich_derivatives: bool = False,
+    enrich_sentiment: bool = False,
+) -> Path:
     """Build a labelled training dataset from downloaded candles."""
     from btc_price_dataset import BTCPriceDatasetBuilder
 
@@ -144,6 +149,20 @@ def build_labelled_dataset(csv_path: Path, logs_dir: str = "logs", enrich_deriva
             logger.info("Derivatives enrichment complete: %d columns", len(candle_df.columns))
         except Exception as exc:
             logger.warning("Derivatives enrichment failed (continuing without): %s", exc)
+
+    if enrich_sentiment:
+        try:
+            from btc_sentiment_features import BTCSentimentFeatures
+            logger.info("Enriching candles with sentiment data (FGI, Google Trends, Reddit)...")
+            sentiment = BTCSentimentFeatures()
+            candle_df = sentiment.fetch_all_and_merge(
+                candle_df,
+                fetch_trends=True,
+                fetch_reddit=True,
+            )
+            logger.info("Sentiment enrichment complete: %d columns", len(candle_df.columns))
+        except Exception as exc:
+            logger.warning("Sentiment enrichment failed (continuing without): %s", exc)
 
     builder = BTCPriceDatasetBuilder(logs_dir=logs_dir)
     dataset = builder.build_from_candles(candle_df)
@@ -165,6 +184,7 @@ def main():
     parser.add_argument("--build-dataset", action="store_true", help="Also build labelled dataset for training")
     parser.add_argument("--train", action="store_true", help="Download + build dataset + train model")
     parser.add_argument("--enrich", action="store_true", help="Enrich with derivatives data (funding rate, OI, L/S ratio)")
+    parser.add_argument("--sentiment", action="store_true", help="Enrich with sentiment data (Fear & Greed, Google Trends, Reddit)")
     parser.add_argument("--multi-timeframe", action="store_true", help="Download all timeframes (15m, 1h, 4h) and train multi-timeframe models")
     args = parser.parse_args()
 
@@ -200,7 +220,11 @@ def main():
     )
 
     if args.build_dataset or args.train:
-        dataset_path = build_labelled_dataset(csv_path, enrich_derivatives=args.enrich)
+        dataset_path = build_labelled_dataset(
+            csv_path,
+            enrich_derivatives=args.enrich,
+            enrich_sentiment=args.sentiment,
+        )
         logger.info("Labelled dataset at: %s", dataset_path)
 
     if args.train:

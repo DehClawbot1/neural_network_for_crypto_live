@@ -88,6 +88,7 @@ class BTCMultiTimeframeForecaster:
         self,
         candle_paths: dict[str, str | Path] | None = None,
         enrich_derivatives: bool = True,
+        enrich_sentiment: bool = False,
     ) -> dict[str, dict]:
         """
         Train models for each timeframe.
@@ -96,6 +97,7 @@ class BTCMultiTimeframeForecaster:
             candle_paths: dict mapping timeframe -> CSV path
                 e.g. {"15m": "data/BTCUSDT_15m_730d.csv", ...}
             enrich_derivatives: whether to fetch derivatives data
+            enrich_sentiment: whether to fetch sentiment data (FGI, Google Trends, Reddit)
 
         Returns:
             dict of timeframe -> training metrics
@@ -127,6 +129,19 @@ class BTCMultiTimeframeForecaster:
                     candle_df = fetcher.fetch_all_and_merge(candle_df, period="15m")
                 except Exception as exc:
                     logger.warning("Derivatives enrichment failed for %s: %s", tf, exc)
+
+            # Enrich with sentiment (FGI is daily → works for all timeframes)
+            if enrich_sentiment:
+                try:
+                    from btc_sentiment_features import BTCSentimentFeatures
+                    sentiment = BTCSentimentFeatures()
+                    candle_df = sentiment.fetch_all_and_merge(
+                        candle_df,
+                        fetch_trends=True,
+                        fetch_reddit=False,  # Reddit is real-time only, not useful for historical training
+                    )
+                except Exception as exc:
+                    logger.warning("Sentiment enrichment failed for %s: %s", tf, exc)
 
             # Choose appropriate target horizon per timeframe
             target_return, target_dir = self._get_targets_for_tf(tf)

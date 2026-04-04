@@ -1566,6 +1566,15 @@ def main_loop():
                     macro_context.update(btc_fc)
             except Exception as exc:
                 logging.debug("BTC forecast skipped: %s", exc)
+
+            # --- BTC Sentiment Features (Pillar 6) ---
+            try:
+                from btc_sentiment_features import BTCSentimentFeatures
+                btc_sentiment_snapshot = BTCSentimentFeatures().fetch_current_snapshot()
+                if btc_sentiment_snapshot:
+                    macro_context.update(btc_sentiment_snapshot)
+            except Exception as exc:
+                logging.debug("BTC sentiment skipped: %s", exc)
             # --------------------------------------------------
 
             if not signals_df.empty:
