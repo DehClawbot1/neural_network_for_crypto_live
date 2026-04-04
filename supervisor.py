@@ -63,6 +63,7 @@ from token_utils import normalize_token_id
 from order_flow_analyzer import OrderFlowAnalyzer
 from technical_analyzer import TechnicalAnalyzer
 from btc_forecast_model import BTCForecastModel
+from btc_multitimeframe import BTCMultiTimeframeForecaster
 from sentiment_analyzer import SentimentAnalyzer
 from macro_analyzer import MacroAnalyzer
 from onchain_analyzer import OnChainAnalyzer
@@ -721,7 +722,8 @@ def main_loop():
     hybrid_scorer = Stage3HybridScorer()
     order_flow_analyzer = OrderFlowAnalyzer(min_usd_volume=500.0, volume_imbalance_threshold=0.75, min_trades_count=3)
     technical_analyzer = TechnicalAnalyzer()
-    btc_forecast_model = BTCForecastModel()
+    btc_forecast_model = BTCForecastModel()  # single 15m fallback
+    btc_mtf_forecaster = BTCMultiTimeframeForecaster()  # multi-timeframe (15m/1h/4h)
     sentiment_analyzer = SentimentAnalyzer()
     macro_analyzer = MacroAnalyzer()
     onchain_analyzer = OnChainAnalyzer()
@@ -1543,11 +1545,23 @@ def main_loop():
             
             macro_context = {**ta_context, **sent_context, **mach_context, **onc_context}
 
-            # --- BTC Price Forecast (Pillar 5) ---
+            # --- BTC Price Forecast (Pillar 5) — Multi-Timeframe ---
             try:
-                if btc_forecast_model.is_ready:
+                cds = technical_analyzer.candle_data_service
+                if btc_mtf_forecaster.is_ready:
+                    candle_dfs = {}
+                    for tf_interval, tf_limit in [("15m", 250), ("1h", 250), ("4h", 250)]:
+                        try:
+                            candle_dfs[tf_interval] = cds.refresh_latest_closed_candles(
+                                tf_interval, limit=tf_limit, timezone_name="UTC"
+                            )
+                        except Exception:
+                            pass
+                    btc_fc = btc_mtf_forecaster.predict(candle_dfs)
+                    macro_context.update(btc_fc)
+                elif btc_forecast_model.is_ready:
                     btc_fc = btc_forecast_model.predict_from_candles(
-                        technical_analyzer.candle_data_service.refresh_latest_closed_candles("15m", limit=250, timezone_name="UTC")
+                        cds.refresh_latest_closed_candles("15m", limit=250, timezone_name="UTC")
                     )
                     macro_context.update(btc_fc)
             except Exception as exc:

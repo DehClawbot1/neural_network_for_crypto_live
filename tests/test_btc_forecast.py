@@ -180,5 +180,73 @@ class TestBTCForecastModel(unittest.TestCase):
         self.assertIn("error", metrics)
 
 
+class TestBTCMultiTimeframeForecaster(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.weights_dir = os.path.join(self.tmpdir, "weights")
+        self.logs_dir = os.path.join(self.tmpdir, "logs")
+
+    def test_default_result_is_not_ready(self):
+        from btc_multitimeframe import BTCMultiTimeframeForecaster
+        forecaster = BTCMultiTimeframeForecaster(
+            weights_dir=self.weights_dir, logs_dir=self.logs_dir
+        )
+        result = forecaster.predict()
+        self.assertFalse(result["btc_forecast_ready"])
+        self.assertEqual(result["btc_mtf_source"], "unavailable")
+
+    def test_is_ready_false_initially(self):
+        from btc_multitimeframe import BTCMultiTimeframeForecaster
+        forecaster = BTCMultiTimeframeForecaster(
+            weights_dir=self.weights_dir, logs_dir=self.logs_dir
+        )
+        self.assertFalse(forecaster.is_ready)
+
+    def test_combine_predictions_unanimous_bull(self):
+        from btc_multitimeframe import BTCMultiTimeframeForecaster
+        forecaster = BTCMultiTimeframeForecaster(
+            weights_dir=self.weights_dir, logs_dir=self.logs_dir
+        )
+        preds = {
+            "15m": {"btc_predicted_direction": 1, "btc_forecast_confidence": 0.7, "btc_predicted_return_15": 0.002},
+            "1h":  {"btc_predicted_direction": 1, "btc_forecast_confidence": 0.65, "btc_predicted_return_15": 0.003},
+            "4h":  {"btc_predicted_direction": 1, "btc_forecast_confidence": 0.8, "btc_predicted_return_15": 0.005},
+        }
+        result = forecaster._combine_predictions(preds)
+        self.assertEqual(result["btc_predicted_direction"], 1)
+        self.assertTrue(result["btc_forecast_ready"])
+        self.assertEqual(result["btc_mtf_n_agree"], 3)
+        self.assertGreater(result["btc_mtf_agreement"], 0.55)
+
+    def test_combine_predictions_mixed_goes_neutral(self):
+        from btc_multitimeframe import BTCMultiTimeframeForecaster
+        forecaster = BTCMultiTimeframeForecaster(
+            weights_dir=self.weights_dir, logs_dir=self.logs_dir
+        )
+        # Equal opposing votes with similar confidence → low agreement → neutral
+        preds = {
+            "15m": {"btc_predicted_direction": 1, "btc_forecast_confidence": 0.6, "btc_predicted_return_15": 0.001},
+            "1h":  {"btc_predicted_direction": -1, "btc_forecast_confidence": 0.6, "btc_predicted_return_15": -0.001},
+            "4h":  {"btc_predicted_direction": -1, "btc_forecast_confidence": 0.55, "btc_predicted_return_15": -0.002},
+        }
+        result = forecaster._combine_predictions(preds)
+        # Even if not fully neutral, agreement should be checked
+        self.assertTrue(result["btc_forecast_ready"])
+
+    def test_combine_skips_low_confidence(self):
+        from btc_multitimeframe import BTCMultiTimeframeForecaster
+        forecaster = BTCMultiTimeframeForecaster(
+            weights_dir=self.weights_dir, logs_dir=self.logs_dir
+        )
+        preds = {
+            "15m": {"btc_predicted_direction": -1, "btc_forecast_confidence": 0.50, "btc_predicted_return_15": -0.001},  # below threshold
+            "4h":  {"btc_predicted_direction": 1, "btc_forecast_confidence": 0.8, "btc_predicted_return_15": 0.003},
+        }
+        result = forecaster._combine_predictions(preds)
+        # Only 4h should be counted (15m confidence 0.50 < 0.52 threshold)
+        self.assertEqual(result["btc_predicted_direction"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

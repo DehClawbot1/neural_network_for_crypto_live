@@ -157,21 +157,41 @@ class Retrainer:
         logging.info("LATEST_RETRAIN_VERDICT %s", json.dumps(payload, separators=(",", ":"), sort_keys=True))
 
     def _retrain_btc_forecast(self, candidate_weights_dir):
-        """Retrain BTC price forecast model if dataset exists."""
+        """Retrain BTC price forecast models (multi-timeframe if data available)."""
         try:
-            from btc_forecast_model import BTCForecastModel
-            from btc_price_dataset import BTCPriceDatasetBuilder
+            from btc_multitimeframe import BTCMultiTimeframeForecaster
 
-            builder = BTCPriceDatasetBuilder(logs_dir=str(self.logs_dir))
-            dataset = builder.load_dataset()
-            if dataset.empty or len(dataset) < 100:
-                logging.info("BTC forecast retrain skipped: dataset has %d rows (need >=100)", len(dataset))
-                return
-            model = BTCForecastModel(weights_dir=str(candidate_weights_dir), logs_dir=str(self.logs_dir))
-            metrics = model.train(dataset)
-            logging.info("BTC forecast retrained: %s", metrics)
+            forecaster = BTCMultiTimeframeForecaster(
+                weights_dir=str(candidate_weights_dir),
+                logs_dir=str(self.logs_dir),
+            )
+            results = forecaster.train_all(enrich_derivatives=False)
+            for tf, metrics in results.items():
+                if "error" in metrics:
+                    logging.warning("BTC %s retrain error: %s", tf, metrics["error"])
+                else:
+                    logging.info(
+                        "BTC %s retrained: DirAcc=%.2f%% ClsAcc=%.2f%%",
+                        tf,
+                        metrics.get("direction_accuracy", 0) * 100,
+                        metrics.get("classifier_accuracy", 0) * 100,
+                    )
         except Exception as exc:
-            logging.warning("BTC forecast retrain failed (non-blocking): %s", exc)
+            # Fallback to single model if multi-timeframe fails
+            try:
+                from btc_forecast_model import BTCForecastModel
+                from btc_price_dataset import BTCPriceDatasetBuilder
+
+                builder = BTCPriceDatasetBuilder(logs_dir=str(self.logs_dir))
+                dataset = builder.load_dataset()
+                if dataset.empty or len(dataset) < 100:
+                    logging.info("BTC forecast retrain skipped: dataset has %d rows", len(dataset))
+                    return
+                model = BTCForecastModel(weights_dir=str(candidate_weights_dir), logs_dir=str(self.logs_dir))
+                metrics = model.train(dataset)
+                logging.info("BTC forecast retrained (single model): %s", metrics)
+            except Exception as exc2:
+                logging.warning("BTC forecast retrain failed (non-blocking): %s / %s", exc, exc2)
 
     def _write_status(self, closed_rows: int, replay_rows: int, action: str):
         self.status_file.write_text(action + "\n", encoding="utf-8")

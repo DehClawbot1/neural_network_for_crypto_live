@@ -165,7 +165,32 @@ def main():
     parser.add_argument("--build-dataset", action="store_true", help="Also build labelled dataset for training")
     parser.add_argument("--train", action="store_true", help="Download + build dataset + train model")
     parser.add_argument("--enrich", action="store_true", help="Enrich with derivatives data (funding rate, OI, L/S ratio)")
+    parser.add_argument("--multi-timeframe", action="store_true", help="Download all timeframes (15m, 1h, 4h) and train multi-timeframe models")
     args = parser.parse_args()
+
+    if args.multi_timeframe:
+        # Download all 3 timeframes
+        intervals = ["15m", "1h", "4h"]
+        csv_paths = {}
+        for interval in intervals:
+            csv_paths[interval] = download_binance_klines(
+                symbol=args.symbol,
+                interval=interval,
+                days=args.days,
+                output_dir=args.output_dir,
+            )
+        logger.info("Downloaded all timeframes: %s", list(csv_paths.keys()))
+
+        if args.train:
+            from btc_multitimeframe import BTCMultiTimeframeForecaster
+            forecaster = BTCMultiTimeframeForecaster()
+            results = forecaster.train_all(
+                candle_paths={tf: str(p) for tf, p in csv_paths.items()},
+                enrich_derivatives=args.enrich,
+            )
+            for tf, metrics in results.items():
+                logger.info("%s training: %s", tf, metrics)
+        return
 
     csv_path = download_binance_klines(
         symbol=args.symbol,
