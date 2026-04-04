@@ -141,7 +141,7 @@ The bot includes a full BTC price prediction system with multi-timeframe ML mode
 
 ```
 Pillar 5: Multi-Timeframe Forecast (15m/1h/4h weighted ensemble)
-Pillar 6: Sentiment Features (Fear & Greed Index, Google Trends, Reddit NLP)
+Pillar 6: Sentiment Features (Fear & Greed Index, Google Trends, Twitter/X + Reddit NLP)
 Pillar 7: Order Book Depth (Binance L2 imbalance, slope, whale walls)
 Pillar 8: Walk-Forward Live Evaluation (prediction vs actual tracking)
 ```
@@ -154,7 +154,7 @@ Pillar 8: Walk-Forward Live Evaluation (prediction vs actual tracking)
 | [btc_forecast_model.py](btc_forecast_model.py) | Ensemble of 4 models (2x LightGBM + HistGradientBoosting + MLP) with purged walk-forward CV, feature importance pruning, exponential recency weighting |
 | [btc_multitimeframe.py](btc_multitimeframe.py) | Manages 15m/1h/4h models with weighted voting (0.25/0.35/0.40), confidence gating, agreement threshold |
 | [btc_onchain_features.py](btc_onchain_features.py) | Derivatives data: funding rate, open interest, long/short ratio, taker buy/sell volume from Binance Futures |
-| [btc_sentiment_features.py](btc_sentiment_features.py) | Fear & Greed Index (contrarian signal), Google Trends (retail proxy), Reddit VADER NLP sentiment |
+| [btc_sentiment_features.py](btc_sentiment_features.py) | Fear & Greed Index (contrarian signal), Google Trends (retail proxy), Twitter/X + Reddit VADER NLP sentiment |
 | [orderbook_depth_features.py](orderbook_depth_features.py) | 43 L2 microstructure features: depth imbalance at 5/10/20 levels, cumulative depth at 10/25/50/100 bps, book slope, whale wall detection, volume-weighted midpoint |
 | [btc_forecast_eval.py](btc_forecast_eval.py) | Walk-forward live evaluator: logs every prediction vs actual outcome to `logs/btc_forecast_eval.csv`, computes rolling accuracy |
 | [download_btc_dataset.py](download_btc_dataset.py) | Downloads historical OHLCV from Binance, supports `--enrich` (derivatives), `--sentiment`, `--multi-timeframe` |
@@ -334,7 +334,7 @@ Completed:
 - **BTC price prediction pipeline** (5 modules, 128+ features, ensemble ML)
 - **Multi-timeframe forecasting** (15m/1h/4h with weighted voting)
 - **Derivatives enrichment** (funding rate, open interest, long/short ratio, taker volume)
-- **Sentiment features** (Fear & Greed Index, Google Trends, Reddit VADER NLP)
+- **Sentiment features** (Fear & Greed Index, Google Trends, Twitter/X + Reddit VADER NLP)
 - **Order book depth features** (43 L2 microstructure features from Binance Futures)
 - **Walk-forward live evaluator** (logs every prediction vs actual outcome)
 - 52 tests across 4 test suites

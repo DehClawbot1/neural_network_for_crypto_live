@@ -49,6 +49,13 @@ class TestBTCSentimentFeatures(unittest.TestCase):
         self.assertIn("gtrends_bitcoin", df.columns)
         self.assertEqual(len(df), 0)
 
+    def test_empty_twitter_returns_correct_columns(self):
+        df = self.fetcher._empty_twitter()
+        self.assertIn("timestamp", df.columns)
+        self.assertIn("twitter_sentiment", df.columns)
+        self.assertIn("twitter_post_count", df.columns)
+        self.assertEqual(len(df), 0)
+
     def test_empty_reddit_returns_correct_columns(self):
         df = self.fetcher._empty_reddit()
         self.assertIn("timestamp", df.columns)
@@ -93,6 +100,50 @@ class TestBTCSentimentFeatures(unittest.TestCase):
         self.assertIn("gtrends_momentum", result.columns)
         self.assertIn("gtrends_normalized", result.columns)
 
+    def test_compute_derived_features_twitter(self):
+        """Test derived features from Twitter/X sentiment values."""
+        df = pd.DataFrame({
+            "twitter_sentiment": np.random.uniform(-0.6, 0.6, 50),
+        })
+        result = self.fetcher._compute_derived_features(df)
+
+        self.assertIn("twitter_sentiment_zscore", result.columns)
+        self.assertIn("twitter_bullish", result.columns)
+        self.assertIn("twitter_bearish", result.columns)
+        self.assertIn("twitter_sentiment_momentum", result.columns)
+
+    @patch("btc_sentiment_features._get_vader")
+    @patch.object(BTCSentimentFeatures, "_fetch_nitter_posts")
+    def test_fetch_twitter_sentiment_aggregates_posts(self, mock_fetch_nitter_posts, mock_get_vader):
+        mock_vader = MagicMock()
+        mock_vader.polarity_scores.side_effect = [
+            {"compound": 0.6, "pos": 0.5, "neg": 0.1},
+            {"compound": 0.4, "pos": 0.4, "neg": 0.1},
+        ]
+        mock_get_vader.return_value = mock_vader
+        mock_fetch_nitter_posts.side_effect = [
+            [
+                {
+                    "timestamp": pd.Timestamp("2025-01-10T08:00:00Z"),
+                    "text": "Bitcoin looks strong today, very bullish setup",
+                    "engagement_proxy": 4.0,
+                },
+                {
+                    "timestamp": pd.Timestamp("2025-01-10T12:00:00Z"),
+                    "text": "BTC breakout confirmed, buyers in control",
+                    "engagement_proxy": 3.0,
+                },
+            ],
+            [],
+        ]
+
+        result = self.fetcher.fetch_twitter_sentiment(search_terms=["bitcoin", "btc"], per_term_limit=10)
+
+        self.assertEqual(len(result), 1)
+        self.assertIn("twitter_sentiment", result.columns)
+        self.assertIn("twitter_post_count", result.columns)
+        self.assertEqual(int(result["twitter_post_count"].iloc[0]), 2)
+
     def test_compute_derived_features_reddit(self):
         """Test derived features from Reddit sentiment values."""
         df = pd.DataFrame({
@@ -107,7 +158,8 @@ class TestBTCSentimentFeatures(unittest.TestCase):
 
     @patch.object(BTCSentimentFeatures, "fetch_fear_greed_history")
     @patch.object(BTCSentimentFeatures, "fetch_google_trends")
-    def test_fetch_all_and_merge_with_mock_data(self, mock_gtrends, mock_fgi):
+    @patch.object(BTCSentimentFeatures, "fetch_twitter_sentiment")
+    def test_fetch_all_and_merge_with_mock_data(self, mock_twitter, mock_gtrends, mock_fgi):
         """Test merge pipeline with mocked API data."""
         # Mock FGI data (daily)
         fgi_dates = pd.date_range("2024-12-01", periods=60, freq="D", tz="UTC")
@@ -124,9 +176,20 @@ class TestBTCSentimentFeatures(unittest.TestCase):
             "gtrends_bitcoin": np.random.randint(30, 70, 10),
         })
 
+        tw_dates = pd.date_range("2024-12-20", periods=14, freq="D", tz="UTC")
+        mock_twitter.return_value = pd.DataFrame({
+            "timestamp": tw_dates,
+            "twitter_sentiment": np.random.uniform(-0.3, 0.4, len(tw_dates)),
+            "twitter_post_count": np.random.randint(10, 120, len(tw_dates)),
+            "twitter_sentiment_pos": np.random.uniform(0.1, 0.4, len(tw_dates)),
+            "twitter_sentiment_neg": np.random.uniform(0.05, 0.3, len(tw_dates)),
+            "twitter_engagement_proxy": np.random.uniform(1.0, 5.0, len(tw_dates)),
+        })
+
         result = self.fetcher.fetch_all_and_merge(
             self.candles,
             fetch_trends=True,
+            fetch_twitter=True,
             fetch_reddit=False,
         )
 
@@ -136,6 +199,8 @@ class TestBTCSentimentFeatures(unittest.TestCase):
         self.assertIn("fgi_extreme_fear", result.columns)
         self.assertIn("fgi_contrarian", result.columns)
         self.assertIn("gtrends_bitcoin", result.columns)
+        self.assertIn("twitter_sentiment", result.columns)
+        self.assertIn("twitter_bullish", result.columns)
         self.assertEqual(len(result), len(self.candles))
 
     def test_fetch_all_and_merge_no_timestamp(self):
@@ -152,11 +217,13 @@ class TestBTCSentimentFeatures(unittest.TestCase):
         result = self.fetcher.fetch_all_and_merge(
             self.candles,
             fetch_trends=False,
+            fetch_twitter=False,
             fetch_reddit=False,
         )
 
         # Should still have fgi_value column (filled with NaN)
         self.assertIn("fgi_value", result.columns)
+        self.assertIn("twitter_sentiment", result.columns)
         self.assertEqual(len(result), len(self.candles))
 
     def test_fetch_current_snapshot_structure(self):
@@ -174,10 +241,24 @@ class TestBTCSentimentFeatures(unittest.TestCase):
             }
             mock_session.get.return_value = mock_resp
 
-            # Patch reddit to avoid real API call
-            with patch.object(self.fetcher, "fetch_reddit_sentiment", return_value=self.fetcher._empty_reddit()):
-                result = self.fetcher.fetch_current_snapshot()
+            twitter_df = pd.DataFrame({
+                "timestamp": pd.to_datetime(["2025-01-10"], utc=True),
+                "twitter_sentiment": [0.31],
+                "twitter_post_count": [42],
+                "twitter_sentiment_pos": [0.34],
+                "twitter_sentiment_neg": [0.11],
+                "twitter_engagement_proxy": [3.5],
+            })
 
+            # Patch social fetches to avoid real API calls
+            with patch.object(self.fetcher, "fetch_twitter_sentiment", return_value=twitter_df):
+                with patch.object(self.fetcher, "fetch_reddit_sentiment", return_value=self.fetcher._empty_reddit()):
+                    result = self.fetcher.fetch_current_snapshot()
+
+            self.assertIn("twitter_sentiment", result)
+            self.assertEqual(result["twitter_post_count"], 42.0)
+            self.assertEqual(result["twitter_bullish"], 1.0)
+            self.assertEqual(result["twitter_bearish"], 0.0)
             self.assertIn("fgi_value", result)
             self.assertEqual(result["fgi_value"], 25)
             self.assertEqual(result["fgi_extreme_fear"], 0.0)  # 25 >= 20, not extreme fear

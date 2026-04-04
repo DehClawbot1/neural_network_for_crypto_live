@@ -207,6 +207,7 @@ def main():
             results = forecaster.train_all(
                 candle_paths={tf: str(p) for tf, p in csv_paths.items()},
                 enrich_derivatives=args.enrich,
+                enrich_sentiment=args.sentiment,
             )
             for tf, metrics in results.items():
                 logger.info("%s training: %s", tf, metrics)

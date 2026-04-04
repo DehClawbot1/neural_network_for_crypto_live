@@ -654,8 +654,8 @@ class _ScaledModel:
     """Wrapper that applies StandardScaler before predict/predict_proba."""
 
     def __init__(self, model, scaler):
-        self.model = model
-        self.scaler = scaler
+        object.__setattr__(self, "model", model)
+        object.__setattr__(self, "scaler", scaler)
 
     def predict(self, X):
         return self.model.predict(self.scaler.transform(X))
@@ -663,8 +663,23 @@ class _ScaledModel:
     def predict_proba(self, X):
         return self.model.predict_proba(self.scaler.transform(X))
 
+    def __getstate__(self):
+        return {
+            "model": object.__getattribute__(self, "__dict__").get("model"),
+            "scaler": object.__getattribute__(self, "__dict__").get("scaler"),
+        }
+
+    def __setstate__(self, state):
+        state = state or {}
+        object.__setattr__(self, "model", state.get("model"))
+        object.__setattr__(self, "scaler", state.get("scaler"))
+
     def __getattr__(self, name):
-        # Guard against infinite recursion during unpickling (self.model not yet set)
-        if name in ("model", "scaler"):
+        # During unpickling, __getattr__ may run before the instance dict is fully restored.
+        # Read from __dict__ directly so missing "model" does not recurse back into __getattr__.
+        if name in ("model", "scaler", "__getstate__", "__setstate__"):
             raise AttributeError(name)
-        return getattr(self.model, name)
+        model = object.__getattribute__(self, "__dict__").get("model")
+        if model is None:
+            raise AttributeError(name)
+        return getattr(model, name)

@@ -97,7 +97,7 @@ class BTCMultiTimeframeForecaster:
             candle_paths: dict mapping timeframe -> CSV path
                 e.g. {"15m": "data/BTCUSDT_15m_730d.csv", ...}
             enrich_derivatives: whether to fetch derivatives data
-            enrich_sentiment: whether to fetch sentiment data (FGI, Google Trends, Reddit)
+            enrich_sentiment: whether to fetch sentiment data (FGI, Google Trends, Twitter/X, Reddit)
 
         Returns:
             dict of timeframe -> training metrics
@@ -138,6 +138,7 @@ class BTCMultiTimeframeForecaster:
                     candle_df = sentiment.fetch_all_and_merge(
                         candle_df,
                         fetch_trends=True,
+                        fetch_twitter=True,
                         fetch_reddit=False,  # Reddit is real-time only, not useful for historical training
                     )
                 except Exception as exc:

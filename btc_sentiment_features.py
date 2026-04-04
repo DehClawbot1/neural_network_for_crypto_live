@@ -4,7 +4,8 @@ BTC Sentiment Feature Fetcher
 Pulls alpha-generating sentiment signals that technical indicators miss:
   1. Fear & Greed Index (alternative.me) — strong contrarian signal
   2. Google Trends "bitcoin" searches — retail interest proxy
-  3. Reddit r/bitcoin + r/cryptocurrency sentiment — crowd mood via VADER NLP
+  3. Twitter/X search sentiment — fast crowd mood via public RSS mirrors + VADER NLP
+  4. Reddit r/bitcoin + r/cryptocurrency sentiment — crowd mood via VADER NLP
 
 These features measure CROWD PSYCHOLOGY — not price action.
 When fear is extreme, smart money buys. When greed peaks, corrections follow.
@@ -73,6 +74,12 @@ class BTCSentimentFeatures:
     FEAR_GREED_URL = "https://api.alternative.me/fng/"
     REDDIT_BASE = "https://www.reddit.com"
     REDDIT_SUBREDDITS = ["bitcoin", "cryptocurrency"]
+    TWITTER_SEARCH_TERMS = ["bitcoin", "btc", "#bitcoin", "#btc"]
+    NITTER_INSTANCES = [
+        "https://nitter.poast.org",
+        "https://nitter.net",
+        "https://nitter.privacydev.net",
+    ]
 
     def __init__(self):
         self._session = requests.Session()
@@ -235,7 +242,146 @@ class BTCSentimentFeatures:
         return pd.DataFrame(columns=["timestamp", "gtrends_bitcoin"])
 
     # ------------------------------------------------------------------
-    # 3. Reddit Sentiment
+    # 3. Twitter/X Sentiment
+    # ------------------------------------------------------------------
+
+    def fetch_twitter_sentiment(
+        self,
+        search_terms: list[str] | None = None,
+        per_term_limit: int = 40,
+    ) -> pd.DataFrame:
+        """
+        Fetch recent Twitter/X posts via public RSS mirrors and compute VADER sentiment.
+
+        Returns daily aggregates with columns:
+          [timestamp, twitter_sentiment, twitter_post_count, twitter_sentiment_pos,
+           twitter_sentiment_neg, twitter_engagement_proxy]
+        """
+        if search_terms is None:
+            search_terms = self.TWITTER_SEARCH_TERMS
+
+        vader = _get_vader()
+        if vader is None:
+            logger.warning("VADER not available — skipping Twitter sentiment")
+            return self._empty_twitter()
+
+        all_scores = []
+        for term in search_terms:
+            try:
+                posts = self._fetch_nitter_posts(term, limit=per_term_limit)
+            except Exception as exc:
+                logger.warning("Twitter sentiment fetch failed for '%s': %s", term, exc)
+                continue
+
+            for post in posts:
+                text = str(post.get("text", "") or "").strip()
+                if len(text) < 5:
+                    continue
+
+                scores = vader.polarity_scores(text)
+                all_scores.append({
+                    "timestamp": pd.to_datetime(post.get("timestamp"), utc=True),
+                    "compound": scores["compound"],
+                    "pos": scores["pos"],
+                    "neg": scores["neg"],
+                    "engagement_proxy": float(post.get("engagement_proxy", 1.0) or 1.0),
+                    "query": term,
+                })
+
+        if not all_scores:
+            return self._empty_twitter()
+
+        df = pd.DataFrame(all_scores).dropna(subset=["timestamp"]).sort_values("timestamp")
+        df["date"] = df["timestamp"].dt.floor("D")
+        df["weight"] = np.log1p(df["engagement_proxy"].clip(lower=0)) + 1.0
+
+        daily = df.groupby("date").agg(
+            twitter_sentiment=("compound", lambda x: np.average(x, weights=df.loc[x.index, "weight"])),
+            twitter_post_count=("compound", "count"),
+            twitter_sentiment_pos=("pos", "mean"),
+            twitter_sentiment_neg=("neg", "mean"),
+            twitter_engagement_proxy=("engagement_proxy", "mean"),
+        ).reset_index()
+
+        daily = daily.rename(columns={"date": "timestamp"})
+        daily["timestamp"] = pd.to_datetime(daily["timestamp"], utc=True)
+        daily = daily.sort_values("timestamp").reset_index(drop=True)
+        logger.info(
+            "Twitter sentiment: %d posts → %d daily aggregates across %s",
+            len(df),
+            len(daily),
+            search_terms,
+        )
+        return daily
+
+    def _fetch_nitter_posts(self, query: str, limit: int = 40) -> list[dict]:
+        """
+        Fetch recent posts for a query from public Nitter RSS mirrors.
+        """
+        from urllib.parse import quote_plus
+        import xml.etree.ElementTree as ET
+
+        encoded_query = quote_plus(query)
+        for base_url in self.NITTER_INSTANCES:
+            rss_url = f"{base_url}/search/rss?f=tweets&q={encoded_query}"
+            try:
+                resp = self._session.get(rss_url, timeout=15)
+                if resp.status_code != 200 or not resp.text.strip():
+                    continue
+
+                root = ET.fromstring(resp.text)
+                items = root.findall(".//item")
+                posts = []
+                for item in items[:limit]:
+                    title = (item.findtext("title") or "").strip()
+                    description = (item.findtext("description") or "").strip()
+                    pub_date = (item.findtext("pubDate") or "").strip()
+                    link = (item.findtext("link") or "").strip()
+                    guid = (item.findtext("guid") or "").strip()
+
+                    text = description or title
+                    if not text:
+                        continue
+
+                    timestamp = pd.to_datetime(pub_date, utc=True, errors="coerce")
+                    if pd.isna(timestamp):
+                        continue
+
+                    engagement_proxy = max(float(len(text.split())), 1.0)
+                    if "#" in text:
+                        engagement_proxy += 1.0
+                    if "http" in text.lower():
+                        engagement_proxy += 0.5
+
+                    posts.append({
+                        "timestamp": timestamp,
+                        "text": text,
+                        "link": link,
+                        "guid": guid,
+                        "engagement_proxy": engagement_proxy,
+                    })
+
+                if posts:
+                    return posts
+            except Exception as exc:
+                logger.debug("Nitter RSS fetch failed for '%s' via %s: %s", query, base_url, exc)
+                continue
+
+        return []
+
+    @staticmethod
+    def _empty_twitter() -> pd.DataFrame:
+        return pd.DataFrame(columns=[
+            "timestamp",
+            "twitter_sentiment",
+            "twitter_post_count",
+            "twitter_sentiment_pos",
+            "twitter_sentiment_neg",
+            "twitter_engagement_proxy",
+        ])
+
+    # ------------------------------------------------------------------
+    # 4. Reddit Sentiment
     # ------------------------------------------------------------------
 
     def fetch_reddit_sentiment(
@@ -375,6 +521,7 @@ class BTCSentimentFeatures:
         self,
         candle_df: pd.DataFrame,
         fetch_trends: bool = True,
+        fetch_twitter: bool = True,
         fetch_reddit: bool = True,
     ) -> pd.DataFrame:
         """
@@ -384,6 +531,7 @@ class BTCSentimentFeatures:
         Args:
             candle_df: OHLCV DataFrame with 'timestamp' column
             fetch_trends: whether to fetch Google Trends (can be slow/rate-limited)
+            fetch_twitter: whether to fetch Twitter/X sentiment via public RSS mirrors
             fetch_reddit: whether to fetch Reddit sentiment (real-time only, not historical)
 
         Returns:
@@ -414,6 +562,28 @@ class BTCSentimentFeatures:
         else:
             df["gtrends_bitcoin"] = np.nan
 
+        # --- Twitter/X Sentiment (recent daily aggregate, not full history) ---
+        if fetch_twitter:
+            twitter_df = self.fetch_twitter_sentiment(per_term_limit=40)
+            if not twitter_df.empty:
+                df = pd.merge_asof(
+                    df,
+                    twitter_df[[
+                        "timestamp",
+                        "twitter_sentiment",
+                        "twitter_post_count",
+                        "twitter_sentiment_pos",
+                        "twitter_sentiment_neg",
+                        "twitter_engagement_proxy",
+                    ]],
+                    on="timestamp",
+                    direction="backward",
+                )
+            else:
+                self._fill_twitter_nans(df)
+        else:
+            self._fill_twitter_nans(df)
+
         # --- Reddit Sentiment (current snapshot, not historical) ---
         if fetch_reddit:
             reddit_df = self.fetch_reddit_sentiment(post_limit=100)
@@ -433,13 +603,26 @@ class BTCSentimentFeatures:
 
         n_fgi = fgi_df.shape[0] if not fgi_df.empty else 0
         logger.info(
-            "BTCSentimentFeatures: merged %d FGI, trends=%s, reddit=%s into %d candles",
+            "BTCSentimentFeatures: merged %d FGI, trends=%s, twitter=%s, reddit=%s into %d candles",
             n_fgi,
             "yes" if fetch_trends and "gtrends_bitcoin" in df.columns else "no",
+            "yes" if fetch_twitter and "twitter_sentiment" in df.columns else "no",
             "yes" if fetch_reddit and "reddit_sentiment" in df.columns else "no",
             len(df),
         )
         return df
+
+    @staticmethod
+    def _fill_twitter_nans(df: pd.DataFrame) -> None:
+        """Fill Twitter columns with NaN when not fetched."""
+        for col in [
+            "twitter_sentiment",
+            "twitter_post_count",
+            "twitter_sentiment_pos",
+            "twitter_sentiment_neg",
+            "twitter_engagement_proxy",
+        ]:
+            df[col] = np.nan
 
     @staticmethod
     def _fill_reddit_nans(df: pd.DataFrame) -> None:
@@ -464,6 +647,11 @@ class BTCSentimentFeatures:
           - gtrends_zscore: how extreme is search interest vs recent history
           - gtrends_spike: binary flag for sudden search interest surge
           - gtrends_momentum: rate of change (rising retail interest)
+
+        Twitter/X derived:
+          - twitter_sentiment_zscore: how extreme is X sentiment vs recent
+          - twitter_bullish: binary flag for strongly positive X mood
+          - twitter_bearish: binary flag for strongly negative X mood
 
         Reddit derived:
           - reddit_sentiment_zscore: how extreme is sentiment vs recent
@@ -511,6 +699,16 @@ class BTCSentimentFeatures:
 
             # Normalized to 0-1
             df["gtrends_normalized"] = gt / 100.0
+
+        # --- Twitter/X Sentiment features ---
+        if "twitter_sentiment" in df.columns:
+            ts = df["twitter_sentiment"]
+            ts_mean = ts.rolling(14, min_periods=3).mean()
+            ts_std = ts.rolling(14, min_periods=3).std().replace(0, np.nan)
+            df["twitter_sentiment_zscore"] = (ts - ts_mean) / ts_std
+            df["twitter_bullish"] = (ts > 0.2).astype(float)
+            df["twitter_bearish"] = (ts < -0.2).astype(float)
+            df["twitter_sentiment_momentum"] = ts.diff()
 
         # --- Reddit Sentiment features ---
         if "reddit_sentiment" in df.columns:
@@ -566,6 +764,21 @@ class BTCSentimentFeatures:
                     result["fgi_momentum_3d"] = float(vals[0] - vals[2])
         except Exception as exc:
             logger.debug("FGI snapshot failed: %s", exc)
+
+        # Twitter/X sentiment (current)
+        try:
+            twitter_df = self.fetch_twitter_sentiment(per_term_limit=20)
+            if not twitter_df.empty:
+                latest = twitter_df.iloc[-1]
+                result["twitter_sentiment"] = float(latest.get("twitter_sentiment", 0))
+                result["twitter_post_count"] = float(latest.get("twitter_post_count", 0))
+                result["twitter_sentiment_pos"] = float(latest.get("twitter_sentiment_pos", 0))
+                result["twitter_sentiment_neg"] = float(latest.get("twitter_sentiment_neg", 0))
+                result["twitter_engagement_proxy"] = float(latest.get("twitter_engagement_proxy", 0))
+                result["twitter_bullish"] = float(result.get("twitter_sentiment", 0) > 0.2)
+                result["twitter_bearish"] = float(result.get("twitter_sentiment", 0) < -0.2)
+        except Exception as exc:
+            logger.debug("Twitter snapshot failed: %s", exc)
 
         # Reddit sentiment (current)
         try:

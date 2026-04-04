@@ -5,6 +5,7 @@ Tests for BTC price forecast pipeline:
 """
 
 import os
+import pickle
 import sys
 import tempfile
 import unittest
@@ -27,7 +28,7 @@ _skip_sklearn = unittest.skipUnless(_sklearn_available, "sklearn/scipy version i
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from btc_price_dataset import BTCPriceDatasetBuilder
-from btc_forecast_model import BTCForecastModel
+from btc_forecast_model import BTCForecastModel, _ScaledModel
 
 
 def _make_synthetic_candles(n: int = 500, start_price: float = 50000.0) -> pd.DataFrame:
@@ -49,6 +50,22 @@ def _make_synthetic_candles(n: int = 500, start_price: float = 50000.0) -> pd.Da
         "close": close,
         "volume": volume,
     })
+
+
+class _IdentityScaler:
+    def transform(self, X):
+        return X
+
+
+class _DummyPredictModel:
+    sentinel = "wrapped"
+
+    def predict(self, X):
+        return np.ones(len(X))
+
+    def predict_proba(self, X):
+        n = len(X)
+        return np.tile(np.array([[0.25, 0.75]]), (n, 1))
 
 
 class TestBTCPriceDatasetBuilder(unittest.TestCase):
@@ -178,6 +195,22 @@ class TestBTCForecastModel(unittest.TestCase):
         model = BTCForecastModel(weights_dir=self.weights_dir, logs_dir=self.logs_dir)
         metrics = model.train(tiny)
         self.assertIn("error", metrics)
+
+    def test_scaled_model_missing_model_does_not_recurse(self):
+        wrapped = object.__new__(_ScaledModel)
+        with self.assertRaises(AttributeError):
+            getattr(wrapped, "sentinel")
+
+    def test_scaled_model_pickle_round_trip(self):
+        wrapped = _ScaledModel(_DummyPredictModel(), _IdentityScaler())
+        restored = pickle.loads(pickle.dumps(wrapped))
+
+        self.assertEqual(restored.sentinel, "wrapped")
+        pred = restored.predict(np.array([[1.0], [2.0]]))
+        proba = restored.predict_proba(np.array([[1.0], [2.0]]))
+
+        self.assertEqual(pred.tolist(), [1.0, 1.0])
+        self.assertEqual(proba.shape, (2, 2))
 
 
 class TestBTCMultiTimeframeForecaster(unittest.TestCase):
