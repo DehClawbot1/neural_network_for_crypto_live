@@ -55,6 +55,13 @@ Context and feature generation files:
 - [macro_analyzer.py](macro_analyzer.py): macro/liquidity context
 - [onchain_analyzer.py](onchain_analyzer.py): on-chain Bitcoin network context
 - [order_flow_analyzer.py](order_flow_analyzer.py): order flow and taker-imbalance context
+- [orderbook_depth_features.py](orderbook_depth_features.py): BTC L2 order book depth analysis (43 microstructure features)
+- [btc_forecast_model.py](btc_forecast_model.py): ML ensemble for BTC price direction prediction
+- [btc_multitimeframe.py](btc_multitimeframe.py): multi-timeframe (15m/1h/4h) weighted forecast combiner
+- [btc_price_dataset.py](btc_price_dataset.py): 128+ feature engineering pipeline from OHLCV candles
+- [btc_onchain_features.py](btc_onchain_features.py): derivatives data enrichment (funding, OI, L/S ratio)
+- [btc_sentiment_features.py](btc_sentiment_features.py): Fear & Greed, Google Trends, Reddit NLP sentiment
+- [btc_forecast_eval.py](btc_forecast_eval.py): walk-forward live prediction evaluation
 - [feature_builder.py](feature_builder.py): grouped candidate feature construction
 - [strategy_layers.py](strategy_layers.py): entry rule layer and veto logic
 
@@ -125,6 +132,65 @@ The runtime includes:
 Operational audit entry points:
 - [audit_runtime_state.py](audit_runtime_state.py)
 - [cleanup_dead_tokens.py](cleanup_dead_tokens.py)
+
+## BTC Price Prediction Pipeline
+
+The bot includes a full BTC price prediction system with multi-timeframe ML models and alternative data enrichment.
+
+### Architecture
+
+```
+Pillar 5: Multi-Timeframe Forecast (15m/1h/4h weighted ensemble)
+Pillar 6: Sentiment Features (Fear & Greed Index, Google Trends, Reddit NLP)
+Pillar 7: Order Book Depth (Binance L2 imbalance, slope, whale walls)
+Pillar 8: Walk-Forward Live Evaluation (prediction vs actual tracking)
+```
+
+### Core modules
+
+| Module | Purpose |
+|--------|---------|
+| [btc_price_dataset.py](btc_price_dataset.py) | 128+ feature engineering from OHLCV (RSI, MACD, ADX, ATR, Bollinger, Stochastic RSI, CCI, MFI, Williams %R, Donchian, VWAP, Garman-Klass volatility, lag features, momentum stats, cyclical time encoding) |
+| [btc_forecast_model.py](btc_forecast_model.py) | Ensemble of 4 models (2x LightGBM + HistGradientBoosting + MLP) with purged walk-forward CV, feature importance pruning, exponential recency weighting |
+| [btc_multitimeframe.py](btc_multitimeframe.py) | Manages 15m/1h/4h models with weighted voting (0.25/0.35/0.40), confidence gating, agreement threshold |
+| [btc_onchain_features.py](btc_onchain_features.py) | Derivatives data: funding rate, open interest, long/short ratio, taker buy/sell volume from Binance Futures |
+| [btc_sentiment_features.py](btc_sentiment_features.py) | Fear & Greed Index (contrarian signal), Google Trends (retail proxy), Reddit VADER NLP sentiment |
+| [orderbook_depth_features.py](orderbook_depth_features.py) | 43 L2 microstructure features: depth imbalance at 5/10/20 levels, cumulative depth at 10/25/50/100 bps, book slope, whale wall detection, volume-weighted midpoint |
+| [btc_forecast_eval.py](btc_forecast_eval.py) | Walk-forward live evaluator: logs every prediction vs actual outcome to `logs/btc_forecast_eval.csv`, computes rolling accuracy |
+| [download_btc_dataset.py](download_btc_dataset.py) | Downloads historical OHLCV from Binance, supports `--enrich` (derivatives), `--sentiment`, `--multi-timeframe` |
+
+### Model accuracy (latest training)
+
+| Timeframe | Direction Accuracy | Confident Dir Accuracy | Classifier Accuracy | Weight |
+|-----------|-------------------|----------------------|--------------------|---------|
+| 15m | 51.05% | 51.16% | 49.96% | 0.25 |
+| 1h | 47.06% | 45.44% | 50.39% | 0.35 |
+| **4h** | **54.93%** | **55.66%** | **55.41%** | **0.40** |
+
+The 4h model is the most accurate (less noise at higher timeframes) and gets the highest weight in the ensemble.
+
+### Quick commands
+
+```bash
+# Download all timeframes + train with all enrichments
+python download_btc_dataset.py --multi-timeframe --enrich --sentiment --train
+
+# Single timeframe training
+python download_btc_dataset.py --interval 15m --days 730 --enrich --sentiment --train
+
+# Collect order book depth training data (1 hour, every 60s)
+python -c "from orderbook_depth_features import OrderBookDepthAnalyzer; a = OrderBookDepthAnalyzer(); df = a.collect_depth_timeseries(60, 3600); df.to_csv('data/btc_depth_features.csv', index=False)"
+```
+
+### Evaluation output
+
+The walk-forward evaluator logs every prediction to `logs/btc_forecast_eval.csv` with columns:
+- `predict_ts`, `eval_ts`, `entry_price`, `exit_price`
+- `predicted_direction`, `predicted_return`, `confidence`
+- `actual_return`, `actual_direction`, `correct`, `pnl_pct`
+- `mtf_agreement`, `mtf_source`
+
+Rolling accuracy is computed in-memory and logged each cycle.
 
 ## BTC Live Price and Index Tracking
 
@@ -259,16 +325,26 @@ Still worth improving:
 - increase sample quality so the newest feature families affect the benchmark meaningfully
 
 ### Phase 6: Add smarter prediction only after the base is healthy
-Status: started
+Status: **substantially complete**
 
 Completed:
 - BTC live/index decision support added to runtime
 - BTC live/index family added to training feature definitions
-- dataset and target builders can merge BTC live/index context
+- Dataset and target builders can merge BTC live/index context
+- **BTC price prediction pipeline** (5 modules, 128+ features, ensemble ML)
+- **Multi-timeframe forecasting** (15m/1h/4h with weighted voting)
+- **Derivatives enrichment** (funding rate, open interest, long/short ratio, taker volume)
+- **Sentiment features** (Fear & Greed Index, Google Trends, Reddit VADER NLP)
+- **Order book depth features** (43 L2 microstructure features from Binance Futures)
+- **Walk-forward live evaluator** (logs every prediction vs actual outcome)
+- 52 tests across 4 test suites
 
 Still worth improving:
-- accumulate enough post-patch labeled rows so the BTC live/index family becomes active in fitted training samples
-- validate whether the family actually improves benchmarked model quality
+- Accumulate enough walk-forward evaluation data to measure true live accuracy
+- Add more training data for order book depth features (currently real-time only)
+- Consider adding on-chain whale transaction tracking
+- Tune ensemble weights based on live evaluation results
+- Add automated retraining triggers when live accuracy drops below threshold
 
 ## Quick Start
 
@@ -436,6 +512,11 @@ Learning and quality:
 - `logs/trade_feedback_summary.csv`
 - `logs/model_status.csv`
 - `logs/backtest_summary.csv`
+
+BTC prediction and evaluation:
+- `logs/btc_forecast_eval.csv` — walk-forward prediction vs actual outcome log
+- `logs/btc_forecast_train_log.csv` — training metrics history
+- `logs/btc_price_dataset.csv` — labelled training dataset (128+ features)
 
 Market context and research:
 - `logs/markets.csv`

@@ -64,6 +64,7 @@ from order_flow_analyzer import OrderFlowAnalyzer
 from technical_analyzer import TechnicalAnalyzer
 from btc_forecast_model import BTCForecastModel
 from btc_multitimeframe import BTCMultiTimeframeForecaster
+from btc_forecast_eval import BTCForecastEvaluator
 from sentiment_analyzer import SentimentAnalyzer
 from macro_analyzer import MacroAnalyzer
 from onchain_analyzer import OnChainAnalyzer
@@ -724,6 +725,7 @@ def main_loop():
     technical_analyzer = TechnicalAnalyzer()
     btc_forecast_model = BTCForecastModel()  # single 15m fallback
     btc_mtf_forecaster = BTCMultiTimeframeForecaster()  # multi-timeframe (15m/1h/4h)
+    btc_forecast_evaluator = BTCForecastEvaluator()  # walk-forward live eval
     sentiment_analyzer = SentimentAnalyzer()
     macro_analyzer = MacroAnalyzer()
     onchain_analyzer = OnChainAnalyzer()
@@ -1584,6 +1586,21 @@ def main_loop():
                     macro_context.update(ob_features)
             except Exception as exc:
                 logging.debug("BTC order book depth skipped: %s", exc)
+
+            # --- BTC Forecast Walk-Forward Evaluation (Pillar 8) ---
+            try:
+                btc_live_price = macro_context.get("btc_live_price") or macro_context.get("ob_midpoint") or 0
+                if btc_live_price > 0:
+                    # Evaluate any matured predictions from previous cycles
+                    btc_forecast_evaluator.evaluate_matured(btc_live_price)
+                    # Record current prediction for future evaluation
+                    btc_fc_for_eval = {k: v for k, v in macro_context.items() if k.startswith("btc_")}
+                    btc_forecast_evaluator.record_prediction(
+                        btc_fc_for_eval, btc_live_price,
+                        source=macro_context.get("btc_mtf_source", "unknown"),
+                    )
+            except Exception as exc:
+                logging.debug("BTC forecast eval skipped: %s", exc)
             # --------------------------------------------------
 
             if not signals_df.empty:
