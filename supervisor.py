@@ -672,6 +672,69 @@ def _request_shutdown(signum, frame):
     logging.info("Received %s — finishing current cycle then shutting down...", sig_name)
     _shutdown_requested = True
 
+def compute_leaderboard_consensus(signals_df: pd.DataFrame, market_slug_prefix: str = "btc-updown-") -> dict:
+    """
+    Analyse leaderboard/scraper signals for BTC up-down markets and
+    return a consensus dict.
+
+    Used by _inject_always_on_signal to enrich the always-on entry with
+    top-trader agreement/disagreement data.
+
+    Returns:
+        dict with keys: leaderboard_n_yes, leaderboard_n_no, leaderboard_n_total,
+        leaderboard_bias (+1 YES majority, -1 NO majority, 0 balanced),
+        leaderboard_agreement (0-1, how unanimous),
+        leaderboard_vol_yes, leaderboard_vol_no (total size USDC each side)
+    """
+    result = {
+        "leaderboard_n_yes": 0,
+        "leaderboard_n_no": 0,
+        "leaderboard_n_total": 0,
+        "leaderboard_bias": 0,
+        "leaderboard_agreement": 0.0,
+        "leaderboard_vol_yes": 0.0,
+        "leaderboard_vol_no": 0.0,
+    }
+    if signals_df is None or signals_df.empty:
+        return result
+    # Filter to BTC up-down market trades from leaderboard wallets
+    slug_col = "market_slug" if "market_slug" in signals_df.columns else None
+    if slug_col is None:
+        return result
+    mask = signals_df[slug_col].astype(str).str.lower().str.startswith(market_slug_prefix)
+    btc_signals = signals_df[mask]
+    if btc_signals.empty:
+        return result
+    # Exclude our own synthetic signals
+    if "signal_source" in btc_signals.columns:
+        btc_signals = btc_signals[btc_signals["signal_source"].astype(str).str.lower() != "always_on_market"]
+    if btc_signals.empty:
+        return result
+    side_col = "outcome_side" if "outcome_side" in btc_signals.columns else "side"
+    if side_col not in btc_signals.columns:
+        return result
+    sides = btc_signals[side_col].astype(str).str.upper()
+    sizes = btc_signals["size"].astype(float).fillna(0) if "size" in btc_signals.columns else pd.Series([0] * len(btc_signals))
+    n_yes = int((sides == "YES").sum())
+    n_no = int((sides == "NO").sum())
+    n_total = n_yes + n_no
+    vol_yes = float(sizes[sides == "YES"].sum())
+    vol_no = float(sizes[sides == "NO"].sum())
+    if n_total == 0:
+        return result
+    majority_pct = max(n_yes, n_no) / n_total
+    result.update({
+        "leaderboard_n_yes": n_yes,
+        "leaderboard_n_no": n_no,
+        "leaderboard_n_total": n_total,
+        "leaderboard_bias": 1 if n_yes > n_no else (-1 if n_no > n_yes else 0),
+        "leaderboard_agreement": round(majority_pct, 4),
+        "leaderboard_vol_yes": round(vol_yes, 2),
+        "leaderboard_vol_no": round(vol_no, 2),
+    })
+    return result
+
+
 def main_loop():
     """The continuous autonomous loop (research + paper-trading mode)."""
     global _shutdown_requested
@@ -1247,7 +1310,7 @@ def main_loop():
             session_kill_switch_active = True
             session_kill_switch_reason = f"session_drawdown_limit_hit ({drawdown:.4f} >= {max_session_drawdown_usdc:.4f})"
 
-    def _inject_always_on_signal(signals_df: pd.DataFrame, markets_df: pd.DataFrame):
+    def _inject_always_on_signal(signals_df: pd.DataFrame, markets_df: pd.DataFrame, btc_context: dict | None = None):
         nonlocal always_on_slug
         if not always_on_enabled or not always_on_slug:
             return signals_df, markets_df
@@ -1328,9 +1391,59 @@ def main_loop():
             yes_price = 0.5
         yes_price = float(np.clip(yes_price, 0.01, 0.99))
 
+        # --- Side selection: BTC forecast → leaderboard consensus → price fallback ---
+        btc_ctx = btc_context or {}
+        btc_direction = int(btc_ctx.get("btc_predicted_direction", 0) or 0)
+        btc_confidence = float(btc_ctx.get("btc_forecast_confidence", 0.0) or 0.0)
+        btc_ready = bool(btc_ctx.get("btc_forecast_ready", False))
+        leaderboard_consensus = compute_leaderboard_consensus(out_signals)
+        lb_bias = leaderboard_consensus.get("leaderboard_bias", 0)
+        lb_agreement = leaderboard_consensus.get("leaderboard_agreement", 0.0)
+        lb_n_total = leaderboard_consensus.get("leaderboard_n_total", 0)
+
         pref_side = str(os.getenv("ALWAYS_ON_MARKET_SIDE", "AUTO") or "AUTO").strip().upper()
+        side_source = "env_override"
         if pref_side not in {"YES", "NO"}:
-            pref_side = "YES" if yes_price >= 0.5 else "NO"
+            if btc_ready and btc_direction != 0 and btc_confidence >= 0.52:
+                # PRIMARY: use the ML BTC forecast to pick the side
+                pref_side = "YES" if btc_direction == 1 else "NO"
+                side_source = "btc_forecast"
+                # Check if leaderboard traders agree or disagree
+                if lb_n_total >= 3 and lb_agreement >= 0.60:
+                    lb_side = "YES" if lb_bias == 1 else "NO"
+                    if lb_side == pref_side:
+                        # Leaderboard confirms → boost confidence
+                        btc_confidence = min(1.0, btc_confidence + 0.05)
+                        side_source = "btc_forecast+leaderboard_confirm"
+                        logging.info(
+                            "Always-on side: BTC forecast %s confirmed by leaderboard (%d/%d traders, %.0f%% agreement). Boosted confidence → %.3f",
+                            pref_side, lb_n_total, lb_n_total, lb_agreement * 100, btc_confidence,
+                        )
+                    else:
+                        # Leaderboard disagrees → reduce confidence but still trust ML
+                        btc_confidence = max(0.50, btc_confidence - 0.05)
+                        side_source = "btc_forecast+leaderboard_disagree"
+                        logging.warning(
+                            "Always-on side: BTC forecast %s DISAGREES with leaderboard bias %s (%d traders, %.0f%% agreement). Reduced confidence → %.3f",
+                            pref_side, lb_side, lb_n_total, lb_agreement * 100, btc_confidence,
+                        )
+            elif lb_n_total >= 5 and lb_agreement >= 0.65:
+                # SECONDARY: no forecast available but strong leaderboard consensus
+                pref_side = "YES" if lb_bias == 1 else "NO"
+                btc_confidence = lb_agreement * 0.7  # lower confidence since it's not ML-backed
+                side_source = "leaderboard_consensus"
+                logging.info(
+                    "Always-on side: No BTC forecast available. Using leaderboard consensus %s (%d traders, %.0f%% agreement, conf=%.3f)",
+                    pref_side, lb_n_total, lb_agreement * 100, btc_confidence,
+                )
+            else:
+                # FALLBACK: neither forecast nor leaderboard consensus → price heuristic
+                pref_side = "YES" if yes_price >= 0.5 else "NO"
+                side_source = "price_fallback"
+                logging.info(
+                    "Always-on side: No BTC forecast (ready=%s) and weak leaderboard (%d traders). Falling back to price-based side: %s",
+                    btc_ready, lb_n_total, pref_side,
+                )
         outcome_side = pref_side
         token_id = yes_token if outcome_side == "YES" else no_token
         if token_id in [None, ""]:
@@ -1360,14 +1473,26 @@ def main_loop():
             "timestamp": now_iso,
             "signal_source": "always_on_market",
             "force_candidate": 1 if always_on_force_entry else 0,
+            # BTC forecast metadata attached to the signal
+            "btc_predicted_direction": btc_direction,
+            "btc_forecast_confidence": btc_confidence,
+            "btc_forecast_ready": btc_ready,
+            "side_source": side_source,
+            # Leaderboard consensus metadata
+            **{f"ao_{k}": v for k, v in leaderboard_consensus.items()},
         }
         out_signals = pd.concat([out_signals, pd.DataFrame([synthetic_signal])], ignore_index=True)
         logging.info(
-            "Always-on signal injected for slug=%s side=%s token=%s price=%.4f",
+            "Always-on signal injected for slug=%s side=%s token=%s price=%.4f source=%s btc_dir=%s btc_conf=%.3f lb_bias=%s lb_n=%d",
             resolved_slug,
             outcome_side,
             str(token_id)[:16],
             signal_price,
+            side_source,
+            btc_direction,
+            btc_confidence,
+            lb_bias,
+            lb_n_total,
         )
         if resolved_slug and resolved_slug.lower().startswith(always_on_rotate_prefix):
             _persist_always_on_slug(resolved_slug)
@@ -1517,35 +1642,13 @@ def main_loop():
             autonomous_monitor.write_heartbeat("market_monitor", status="ok", message="markets_fetched", extra={"rows": len(markets_df) if markets_df is not None else 0})
             if markets_df is not None and not markets_df.empty: markets_df = markets_df.loc[:, ~markets_df.columns.duplicated()]
             save_market_snapshot(markets_df)
-            if always_on_enabled and always_on_only:
-                logging.info(
-                    "ALWAYS_ON_ONLY active for slug=%s: skipping wallet scraper and using pinned market signal path.",
-                    always_on_slug,
-                )
-                signals_df = pd.DataFrame()
-            else:
-                signals_df = run_scraper_cycle()
-                
-                # O-Flow Analysis: Generate synthetic signals from raw volume + liquidity
-                order_flow_signals_df = order_flow_analyzer.analyze(signals_df, markets_df)
-                if not order_flow_signals_df.empty:
-                    if signals_df is not None and not signals_df.empty:
-                        signals_df = pd.concat([signals_df, order_flow_signals_df], ignore_index=True)
-                    else:
-                        signals_df = order_flow_signals_df
-                        
-                signals_df = _dedupe_signals_df(signals_df)
-            signals_df, markets_df = _inject_always_on_signal(signals_df, markets_df)
-            signals_df = _dedupe_signals_df(signals_df)
-            cycle_observed_iso = datetime.now(timezone.utc).isoformat()
-            signals_df = _annotate_signal_freshness(signals_df, cycle_observed_iso)
-            
             # --- PILLARS 1-4: The Unified Macro Footprint ---
+            # Run BEFORE signals so BTC forecast is available for side selection
             ta_context = technical_analyzer.analyze()
             sent_context = sentiment_analyzer.analyze()
             mach_context = macro_analyzer.analyze()
             onc_context = onchain_analyzer.analyze()
-            
+
             macro_context = {**ta_context, **sent_context, **mach_context, **onc_context}
 
             # --- BTC Price Forecast (Pillar 5) — Multi-Timeframe ---
@@ -1557,8 +1660,35 @@ def main_loop():
                 btc_forecast_evaluator,
             )
 
-            # --------------------------------------------------
+            # --- Gather leaderboard signals (used as extra info, not sole source) ---
+            if always_on_enabled and always_on_only:
+                logging.info(
+                    "ALWAYS_ON_ONLY active for slug=%s: skipping wallet scraper and using pinned market signal path.",
+                    always_on_slug,
+                )
+                signals_df = pd.DataFrame()
+            else:
+                signals_df = run_scraper_cycle()
 
+                # O-Flow Analysis: Generate synthetic signals from raw volume + liquidity
+                order_flow_signals_df = order_flow_analyzer.analyze(signals_df, markets_df)
+                if not order_flow_signals_df.empty:
+                    if signals_df is not None and not signals_df.empty:
+                        signals_df = pd.concat([signals_df, order_flow_signals_df], ignore_index=True)
+                    else:
+                        signals_df = order_flow_signals_df
+
+                signals_df = _dedupe_signals_df(signals_df)
+
+            # Inject always-on signal with BTC forecast driving the YES/NO side
+            # and leaderboard consensus used as extra confirmation info
+            signals_df, markets_df = _inject_always_on_signal(signals_df, markets_df, btc_context=macro_context)
+            signals_df = _dedupe_signals_df(signals_df)
+            cycle_observed_iso = datetime.now(timezone.utc).isoformat()
+            signals_df = _annotate_signal_freshness(signals_df, cycle_observed_iso)
+
+            # --------------------------------------------------
+            # Attach macro context columns to all signals
             if not signals_df.empty:
                 for k, v in macro_context.items():
                     signals_df[k] = v
