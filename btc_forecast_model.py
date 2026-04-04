@@ -550,13 +550,31 @@ class BTCForecastModel:
             return default
 
     def predict_from_candles(self, candle_df: pd.DataFrame) -> dict:
-        """Build features from raw candles and predict using last row."""
+        """Build features from raw candles and predict using last row.
+
+        Uses only the feature-engineering step (no forward labels) so the
+        most recent candle row is always available for live prediction.
+        """
         from btc_price_dataset import BTCPriceDatasetBuilder
         builder = BTCPriceDatasetBuilder(logs_dir=str(self.logs_dir))
-        features_df = builder.build_from_candles(candle_df)
+        norm = builder._normalise_candle_df(candle_df)
+        if norm is None or len(norm) < 50:
+            return self.predict({})
+        features_df = builder._compute_features(norm)
         if features_df.empty:
             return self.predict({})
-        return self.predict(features_df.iloc[-1])
+        # Use the last row that has enough valid feature values for prediction.
+        # Forward-fill NaN from rolling windows then take the last row.
+        last_row = features_df.iloc[-1]
+        nan_count = int(last_row.isna().sum())
+        total = len(last_row)
+        if nan_count > total * 0.5:
+            # Too many NaN — fall back to last fully populated row
+            valid = features_df.dropna(thresh=int(total * 0.5))
+            if valid.empty:
+                return self.predict({})
+            last_row = valid.iloc[-1]
+        return self.predict(last_row)
 
     @property
     def is_ready(self) -> bool:
