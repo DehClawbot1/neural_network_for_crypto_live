@@ -74,6 +74,7 @@ from performance_governor import PerformanceGovernor
 from trade_lifecycle_audit import TradeLifecycleAuditor
 from benchmark_strategy import BenchmarkStrategy
 from trade_quality import build_quality_context, resolve_entry_signal_label
+from trading_mode_preset import select_trading_mode, apply_preset, PRESETS
 try:
     from inference_runtime_guard import (
         reset_cycle as _reset_inference_runtime_guard,
@@ -679,6 +680,20 @@ def main_loop():
     signal.signal(signal.SIGINT, _request_shutdown)
     signal.signal(signal.SIGTERM, _request_shutdown)
     logging.info("Initializing LIVE PolyMarket Supervisor...")
+
+    # ---- Trading mode selection (1-4) ----
+    trading_mode_id = select_trading_mode(default_mode=2)
+    active_preset = apply_preset(trading_mode_id)
+    preset_name = active_preset.get("name", "Unknown") if active_preset else "Unknown"
+    logging.info(
+        "Trading mode: %d (%s) | MaxRisk=%.0f%% | Reserve=%.0f%% | HardMax=$%.0f | MaxPositions=%d",
+        trading_mode_id,
+        preset_name,
+        TradingConfig.MAX_RISK_PER_TRADE_PCT * 100,
+        TradingConfig.CAPITAL_RESERVE_PCT * 100,
+        TradingConfig.HARD_MAX_BET_USDC,
+        TradingConfig.MAX_CONCURRENT_POSITIONS,
+    )
 
     def _env_int(name: str, default: int, minimum: int = 0, maximum: int = 100000) -> int:
         try:
