@@ -36,6 +36,22 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_merge_asof(left, right, on, **kwargs):
+    """merge_asof that tolerates NaT/null in the left merge key."""
+    if left.empty or right.empty or on not in left.columns or on not in right.columns:
+        return left
+    mask = left[on].notna()
+    if not mask.any():
+        return left
+    valid = left[mask].copy().sort_values(on)
+    work_right = right.copy().sort_values(on)
+    merged = pd.merge_asof(valid, work_right, on=on, **kwargs)
+    if mask.all():
+        return merged
+    return pd.concat([merged, left[~mask]], ignore_index=True)
+
+
 # ---------------------------------------------------------------------------
 # Binance order book fetcher
 # ---------------------------------------------------------------------------
@@ -460,7 +476,7 @@ class OrderBookDepthAnalyzer:
         df = df.sort_values("timestamp")
         depth_sorted = depth_df[merge_cols].sort_values("timestamp")
 
-        df = pd.merge_asof(df, depth_sorted, on="timestamp", direction="backward")
+        df = _safe_merge_asof(df, depth_sorted, on="timestamp", direction="backward")
 
         logger.info("Merged %d depth snapshots into %d candles (%d new features)",
                      len(depth_df), len(df), len(feature_cols))

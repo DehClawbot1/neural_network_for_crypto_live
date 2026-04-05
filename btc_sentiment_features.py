@@ -29,6 +29,22 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_merge_asof(left, right, on, **kwargs):
+    """merge_asof that tolerates NaT/null in the left merge key."""
+    if left.empty or right.empty or on not in left.columns or on not in right.columns:
+        return left
+    mask = left[on].notna()
+    if not mask.any():
+        return left
+    valid = left[mask].copy().sort_values(on)
+    work_right = right.copy().sort_values(on)
+    merged = pd.merge_asof(valid, work_right, on=on, **kwargs)
+    if mask.all():
+        return merged
+    return pd.concat([merged, left[~mask]], ignore_index=True)
+
+
 # ---------------------------------------------------------------------------
 # VADER sentiment (lazy-loaded to avoid import overhead)
 # ---------------------------------------------------------------------------
@@ -548,7 +564,7 @@ class BTCSentimentFeatures:
         # --- Fear & Greed Index (daily, back to 2018) ---
         fgi_df = self.fetch_fear_greed_history(limit=0)
         if not fgi_df.empty:
-            df = pd.merge_asof(df, fgi_df[["timestamp", "fgi_value"]], on="timestamp", direction="backward")
+            df = _safe_merge_asof(df, fgi_df[["timestamp", "fgi_value"]], on="timestamp", direction="backward")
         else:
             df["fgi_value"] = np.nan
 
@@ -556,7 +572,7 @@ class BTCSentimentFeatures:
         if fetch_trends:
             gtrends_df = self.fetch_google_trends(keyword="bitcoin", timeframe="today 5-y")
             if not gtrends_df.empty:
-                df = pd.merge_asof(df, gtrends_df, on="timestamp", direction="backward")
+                df = _safe_merge_asof(df, gtrends_df, on="timestamp", direction="backward")
             else:
                 df["gtrends_bitcoin"] = np.nan
         else:
@@ -588,7 +604,7 @@ class BTCSentimentFeatures:
         if fetch_reddit:
             reddit_df = self.fetch_reddit_sentiment(post_limit=100)
             if not reddit_df.empty:
-                df = pd.merge_asof(
+                df = _safe_merge_asof(
                     df, reddit_df[["timestamp", "reddit_sentiment", "reddit_post_count",
                                     "reddit_sentiment_pos", "reddit_sentiment_neg"]],
                     on="timestamp", direction="backward",

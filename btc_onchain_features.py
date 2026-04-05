@@ -26,6 +26,21 @@ logger = logging.getLogger(__name__)
 BINANCE_FUTURES_BASE = "https://fapi.binance.com"
 
 
+def _safe_merge_asof(left, right, on, **kwargs):
+    """merge_asof that tolerates NaT/null in the left merge key."""
+    if left.empty or right.empty or on not in left.columns or on not in right.columns:
+        return left
+    mask = left[on].notna()
+    if not mask.any():
+        return left
+    valid = left[mask].copy().sort_values(on)
+    work_right = right.copy().sort_values(on)
+    merged = pd.merge_asof(valid, work_right, on=on, **kwargs)
+    if mask.all():
+        return merged
+    return pd.concat([merged, left[~mask]], ignore_index=True)
+
+
 class BTCDerivativesFeatures:
     """
     Fetch derivatives/on-chain features for BTC from Binance Futures API.
@@ -139,25 +154,25 @@ class BTCDerivativesFeatures:
         df = df.sort_values("timestamp")
 
         if not funding_df.empty:
-            df = pd.merge_asof(df, funding_df, on="timestamp", direction="backward")
+            df = _safe_merge_asof(df, funding_df, on="timestamp", direction="backward")
         else:
             df["fundingRate"] = np.nan
 
         if not oi_df.empty:
-            df = pd.merge_asof(df, oi_df, on="timestamp", direction="backward")
+            df = _safe_merge_asof(df, oi_df, on="timestamp", direction="backward")
         else:
             df["sumOpenInterest"] = np.nan
             df["sumOpenInterestValue"] = np.nan
 
         if not ls_df.empty:
-            df = pd.merge_asof(df, ls_df, on="timestamp", direction="backward")
+            df = _safe_merge_asof(df, ls_df, on="timestamp", direction="backward")
         else:
             df["longShortRatio"] = np.nan
             df["longAccount"] = np.nan
             df["shortAccount"] = np.nan
 
         if not taker_df.empty:
-            df = pd.merge_asof(df, taker_df, on="timestamp", direction="backward")
+            df = _safe_merge_asof(df, taker_df, on="timestamp", direction="backward")
         else:
             df["buySellRatio"] = np.nan
             df["buyVol"] = np.nan
