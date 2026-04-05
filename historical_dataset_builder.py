@@ -34,9 +34,17 @@ class HistoricalDatasetBuilder:
     def _safe_merge_asof(self, left, right, on, by=None):
         if left.empty or right.empty or on not in left.columns or on not in right.columns:
             return left
-        work_left = left.copy().sort_values(on)
+        # pd.merge_asof raises if the merge key has NaT/null on the left side.
+        # Split off null-key rows, merge the valid ones, then concat back.
+        mask = left[on].notna()
+        if not mask.any():
+            return left
+        valid = left[mask].copy().sort_values(on)
         work_right = right.copy().sort_values(on)
-        return pd.merge_asof(work_left, work_right, on=on, by=by, direction="backward")
+        merged = pd.merge_asof(valid, work_right, on=on, by=by, direction="backward")
+        if mask.all():
+            return merged
+        return pd.concat([merged, left[~mask]], ignore_index=True)
 
     def _dedupe_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         if df is None or df.empty:
@@ -125,7 +133,7 @@ class HistoricalDatasetBuilder:
                             merged_parts.append(group)
                             continue
                         cols = [c for c in ["timestamp", market_name_col, "liquidity", "volume", "last_trade_price", "url", "best_bid", "best_ask", "slug", "condition_id", "end_date"] if c in market_history.columns]
-                        merged = pd.merge_asof(group.sort_values("timestamp"), market_history[cols].sort_values("timestamp"), on="timestamp", direction="backward")
+                        merged = self._safe_merge_asof(group, market_history[cols], on="timestamp")
                         merged_parts.append(self._dedupe_columns(merged))
                     dataset = pd.concat(merged_parts, ignore_index=True) if merged_parts else dataset
                     dataset = self._dedupe_columns(dataset)
@@ -161,7 +169,7 @@ class HistoricalDatasetBuilder:
                     if history.empty:
                         merged_parts.append(group)
                         continue
-                    merged_parts.append(self._dedupe_columns(pd.merge_asof(group.sort_values("timestamp"), history.sort_values("timestamp"), on="timestamp", direction="backward")))
+                    merged_parts.append(self._dedupe_columns(self._safe_merge_asof(group, history, on="timestamp")))
                 dataset = pd.concat(merged_parts, ignore_index=True) if merged_parts else dataset
                 dataset = self._dedupe_columns(dataset)
 
@@ -170,7 +178,7 @@ class HistoricalDatasetBuilder:
             btc_targets_df["timestamp"] = self._parse_logged_timestamp_series(btc_targets_df["timestamp"])
             btc_targets_df = btc_targets_df[btc_targets_df["timestamp"].notna()].copy()
             cols = [c for c in ["timestamp", "btc_price", "btc_spot_return_5m", "btc_spot_return_15m", "btc_realized_vol_15m", "btc_volume_proxy"] if c in btc_targets_df.columns]
-            dataset = pd.merge_asof(dataset.sort_values("timestamp"), btc_targets_df[cols].sort_values("timestamp"), on="timestamp", direction="backward")
+            dataset = self._safe_merge_asof(dataset, btc_targets_df[cols], on="timestamp")
             dataset = self._dedupe_columns(dataset)
 
         if not btc_live_df.empty and "timestamp" in dataset.columns:
@@ -206,7 +214,7 @@ class HistoricalDatasetBuilder:
                     if c in btc_live_df.columns
                 ]
                 live_view = btc_live_df[live_cols].sort_values(ts_col).rename(columns={ts_col: "timestamp"})
-                dataset = pd.merge_asof(dataset.sort_values("timestamp"), live_view, on="timestamp", direction="backward")
+                dataset = self._safe_merge_asof(dataset, live_view, on="timestamp")
                 dataset = self._dedupe_columns(dataset)
 
         if not technical_regime_df.empty and "timestamp" in dataset.columns:
@@ -238,7 +246,7 @@ class HistoricalDatasetBuilder:
                     if c in technical_regime_df.columns
                 ]
                 regime_view = technical_regime_df[regime_cols].sort_values(ts_col).rename(columns={ts_col: "timestamp"})
-                dataset = pd.merge_asof(dataset.sort_values("timestamp"), regime_view, on="timestamp", direction="backward")
+                dataset = self._safe_merge_asof(dataset, regime_view, on="timestamp")
                 dataset = self._dedupe_columns(dataset)
 
         if "best_ask" in dataset.columns and "best_bid" in dataset.columns:

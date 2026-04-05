@@ -4,6 +4,21 @@ from pathlib import Path
 import pandas as pd
 
 
+def _safe_merge_asof(left, right, on, **kwargs):
+    """merge_asof that tolerates NaT/null in the left merge key."""
+    if left.empty or right.empty or on not in left.columns or on not in right.columns:
+        return left
+    mask = left[on].notna()
+    if not mask.any():
+        return left
+    valid = left[mask].copy().sort_values(on)
+    work_right = right.copy().sort_values(on)
+    merged = pd.merge_asof(valid, work_right, on=on, **kwargs)
+    if mask.all():
+        return merged
+    return pd.concat([merged, left[~mask]], ignore_index=True)
+
+
 class ContractTargetBuilder:
     """
     Build contract-level labels from token-level CLOB price history.
@@ -112,12 +127,7 @@ class ContractTargetBuilder:
                     if c in btc_live_df.columns
                 ]
                 live_view = btc_live_df[live_cols].sort_values(ts_col).rename(columns={ts_col: "timestamp"})
-                signals_df = pd.merge_asof(
-                    signals_df.sort_values("timestamp"),
-                    live_view,
-                    on="timestamp",
-                    direction="backward",
-                )
+                signals_df = _safe_merge_asof(signals_df, live_view, on="timestamp", direction="backward")
         if not technical_regime_df.empty:
             technical_regime_df = technical_regime_df.copy()
             ts_col = "technical_timestamp" if "technical_timestamp" in technical_regime_df.columns else "timestamp" if "timestamp" in technical_regime_df.columns else None
@@ -147,12 +157,7 @@ class ContractTargetBuilder:
                     if c in technical_regime_df.columns
                 ]
                 regime_view = technical_regime_df[regime_cols].sort_values(ts_col).rename(columns={ts_col: "timestamp"})
-                signals_df = pd.merge_asof(
-                    signals_df.sort_values("timestamp"),
-                    regime_view,
-                    on="timestamp",
-                    direction="backward",
-                )
+                signals_df = _safe_merge_asof(signals_df, regime_view, on="timestamp", direction="backward")
         history_df = history_df.copy()
         history_df["token_id"] = history_df["token_id"].astype(str)
         history_df["timestamp"] = pd.to_datetime(history_df["timestamp"], utc=True, errors="coerce")
