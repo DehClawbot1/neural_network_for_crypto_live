@@ -160,35 +160,46 @@ class BTCPriceDatasetBuilder:
         return df
 
     def _compute_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Compute all technical indicator features from OHLCV."""
-        f = pd.DataFrame(index=df.index)
+        """Compute all technical indicator features from OHLCV.
+
+        All columns are collected into a dict first, then assembled into a
+        single DataFrame at the end to avoid per-column insertion fragmentation.
+        """
+        cols: dict[str, pd.Series] = {}
 
         close = df["close"].astype(float)
         high = df["high"].astype(float)
         low = df["low"].astype(float)
         volume = df["volume"].astype(float)
+        open_ = df["open"].astype(float)
 
         if "timestamp" in df.columns:
-            f["timestamp"] = df["timestamp"]
+            cols["timestamp"] = df["timestamp"]
 
         # --- Returns ---
-        f["return_1"] = close.pct_change(1)
-        f["return_5"] = close.pct_change(5)
-        f["return_15"] = close.pct_change(15)
+        cols["return_1"] = close.pct_change(1)
+        cols["return_5"] = close.pct_change(5)
+        cols["return_15"] = close.pct_change(15)
 
         # --- Moving averages ---
-        f["sma_10"] = close.rolling(10).mean()
-        f["sma_20"] = close.rolling(20).mean()
-        f["sma_50"] = close.rolling(50).mean()
-        f["sma_200"] = close.rolling(200).mean()
-        f["ema_9"] = close.ewm(span=9, adjust=False).mean()
-        f["ema_21"] = close.ewm(span=21, adjust=False).mean()
+        sma_10 = close.rolling(10).mean()
+        sma_20 = close.rolling(20).mean()
+        sma_50 = close.rolling(50).mean()
+        sma_200 = close.rolling(200).mean()
+        ema_9 = close.ewm(span=9, adjust=False).mean()
+        ema_21 = close.ewm(span=21, adjust=False).mean()
+        cols["sma_10"] = sma_10
+        cols["sma_20"] = sma_20
+        cols["sma_50"] = sma_50
+        cols["sma_200"] = sma_200
+        cols["ema_9"] = ema_9
+        cols["ema_21"] = ema_21
 
         # Price relative to MAs (normalised distances)
-        f["close_to_sma_20"] = (close - f["sma_20"]) / f["sma_20"]
-        f["close_to_sma_50"] = (close - f["sma_50"]) / f["sma_50"]
-        f["close_to_sma_200"] = (close - f["sma_200"]) / f["sma_200"]
-        f["ema_9_21_cross"] = (f["ema_9"] - f["ema_21"]) / close
+        cols["close_to_sma_20"] = (close - sma_20) / sma_20
+        cols["close_to_sma_50"] = (close - sma_50) / sma_50
+        cols["close_to_sma_200"] = (close - sma_200) / sma_200
+        cols["ema_9_21_cross"] = (ema_9 - ema_21) / close
 
         # --- RSI (14) ---
         delta = close.diff()
@@ -197,14 +208,18 @@ class BTCPriceDatasetBuilder:
         avg_gain = gain.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
         avg_loss = loss.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
         rs = avg_gain / avg_loss.replace(0, np.nan)
-        f["rsi_14"] = 100.0 - (100.0 / (1.0 + rs))
+        rsi_14 = 100.0 - (100.0 / (1.0 + rs))
+        cols["rsi_14"] = rsi_14
 
         # --- MACD ---
         ema_12 = close.ewm(span=12, adjust=False).mean()
         ema_26 = close.ewm(span=26, adjust=False).mean()
-        f["macd"] = ema_12 - ema_26
-        f["macd_signal"] = f["macd"].ewm(span=9, adjust=False).mean()
-        f["macd_hist"] = f["macd"] - f["macd_signal"]
+        macd = ema_12 - ema_26
+        macd_signal = macd.ewm(span=9, adjust=False).mean()
+        macd_hist = macd - macd_signal
+        cols["macd"] = macd
+        cols["macd_signal"] = macd_signal
+        cols["macd_hist"] = macd_hist
 
         # --- ATR (14) ---
         tr = pd.concat([
@@ -212,80 +227,93 @@ class BTCPriceDatasetBuilder:
             (high - close.shift(1)).abs(),
             (low - close.shift(1)).abs(),
         ], axis=1).max(axis=1)
-        f["atr_14"] = tr.rolling(14).mean()
-        f["atr_pct"] = f["atr_14"] / close
+        atr_14 = tr.rolling(14).mean()
+        atr_pct = atr_14 / close
+        cols["atr_14"] = atr_14
+        cols["atr_pct"] = atr_pct
 
         # --- Bollinger Bands ---
         bb_sma = close.rolling(20).mean()
         bb_std = close.rolling(20).std()
-        f["bb_upper"] = bb_sma + 2 * bb_std
-        f["bb_lower"] = bb_sma - 2 * bb_std
-        bb_width = f["bb_upper"] - f["bb_lower"]
-        f["bb_position"] = (close - f["bb_lower"]) / bb_width.replace(0, np.nan)
-        f["bb_width_pct"] = bb_width / close
+        bb_upper = bb_sma + 2 * bb_std
+        bb_lower = bb_sma - 2 * bb_std
+        bb_width = bb_upper - bb_lower
+        bb_position = (close - bb_lower) / bb_width.replace(0, np.nan)
+        cols["bb_upper"] = bb_upper
+        cols["bb_lower"] = bb_lower
+        cols["bb_position"] = bb_position
+        cols["bb_width_pct"] = bb_width / close
 
         # --- ADX (14) ---
-        f["adx"] = self._compute_adx(high, low, close, period=14)
+        adx = self._compute_adx(high, low, close, period=14)
+        cols["adx"] = adx
 
         # --- Stochastic RSI ---
-        rsi_series = f["rsi_14"]
-        rsi_min = rsi_series.rolling(14).min()
-        rsi_max = rsi_series.rolling(14).max()
+        rsi_min = rsi_14.rolling(14).min()
+        rsi_max = rsi_14.rolling(14).max()
         rsi_range = (rsi_max - rsi_min).replace(0, np.nan)
-        f["stoch_rsi_k"] = ((rsi_series - rsi_min) / rsi_range) * 100
-        f["stoch_rsi_d"] = f["stoch_rsi_k"].rolling(3).mean()
+        stoch_rsi_k = ((rsi_14 - rsi_min) / rsi_range) * 100
+        cols["stoch_rsi_k"] = stoch_rsi_k
+        cols["stoch_rsi_d"] = stoch_rsi_k.rolling(3).mean()
 
         # --- Volume features ---
-        f["volume_sma_20"] = volume.rolling(20).mean()
-        vol_sma = f["volume_sma_20"].replace(0, np.nan)
-        f["volume_ratio"] = volume / vol_sma
-        f["obv"] = (np.sign(close.diff()) * volume).cumsum()
-        f["obv_sma_10"] = f["obv"].rolling(10).mean()
+        volume_sma_20 = volume.rolling(20).mean()
+        vol_sma = volume_sma_20.replace(0, np.nan)
+        volume_ratio = volume / vol_sma
+        obv = (np.sign(close.diff()) * volume).cumsum()
+        cols["volume_sma_20"] = volume_sma_20
+        cols["volume_ratio"] = volume_ratio
+        cols["obv"] = obv
+        cols["obv_sma_10"] = obv.rolling(10).mean()
 
         # --- Volatility ---
-        f["realized_vol_20"] = close.pct_change().rolling(20).std() * np.sqrt(20)
-        f["realized_vol_60"] = close.pct_change().rolling(60).std() * np.sqrt(60)
+        returns_raw = close.pct_change()
+        realized_vol_20 = returns_raw.rolling(20).std() * np.sqrt(20)
+        realized_vol_60 = returns_raw.rolling(60).std() * np.sqrt(60)
+        cols["realized_vol_20"] = realized_vol_20
+        cols["realized_vol_60"] = realized_vol_60
 
         # --- Candle patterns (simple) ---
-        body = (close - df["open"].astype(float)).abs()
-        wick_upper = high - pd.concat([close, df["open"].astype(float)], axis=1).max(axis=1)
-        wick_lower = pd.concat([close, df["open"].astype(float)], axis=1).min(axis=1) - low
+        body = (close - open_).abs()
+        wick_upper = high - pd.concat([close, open_], axis=1).max(axis=1)
+        wick_lower = pd.concat([close, open_], axis=1).min(axis=1) - low
         candle_range = (high - low).replace(0, np.nan)
-        f["body_ratio"] = body / candle_range
-        f["upper_wick_ratio"] = wick_upper / candle_range
-        f["lower_wick_ratio"] = wick_lower / candle_range
+        cols["body_ratio"] = body / candle_range
+        cols["upper_wick_ratio"] = wick_upper / candle_range
+        cols["lower_wick_ratio"] = wick_lower / candle_range
 
         # --- Price ---
-        f["close"] = close
+        cols["close"] = close
 
         # ============================================================
         # ADVANCED FEATURES (Phase 2 — accuracy improvement)
         # ============================================================
 
         # --- Lag features: let the model see how indicators evolved ---
-        lag_cols = ["rsi_14", "macd_hist", "adx", "bb_position", "volume_ratio", "atr_pct"]
-        for col in lag_cols:
-            if col in f.columns:
-                for lag in [1, 2, 4, 8]:
-                    f[f"{col}_lag_{lag}"] = f[col].shift(lag)
-                # Rate of change of the indicator itself
-                f[f"{col}_roc_4"] = f[col] - f[col].shift(4)
+        lag_sources = {
+            "rsi_14": rsi_14, "macd_hist": macd_hist, "adx": adx,
+            "bb_position": bb_position, "volume_ratio": volume_ratio, "atr_pct": atr_pct,
+        }
+        for col_name, series in lag_sources.items():
+            for lag in [1, 2, 4, 8]:
+                cols[f"{col_name}_lag_{lag}"] = series.shift(lag)
+            cols[f"{col_name}_roc_4"] = series - series.shift(4)
 
         # --- Return sequences (momentum signature) ---
         returns = close.pct_change()
         for w in [5, 10, 20]:
-            f[f"return_mean_{w}"] = returns.rolling(w).mean()
-            f[f"return_std_{w}"] = returns.rolling(w).std()
-            f[f"return_skew_{w}"] = returns.rolling(w).skew()
-            f[f"return_kurt_{w}"] = returns.rolling(w).kurt()
+            cols[f"return_mean_{w}"] = returns.rolling(w).mean()
+            cols[f"return_std_{w}"] = returns.rolling(w).std()
+            cols[f"return_skew_{w}"] = returns.rolling(w).skew()
+            cols[f"return_kurt_{w}"] = returns.rolling(w).kurt()
 
         # --- Trend strength / persistence ---
-        f["up_streak"] = self._compute_streak(returns > 0)
-        f["down_streak"] = self._compute_streak(returns < 0)
-        f["trend_consistency_10"] = returns.rolling(10).apply(
+        cols["up_streak"] = self._compute_streak(returns > 0)
+        cols["down_streak"] = self._compute_streak(returns < 0)
+        cols["trend_consistency_10"] = returns.rolling(10).apply(
             lambda x: (x > 0).sum() / len(x), raw=True
         )
-        f["trend_consistency_20"] = returns.rolling(20).apply(
+        cols["trend_consistency_20"] = returns.rolling(20).apply(
             lambda x: (x > 0).sum() / len(x), raw=True
         )
 
@@ -294,74 +322,75 @@ class BTCPriceDatasetBuilder:
             high_w = high.rolling(w).max()
             low_w = low.rolling(w).min()
             range_w = (high_w - low_w).replace(0, np.nan)
-            f[f"donchian_pos_{w}"] = (close - low_w) / range_w
+            cols[f"donchian_pos_{w}"] = (close - low_w) / range_w
 
         # --- Williams %R ---
         for w in [14, 28]:
             hh = high.rolling(w).max()
             ll = low.rolling(w).min()
-            f[f"williams_r_{w}"] = -100 * (hh - close) / (hh - ll).replace(0, np.nan)
+            cols[f"williams_r_{w}"] = -100 * (hh - close) / (hh - ll).replace(0, np.nan)
 
         # --- CCI (Commodity Channel Index) ---
         typical_price = (high + low + close) / 3
         tp_sma = typical_price.rolling(20).mean()
         tp_mad = typical_price.rolling(20).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True)
-        f["cci_20"] = (typical_price - tp_sma) / (0.015 * tp_mad.replace(0, np.nan))
+        cols["cci_20"] = (typical_price - tp_sma) / (0.015 * tp_mad.replace(0, np.nan))
 
         # --- MFI (Money Flow Index) — volume-weighted RSI ---
         mf_raw = typical_price * volume
         mf_pos = mf_raw.where(typical_price > typical_price.shift(1), 0.0)
         mf_neg = mf_raw.where(typical_price < typical_price.shift(1), 0.0)
         mf_ratio = mf_pos.rolling(14).sum() / mf_neg.rolling(14).sum().replace(0, np.nan)
-        f["mfi_14"] = 100.0 - (100.0 / (1.0 + mf_ratio))
+        cols["mfi_14"] = 100.0 - (100.0 / (1.0 + mf_ratio))
 
         # --- VWAP deviation ---
         cumvol = volume.cumsum()
         cum_tp_vol = (typical_price * volume).cumsum()
         vwap = cum_tp_vol / cumvol.replace(0, np.nan)
-        f["vwap_deviation"] = (close - vwap) / vwap.replace(0, np.nan)
+        cols["vwap_deviation"] = (close - vwap) / vwap.replace(0, np.nan)
 
         # --- Volume microstructure ---
-        f["volume_delta"] = volume - volume.shift(1)
-        f["volume_acceleration"] = f["volume_delta"] - f["volume_delta"].shift(1)
-        f["buy_volume_pct"] = (close - low) / (high - low).replace(0, np.nan)
-        f["sell_volume_pct"] = (high - close) / (high - low).replace(0, np.nan)
-        f["volume_force"] = returns * volume
-        f["volume_force_sma_10"] = f["volume_force"].rolling(10).mean()
+        volume_delta = volume - volume.shift(1)
+        volume_force = returns * volume
+        cols["volume_delta"] = volume_delta
+        cols["volume_acceleration"] = volume_delta - volume_delta.shift(1)
+        cols["buy_volume_pct"] = (close - low) / (high - low).replace(0, np.nan)
+        cols["sell_volume_pct"] = (high - close) / (high - low).replace(0, np.nan)
+        cols["volume_force"] = volume_force
+        cols["volume_force_sma_10"] = volume_force.rolling(10).mean()
 
         # --- Volatility regime features ---
-        vol_20 = f["realized_vol_20"]
-        vol_60 = f["realized_vol_60"]
-        f["vol_ratio_20_60"] = vol_20 / vol_60.replace(0, np.nan)
-        f["vol_zscore_20"] = (vol_20 - vol_20.rolling(100).mean()) / vol_20.rolling(100).std().replace(0, np.nan)
-        f["atr_zscore"] = (f["atr_pct"] - f["atr_pct"].rolling(100).mean()) / f["atr_pct"].rolling(100).std().replace(0, np.nan)
+        cols["vol_ratio_20_60"] = realized_vol_20 / realized_vol_60.replace(0, np.nan)
+        cols["vol_zscore_20"] = (realized_vol_20 - realized_vol_20.rolling(100).mean()) / realized_vol_20.rolling(100).std().replace(0, np.nan)
+        cols["atr_zscore"] = (atr_pct - atr_pct.rolling(100).mean()) / atr_pct.rolling(100).std().replace(0, np.nan)
 
         # --- Garman-Klass volatility estimator ---
         log_hl = np.log(high / low.replace(0, np.nan)) ** 2
-        log_co = np.log(close / df["open"].astype(float).replace(0, np.nan)) ** 2
+        log_co = np.log(close / open_.replace(0, np.nan)) ** 2
         gk_vol = (0.5 * log_hl - (2 * np.log(2) - 1) * log_co)
-        f["gk_volatility_20"] = gk_vol.rolling(20).mean().apply(np.sqrt)
+        cols["gk_volatility_20"] = gk_vol.rolling(20).mean().apply(np.sqrt)
 
         # --- Cross-timeframe synthetic features ---
-        # Simulate higher timeframes by resampling within the 15m data
         for mult, name in [(4, "1h"), (16, "4h")]:
             close_htf = close.rolling(mult).apply(lambda x: x.iloc[-1], raw=False)
             high_htf = high.rolling(mult).max()
             low_htf = low.rolling(mult).min()
-            f[f"return_{name}"] = close_htf.pct_change(mult)
-            f[f"range_pct_{name}"] = (high_htf - low_htf) / close.replace(0, np.nan)
-            f[f"rsi_{name}"] = self._compute_rsi_series(close_htf, period=14)
+            cols[f"return_{name}"] = close_htf.pct_change(mult)
+            cols[f"range_pct_{name}"] = (high_htf - low_htf) / close.replace(0, np.nan)
+            cols[f"rsi_{name}"] = self._compute_rsi_series(close_htf, period=14)
 
         # --- Hour-of-day cyclical encoding (if timestamp available) ---
         if "timestamp" in df.columns:
             ts = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
             hour = ts.dt.hour + ts.dt.minute / 60.0
-            f["hour_sin"] = np.sin(2 * np.pi * hour / 24.0)
-            f["hour_cos"] = np.cos(2 * np.pi * hour / 24.0)
+            cols["hour_sin"] = np.sin(2 * np.pi * hour / 24.0)
+            cols["hour_cos"] = np.cos(2 * np.pi * hour / 24.0)
             dow = ts.dt.dayofweek.astype(float)
-            f["dow_sin"] = np.sin(2 * np.pi * dow / 7.0)
-            f["dow_cos"] = np.cos(2 * np.pi * dow / 7.0)
+            cols["dow_sin"] = np.sin(2 * np.pi * dow / 7.0)
+            cols["dow_cos"] = np.cos(2 * np.pi * dow / 7.0)
 
+        # Build DataFrame in one shot to avoid fragmentation
+        f = pd.DataFrame(cols, index=df.index)
         return f
 
     def _compute_labels(self, df: pd.DataFrame) -> pd.DataFrame:
