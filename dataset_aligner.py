@@ -3,6 +3,21 @@ from pathlib import Path
 import pandas as pd
 
 
+def _safe_merge_asof(left, right, on, **kwargs):
+    """merge_asof that tolerates NaT/null in the left merge key."""
+    if left.empty or right.empty or on not in left.columns or on not in right.columns:
+        return left
+    mask = left[on].notna()
+    if not mask.any():
+        return left
+    valid = left[mask].copy().sort_values(on)
+    work_right = right.copy().sort_values(on)
+    merged = pd.merge_asof(valid, work_right, on=on, **kwargs)
+    if mask.all():
+        return merged
+    return pd.concat([merged, left[~mask]], ignore_index=True)
+
+
 class DatasetAligner:
     """
     Align historical project snapshots with BTC future-return targets.
@@ -34,7 +49,7 @@ class DatasetAligner:
         dataset = dataset.dropna(subset=["timestamp"]).sort_values("timestamp")
         targets = targets.dropna(subset=["timestamp"]).sort_values("timestamp")
 
-        aligned = pd.merge_asof(dataset, targets, on="timestamp", direction="backward")
+        aligned = _safe_merge_asof(dataset, targets, on="timestamp", direction="backward")
         aligned = aligned.dropna(subset=["target_up", "future_return"]).reset_index(drop=True)
         return aligned
 
