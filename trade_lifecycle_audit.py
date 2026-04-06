@@ -30,7 +30,7 @@ class TradeLifecycleAuditor:
         updated = pd.concat([existing, pd.DataFrame([row])], ignore_index=True)
         if sort_by and sort_by in updated.columns:
             try:
-                sort_key = pd.to_datetime(updated[sort_by], errors="coerce", utc=True)
+                sort_key = pd.to_datetime(updated[sort_by], errors="coerce", utc=True, format="mixed")
                 updated = (
                     updated.assign(_sort_key=sort_key)
                     .sort_values("_sort_key", na_position="first")
