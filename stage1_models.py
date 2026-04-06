@@ -65,9 +65,8 @@ class Stage1Models:
         usable, _ = drop_all_nan_features(df, candidates, context="stage1_models")
         return usable
 
-    def _build_classifier(self):
+    def _build_classifier(self, cv=3):
         if LGBMClassifier is not None:
-            # ── BUG FIX I: Use all cores + optional GPU ──
             lgb_params = {
                 "n_estimators": 300,
                 "learning_rate": 0.05,
@@ -78,20 +77,19 @@ class Stage1Models:
                 "n_jobs": _N_JOBS,
                 "verbose": -1,
             }
-            # Merge GPU params if available
             for k, v in _LGB_EXTRA.items():
-                if k != "n_jobs":  # don't override n_jobs if GPU set it
+                if k != "n_jobs":
                     lgb_params[k] = v
             base = LGBMClassifier(**lgb_params)
             return Pipeline([
                 ("imputer", SimpleImputer(strategy="median")),
-                ("model", CalibratedClassifierCV(base, method="sigmoid", cv=3)),
+                ("model", CalibratedClassifierCV(base, method="sigmoid", cv=cv)),
             ])
         if CatBoostClassifier is not None:
             base = CatBoostClassifier(iterations=300, learning_rate=0.05, depth=6, verbose=False, thread_count=_N_JOBS)
             return Pipeline([
                 ("imputer", SimpleImputer(strategy="median")),
-                ("model", CalibratedClassifierCV(base, method="sigmoid", cv=3)),
+                ("model", CalibratedClassifierCV(base, method="sigmoid", cv=cv)),
             ])
         return Pipeline([
             ("imputer", SimpleImputer(strategy="median")),
@@ -135,6 +133,13 @@ class Stage1Models:
             values = [0.0] * len(feature_names)
         pd.DataFrame({"feature": feature_names, "importance": values}).sort_values("importance", ascending=False).to_csv(self.importance_file, index=False)
 
+    def _safe_cv_folds(self, y) -> int:
+        """Return the max CV folds we can safely use (at least 2, capped at 3)."""
+        counts = y.value_counts()
+        if counts.empty:
+            return 2
+        return max(2, min(3, int(counts.min())))
+
     def train(self):
         df = self._safe_read()
         if df.empty:
@@ -147,14 +152,16 @@ class Stage1Models:
         X = df[usable]
 
         if "tp_before_sl_60m" in df.columns:
-            clf = self._build_classifier()
+            y_cls = df["tp_before_sl_60m"].fillna(0).astype(int)
+            cv_folds = self._safe_cv_folds(y_cls)
+            clf = self._build_classifier(cv=cv_folds)
             with warnings.catch_warnings():
                 warnings.filterwarnings(
                     "ignore",
                     message="X does not have valid feature names, but LGBMClassifier was fitted with feature names",
                     category=UserWarning,
                 )
-                clf.fit(X, df["tp_before_sl_60m"].fillna(0).astype(int))
+                clf.fit(X, y_cls)
             joblib.dump({"model": clf, "features": usable}, self.classifier_file)
             self._write_feature_importance(usable, clf)
 
