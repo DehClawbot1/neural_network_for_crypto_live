@@ -4,8 +4,9 @@ trading_mode_preset.py
 Startup trading-mode selector (1-4) that tunes risk, sizing, governor,
 and entry parameters in one shot.
 
-Model confidence range is ~0.08-0.28, so governor confidence floors
-are calibrated to that reality.
+Model confidence/score range is ~0.05-0.28 (median ~0.07-0.14).
+Liquidity scores typically range 0.10-0.30.
+All thresholds are calibrated to these real output ranges.
 
 Mode 1 - Very Aggressive   : max capital deployment, loose guards
 Mode 2 - Aggressive        : high capital deployment, moderate guards
@@ -42,7 +43,7 @@ PRESETS = {
             "MIN_ENTRY_USDC": 2.00,
         },
         "env": {
-            "ENTRY_MIN_SCORE": "0.04",
+            "ENTRY_MIN_SCORE": "0.02",
             "ENTRY_MAX_SPREAD": "0.45",
             "ENTRY_MIN_LIQUIDITY": "0.3",
             "ENTRY_MIN_LIQUIDITY_SCORE": "0.002",
@@ -57,16 +58,16 @@ PRESETS = {
             "GOV_LEVEL1_MAX_NEGATIVE_AVG_PNL": "-0.25",
             "GOV_LEVEL1_MAX_DRAWDOWN": "80",
             "GOV_LEVEL1_SIZE_MULTIPLIER": "0.80",
-            "GOV_LEVEL1_MIN_ENTRY_CONFIDENCE": "0.08",
-            "GOV_LEVEL1_MIN_LIQUIDITY_SCORE": "0.15",
+            "GOV_LEVEL1_MIN_ENTRY_CONFIDENCE": "0.04",
+            "GOV_LEVEL1_MIN_LIQUIDITY_SCORE": "0.05",
             # Governor Level 2 - still loose
             "GOV_LEVEL2_MIN_WIN_RATE": "0.18",
             "GOV_LEVEL2_MIN_PROFIT_FACTOR": "0.30",
             "GOV_LEVEL2_MAX_NEGATIVE_AVG_PNL": "-0.50",
             "GOV_LEVEL2_MAX_DRAWDOWN": "120",
             "GOV_LEVEL2_SIZE_MULTIPLIER": "0.60",
-            "GOV_LEVEL2_MIN_ENTRY_CONFIDENCE": "0.06",
-            "GOV_LEVEL2_MIN_LIQUIDITY_SCORE": "0.20",
+            "GOV_LEVEL2_MIN_ENTRY_CONFIDENCE": "0.03",
+            "GOV_LEVEL2_MIN_LIQUIDITY_SCORE": "0.08",
         },
     },
     2: {
@@ -82,7 +83,7 @@ PRESETS = {
             "MIN_ENTRY_USDC": 2.50,
         },
         "env": {
-            "ENTRY_MIN_SCORE": "0.08",
+            "ENTRY_MIN_SCORE": "0.04",
             "ENTRY_MAX_SPREAD": "0.38",
             "ENTRY_MIN_LIQUIDITY": "0.4",
             "ENTRY_MIN_LIQUIDITY_SCORE": "0.004",
@@ -97,16 +98,16 @@ PRESETS = {
             "GOV_LEVEL1_MAX_NEGATIVE_AVG_PNL": "-0.15",
             "GOV_LEVEL1_MAX_DRAWDOWN": "50",
             "GOV_LEVEL1_SIZE_MULTIPLIER": "0.65",
-            "GOV_LEVEL1_MIN_ENTRY_CONFIDENCE": "0.12",
-            "GOV_LEVEL1_MIN_LIQUIDITY_SCORE": "0.25",
+            "GOV_LEVEL1_MIN_ENTRY_CONFIDENCE": "0.06",
+            "GOV_LEVEL1_MIN_LIQUIDITY_SCORE": "0.10",
             # Governor Level 2
             "GOV_LEVEL2_MIN_WIN_RATE": "0.22",
             "GOV_LEVEL2_MIN_PROFIT_FACTOR": "0.40",
             "GOV_LEVEL2_MAX_NEGATIVE_AVG_PNL": "-0.35",
             "GOV_LEVEL2_MAX_DRAWDOWN": "80",
             "GOV_LEVEL2_SIZE_MULTIPLIER": "0.45",
-            "GOV_LEVEL2_MIN_ENTRY_CONFIDENCE": "0.08",
-            "GOV_LEVEL2_MIN_LIQUIDITY_SCORE": "0.30",
+            "GOV_LEVEL2_MIN_ENTRY_CONFIDENCE": "0.05",
+            "GOV_LEVEL2_MIN_LIQUIDITY_SCORE": "0.12",
         },
     },
     3: {
@@ -122,7 +123,7 @@ PRESETS = {
             "MIN_ENTRY_USDC": 3.00,
         },
         "env": {
-            "ENTRY_MIN_SCORE": "0.14",
+            "ENTRY_MIN_SCORE": "0.07",
             "ENTRY_MAX_SPREAD": "0.25",
             "ENTRY_MIN_LIQUIDITY": "0.8",
             "ENTRY_MIN_LIQUIDITY_SCORE": "0.01",
@@ -137,16 +138,16 @@ PRESETS = {
             "GOV_LEVEL1_MAX_NEGATIVE_AVG_PNL": "-0.08",
             "GOV_LEVEL1_MAX_DRAWDOWN": "25",
             "GOV_LEVEL1_SIZE_MULTIPLIER": "0.40",
-            "GOV_LEVEL1_MIN_ENTRY_CONFIDENCE": "0.18",
-            "GOV_LEVEL1_MIN_LIQUIDITY_SCORE": "0.40",
+            "GOV_LEVEL1_MIN_ENTRY_CONFIDENCE": "0.10",
+            "GOV_LEVEL1_MIN_LIQUIDITY_SCORE": "0.15",
             # Governor Level 2 - strict
             "GOV_LEVEL2_MIN_WIN_RATE": "0.32",
             "GOV_LEVEL2_MIN_PROFIT_FACTOR": "0.60",
             "GOV_LEVEL2_MAX_NEGATIVE_AVG_PNL": "-0.18",
             "GOV_LEVEL2_MAX_DRAWDOWN": "45",
             "GOV_LEVEL2_SIZE_MULTIPLIER": "0.25",
-            "GOV_LEVEL2_MIN_ENTRY_CONFIDENCE": "0.15",
-            "GOV_LEVEL2_MIN_LIQUIDITY_SCORE": "0.50",
+            "GOV_LEVEL2_MIN_ENTRY_CONFIDENCE": "0.08",
+            "GOV_LEVEL2_MIN_LIQUIDITY_SCORE": "0.20",
         },
     },
     4: {
@@ -162,7 +163,7 @@ PRESETS = {
             "MIN_ENTRY_USDC": 5.00,
         },
         "env": {
-            "ENTRY_MIN_SCORE": "0.20",
+            "ENTRY_MIN_SCORE": "0.10",
             "ENTRY_MAX_SPREAD": "0.15",
             "ENTRY_MIN_LIQUIDITY": "1.5",
             "ENTRY_MIN_LIQUIDITY_SCORE": "0.02",
@@ -177,16 +178,16 @@ PRESETS = {
             "GOV_LEVEL1_MAX_NEGATIVE_AVG_PNL": "-0.05",
             "GOV_LEVEL1_MAX_DRAWDOWN": "15",
             "GOV_LEVEL1_SIZE_MULTIPLIER": "0.30",
-            "GOV_LEVEL1_MIN_ENTRY_CONFIDENCE": "0.22",
-            "GOV_LEVEL1_MIN_LIQUIDITY_SCORE": "0.50",
+            "GOV_LEVEL1_MIN_ENTRY_CONFIDENCE": "0.14",
+            "GOV_LEVEL1_MIN_LIQUIDITY_SCORE": "0.20",
             # Governor Level 2 - strictest
             "GOV_LEVEL2_MIN_WIN_RATE": "0.38",
             "GOV_LEVEL2_MIN_PROFIT_FACTOR": "0.75",
             "GOV_LEVEL2_MAX_NEGATIVE_AVG_PNL": "-0.10",
             "GOV_LEVEL2_MAX_DRAWDOWN": "30",
             "GOV_LEVEL2_SIZE_MULTIPLIER": "0.15",
-            "GOV_LEVEL2_MIN_ENTRY_CONFIDENCE": "0.20",
-            "GOV_LEVEL2_MIN_LIQUIDITY_SCORE": "0.60",
+            "GOV_LEVEL2_MIN_ENTRY_CONFIDENCE": "0.12",
+            "GOV_LEVEL2_MIN_LIQUIDITY_SCORE": "0.25",
         },
     },
 }

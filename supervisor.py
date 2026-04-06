@@ -816,7 +816,7 @@ def main_loop():
     sentiment_analyzer = SentimentAnalyzer()
     macro_analyzer = MacroAnalyzer()
     onchain_analyzer = OnChainAnalyzer()
-    entry_min_score = _env_float("ENTRY_MIN_SCORE", 0.12)
+    entry_min_score = _env_float("ENTRY_MIN_SCORE", 0.04)
     entry_max_spread = _env_float("ENTRY_MAX_SPREAD", 0.35)
     entry_min_liquidity = _env_float("ENTRY_MIN_LIQUIDITY", 0.5)
     entry_min_liquidity_score = _env_float("ENTRY_MIN_LIQUIDITY_SCORE", 0.005)
