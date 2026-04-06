@@ -1620,9 +1620,8 @@ def main_loop():
                 logging.debug("BTC forecast eval skipped: %s", exc)
             # --------------------------------------------------
 
-            if not signals_df.empty:
-                for k, v in macro_context.items():
-                    signals_df[k] = v
+            if not signals_df.empty and macro_context:
+                signals_df = pd.concat([signals_df, pd.DataFrame({k: [v] * len(signals_df) for k, v in macro_context.items()}, index=signals_df.index)], axis=1)
             # --------------------------------------------------
             
             if always_on_enabled and always_on_only and signals_df is not None and not signals_df.empty:
