@@ -75,6 +75,7 @@ from trade_lifecycle_audit import TradeLifecycleAuditor
 from benchmark_strategy import BenchmarkStrategy
 from trade_quality import build_quality_context, resolve_entry_signal_label
 from trading_mode_preset import select_trading_mode, apply_preset, PRESETS
+from btc_trade_feedback import BTCTradeFeedback
 try:
     from inference_runtime_guard import (
         reset_cycle as _reset_inference_runtime_guard,
@@ -815,6 +816,7 @@ def main_loop():
     performance_governor = PerformanceGovernor(logs_dir="logs")
     lifecycle_auditor = TradeLifecycleAuditor(logs_dir="logs")
     benchmark_strategy = BenchmarkStrategy(logs_dir="logs")
+    btc_trade_feedback = BTCTradeFeedback(logs_dir="logs")
     def _get_active_model_version():
         registry_path = Path("weights/model_registry.csv")
         if not registry_path.exists():
@@ -2052,7 +2054,7 @@ def main_loop():
                 _apply_exit_execution_metrics(trade, exit_result or {"status": "dead_orderbook"}, intended_reason, reference_price)
                 trade.actual_execution_path = "dead_orderbook_tombstone"
                 trade.intended_exit_reason = intended_reason
-                trade.close(exit_price=reference_price, reason="external_manual_close")
+                trade.close(exit_price=reference_price, reason="external_manual_close", exit_btc_price=btc_live_price)
                 trade_manager.persist_closed_trades([trade])
                 trade_manager.active_trades.pop(
                     _make_position_key(
@@ -2574,7 +2576,7 @@ def main_loop():
                         _trade = trade_manager.active_trades[m_key]
                         _px = float(getattr(_trade, "current_price", 0.0) or getattr(_trade, "entry_price", 0.0) or 0.0)
                         if _px > 0:
-                            _trade.close(exit_price=_px, reason="ai_close_long")
+                            _trade.close(exit_price=_px, reason="ai_close_long", exit_btc_price=btc_live_price)
                         else:
                             _trade.state = TradeState.CLOSED
                             _trade.close_reason = "ai_close_long"
@@ -3472,7 +3474,7 @@ def main_loop():
                                     _apply_exit_execution_metrics(trade, exit_result, "rl_exit", exit_price)
                                     log_live_fill_event(pos_dict, actual_fill_price, actual_fill_size, action_type="LIVE_EXIT")
                                     if actual_fill_size >= pre_exit_shares - 1e-6:
-                                        trade.close(exit_price=actual_fill_price, reason="rl_exit") # Update TradeLifecycle
+                                        trade.close(exit_price=actual_fill_price, reason="rl_exit", exit_btc_price=btc_live_price) # Update TradeLifecycle
                                         trade_manager.persist_closed_trades([trade])
                                         trade_manager.active_trades.pop(_make_position_key(token_id=trade.token_id, condition_id=trade.condition_id, outcome_side=trade.outcome_side, market=trade.market), None) # Remove from active trades
                                     else:
@@ -3497,7 +3499,7 @@ def main_loop():
                         else:
                             trade.actual_execution_path = "paper_rl_exit"
                             trade.intended_exit_reason = "rl_exit"
-                            trade.close(exit_price=trade.current_price, reason="rl_exit") # FIX M2: real reason
+                            trade.close(exit_price=trade.current_price, reason="rl_exit", exit_btc_price=btc_live_price) # FIX M2: real reason
                             logging.info("Paper EXIT for %s. Realized PnL: %.2f", token_id, trade.realized_pnl)
                             trade_manager.active_trades.pop(_make_position_key(token_id=trade.token_id, condition_id=trade.condition_id, outcome_side=trade.outcome_side, market=trade.market), None) # Remove from active trades
 
@@ -3629,6 +3631,19 @@ def main_loop():
                         _money_mgr.record_loss(ct.realized_pnl)
             finalized_closed_trades = [ct for ct in closed_trades if getattr(ct, "state", None) == TradeState.CLOSED]
             closed_trade_feedback_count = feedback_learner.record_closed_trades(finalized_closed_trades)
+            try:
+                btc_feedback_df = btc_trade_feedback.write_feedback()
+                if not btc_feedback_df.empty:
+                    btc_fb_stats = btc_trade_feedback.compute_feedback_weights()
+                    logging.info(
+                        "BTC forecast feedback: accuracy=%.1f%% win_when_correct=%.1f%% win_when_wrong=%.1f%% (n=%d)",
+                        btc_fb_stats.get("btc_direction_accuracy", 0) * 100,
+                        btc_fb_stats.get("win_rate_when_btc_correct", 0) * 100,
+                        btc_fb_stats.get("win_rate_when_btc_wrong", 0) * 100,
+                        btc_fb_stats.get("n_trades_with_btc_data", 0),
+                    )
+            except Exception as exc:
+                logging.warning("BTC trade feedback analysis failed: %s", exc)
             try:
                 lifecycle_auditor.build_reports()
             except Exception as exc:

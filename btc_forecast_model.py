@@ -96,6 +96,7 @@ class BTCForecastModel:
         target_return_col: str = "fwd_return_15",
         target_dir_col: str = "fwd_up_15",  # binary UP/DOWN (better than 3-class)
         test_fraction: float = 0.15,
+        feedback_weights: dict | None = None,
     ) -> dict:
         """
         Train ensemble with purged walk-forward cross-validation.
@@ -152,8 +153,16 @@ class BTCForecastModel:
         y_reg_train, y_reg_test = y_reg_all[:split_idx], y_reg_all[split_idx:]
         y_cls_train, y_cls_test = y_cls_all[:split_idx], y_cls_all[split_idx:]
 
-        # Apply recency weighting — recent samples matter more
-        sample_weights = self._compute_sample_weights(len(X_train))
+        # Apply recency weighting, adjusted by trade feedback accuracy
+        feedback_scale = 1.0
+        if feedback_weights:
+            feedback_scale = feedback_weights.get("error_scale", 1.0)
+            logger.info(
+                "BTCForecastModel: using trade feedback weights (accuracy=%.1f%% error_scale=%.3f)",
+                feedback_weights.get("overall_accuracy", 0) * 100,
+                feedback_scale,
+            )
+        sample_weights = self._compute_sample_weights(len(X_train), feedback_scale=feedback_scale)
 
         logger.info(
             "BTCForecastModel: training ensemble on %d rows, testing on %d rows, %d features",
@@ -472,9 +481,23 @@ class BTCForecastModel:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _compute_sample_weights(n: int, decay: float = 0.9999) -> np.ndarray:
-        """Exponential recency weighting — recent samples weighted higher."""
+    def _compute_sample_weights(n: int, decay: float = 0.9999, feedback_scale: float = 1.0) -> np.ndarray:
+        """Exponential recency weighting, optionally scaled by trade feedback.
+
+        Args:
+            n: number of samples
+            decay: exponential decay factor (closer to 1 = slower decay)
+            feedback_scale: multiplier from BTCTradeFeedback (>1 = model is
+                accurate so trust recent data more; <1 = model is inaccurate
+                so flatten weights toward uniform)
+        """
         weights = np.power(decay, np.arange(n)[::-1])
+        if feedback_scale != 1.0:
+            # Blend between recency weights and uniform weights
+            # High accuracy -> more recency bias; low accuracy -> flatter
+            alpha = min(1.0, max(0.3, feedback_scale))
+            uniform = np.ones(n)
+            weights = alpha * weights + (1 - alpha) * uniform
         weights /= weights.mean()  # normalise so mean weight = 1
         return weights
 

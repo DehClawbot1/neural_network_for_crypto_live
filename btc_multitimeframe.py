@@ -89,6 +89,7 @@ class BTCMultiTimeframeForecaster:
         candle_paths: dict[str, str | Path] | None = None,
         enrich_derivatives: bool = True,
         enrich_sentiment: bool = False,
+        feedback_weights: dict | None = None,
     ) -> dict[str, dict]:
         """
         Train models for each timeframe.
@@ -154,11 +155,12 @@ class BTCMultiTimeframeForecaster:
 
             logger.info("%s dataset: %d rows x %d cols", tf, len(dataset), len(dataset.columns))
 
-            # Train the model
+            # Train the model (with trade feedback weights if available)
             metrics = self.models[tf].train(
                 dataset,
                 target_return_col=target_return,
                 target_dir_col=target_dir,
+                feedback_weights=feedback_weights,
             )
             results[tf] = metrics
 
