@@ -1,8 +1,11 @@
 """
 trading_mode_preset.py
 ======================
-Startup trading-mode selector (1–4) that tunes risk, sizing, governor,
+Startup trading-mode selector (1-4) that tunes risk, sizing, governor,
 and entry parameters in one shot.
+
+Model confidence range is ~0.08-0.28, so governor confidence floors
+are calibrated to that reality.
 
 Mode 1 - Very Aggressive   : max capital deployment, loose guards
 Mode 2 - Aggressive        : high capital deployment, moderate guards
@@ -21,8 +24,8 @@ logger = logging.getLogger(__name__)
 # Preset definitions
 # ---------------------------------------------------------------------------
 # Each preset is a dict of:
-#   "config"  → attrs to patch on TradingConfig (class-level)
-#   "env"     → env vars to set (only if not already overridden by user)
+#   "config"  -> attrs to patch on TradingConfig (class-level)
+#   "env"     -> env vars to set (always applied — preset overrides .env)
 # ---------------------------------------------------------------------------
 
 PRESETS = {
@@ -39,7 +42,7 @@ PRESETS = {
             "MIN_ENTRY_USDC": 2.00,
         },
         "env": {
-            "ENTRY_MIN_SCORE": "0.06",
+            "ENTRY_MIN_SCORE": "0.04",
             "ENTRY_MAX_SPREAD": "0.45",
             "ENTRY_MIN_LIQUIDITY": "0.3",
             "ENTRY_MIN_LIQUIDITY_SCORE": "0.002",
@@ -48,22 +51,22 @@ PRESETS = {
             "ALWAYS_ON_SIGNAL_SIZE": "50",
             "SESSION_MAX_DRAWDOWN_USDC": "100.0",
             "SESSION_MAX_FAILED_ENTRIES": "25",
-            # Governor Level 1 — very loose
-            "GOV_LEVEL1_MIN_WIN_RATE": "0.28",
-            "GOV_LEVEL1_MIN_PROFIT_FACTOR": "0.50",
-            "GOV_LEVEL1_MAX_NEGATIVE_AVG_PNL": "-0.20",
-            "GOV_LEVEL1_MAX_DRAWDOWN": "60",
-            "GOV_LEVEL1_SIZE_MULTIPLIER": "0.70",
-            "GOV_LEVEL1_MIN_ENTRY_CONFIDENCE": "0.40",
-            "GOV_LEVEL1_MIN_LIQUIDITY_SCORE": "0.20",
-            # Governor Level 2 — still loose
-            "GOV_LEVEL2_MIN_WIN_RATE": "0.20",
-            "GOV_LEVEL2_MIN_PROFIT_FACTOR": "0.40",
-            "GOV_LEVEL2_MAX_NEGATIVE_AVG_PNL": "-0.40",
-            "GOV_LEVEL2_MAX_DRAWDOWN": "100",
-            "GOV_LEVEL2_SIZE_MULTIPLIER": "0.50",
-            "GOV_LEVEL2_MIN_ENTRY_CONFIDENCE": "0.30",
-            "GOV_LEVEL2_MIN_LIQUIDITY_SCORE": "0.30",
+            # Governor Level 1 - very loose
+            "GOV_LEVEL1_MIN_WIN_RATE": "0.25",
+            "GOV_LEVEL1_MIN_PROFIT_FACTOR": "0.40",
+            "GOV_LEVEL1_MAX_NEGATIVE_AVG_PNL": "-0.25",
+            "GOV_LEVEL1_MAX_DRAWDOWN": "80",
+            "GOV_LEVEL1_SIZE_MULTIPLIER": "0.80",
+            "GOV_LEVEL1_MIN_ENTRY_CONFIDENCE": "0.08",
+            "GOV_LEVEL1_MIN_LIQUIDITY_SCORE": "0.15",
+            # Governor Level 2 - still loose
+            "GOV_LEVEL2_MIN_WIN_RATE": "0.18",
+            "GOV_LEVEL2_MIN_PROFIT_FACTOR": "0.30",
+            "GOV_LEVEL2_MAX_NEGATIVE_AVG_PNL": "-0.50",
+            "GOV_LEVEL2_MAX_DRAWDOWN": "120",
+            "GOV_LEVEL2_SIZE_MULTIPLIER": "0.60",
+            "GOV_LEVEL2_MIN_ENTRY_CONFIDENCE": "0.06",
+            "GOV_LEVEL2_MIN_LIQUIDITY_SCORE": "0.20",
         },
     },
     2: {
@@ -79,7 +82,7 @@ PRESETS = {
             "MIN_ENTRY_USDC": 2.50,
         },
         "env": {
-            "ENTRY_MIN_SCORE": "0.10",
+            "ENTRY_MIN_SCORE": "0.08",
             "ENTRY_MAX_SPREAD": "0.38",
             "ENTRY_MIN_LIQUIDITY": "0.4",
             "ENTRY_MIN_LIQUIDITY_SCORE": "0.004",
@@ -89,21 +92,21 @@ PRESETS = {
             "SESSION_MAX_DRAWDOWN_USDC": "70.0",
             "SESSION_MAX_FAILED_ENTRIES": "20",
             # Governor Level 1
-            "GOV_LEVEL1_MIN_WIN_RATE": "0.35",
-            "GOV_LEVEL1_MIN_PROFIT_FACTOR": "0.70",
-            "GOV_LEVEL1_MAX_NEGATIVE_AVG_PNL": "-0.12",
-            "GOV_LEVEL1_MAX_DRAWDOWN": "40",
-            "GOV_LEVEL1_SIZE_MULTIPLIER": "0.60",
-            "GOV_LEVEL1_MIN_ENTRY_CONFIDENCE": "0.50",
-            "GOV_LEVEL1_MIN_LIQUIDITY_SCORE": "0.30",
+            "GOV_LEVEL1_MIN_WIN_RATE": "0.30",
+            "GOV_LEVEL1_MIN_PROFIT_FACTOR": "0.55",
+            "GOV_LEVEL1_MAX_NEGATIVE_AVG_PNL": "-0.15",
+            "GOV_LEVEL1_MAX_DRAWDOWN": "50",
+            "GOV_LEVEL1_SIZE_MULTIPLIER": "0.65",
+            "GOV_LEVEL1_MIN_ENTRY_CONFIDENCE": "0.12",
+            "GOV_LEVEL1_MIN_LIQUIDITY_SCORE": "0.25",
             # Governor Level 2
-            "GOV_LEVEL2_MIN_WIN_RATE": "0.25",
-            "GOV_LEVEL2_MIN_PROFIT_FACTOR": "0.50",
-            "GOV_LEVEL2_MAX_NEGATIVE_AVG_PNL": "-0.30",
-            "GOV_LEVEL2_MAX_DRAWDOWN": "70",
-            "GOV_LEVEL2_SIZE_MULTIPLIER": "0.40",
-            "GOV_LEVEL2_MIN_ENTRY_CONFIDENCE": "0.35",
-            "GOV_LEVEL2_MIN_LIQUIDITY_SCORE": "0.40",
+            "GOV_LEVEL2_MIN_WIN_RATE": "0.22",
+            "GOV_LEVEL2_MIN_PROFIT_FACTOR": "0.40",
+            "GOV_LEVEL2_MAX_NEGATIVE_AVG_PNL": "-0.35",
+            "GOV_LEVEL2_MAX_DRAWDOWN": "80",
+            "GOV_LEVEL2_SIZE_MULTIPLIER": "0.45",
+            "GOV_LEVEL2_MIN_ENTRY_CONFIDENCE": "0.08",
+            "GOV_LEVEL2_MIN_LIQUIDITY_SCORE": "0.30",
         },
     },
     3: {
@@ -119,7 +122,7 @@ PRESETS = {
             "MIN_ENTRY_USDC": 3.00,
         },
         "env": {
-            "ENTRY_MIN_SCORE": "0.18",
+            "ENTRY_MIN_SCORE": "0.14",
             "ENTRY_MAX_SPREAD": "0.25",
             "ENTRY_MIN_LIQUIDITY": "0.8",
             "ENTRY_MIN_LIQUIDITY_SCORE": "0.01",
@@ -128,22 +131,22 @@ PRESETS = {
             "ALWAYS_ON_SIGNAL_SIZE": "15",
             "SESSION_MAX_DRAWDOWN_USDC": "30.0",
             "SESSION_MAX_FAILED_ENTRIES": "10",
-            # Governor Level 1 — tight
-            "GOV_LEVEL1_MIN_WIN_RATE": "0.42",
-            "GOV_LEVEL1_MIN_PROFIT_FACTOR": "0.90",
-            "GOV_LEVEL1_MAX_NEGATIVE_AVG_PNL": "-0.06",
-            "GOV_LEVEL1_MAX_DRAWDOWN": "20",
+            # Governor Level 1 - tight
+            "GOV_LEVEL1_MIN_WIN_RATE": "0.38",
+            "GOV_LEVEL1_MIN_PROFIT_FACTOR": "0.75",
+            "GOV_LEVEL1_MAX_NEGATIVE_AVG_PNL": "-0.08",
+            "GOV_LEVEL1_MAX_DRAWDOWN": "25",
             "GOV_LEVEL1_SIZE_MULTIPLIER": "0.40",
-            "GOV_LEVEL1_MIN_ENTRY_CONFIDENCE": "0.70",
-            "GOV_LEVEL1_MIN_LIQUIDITY_SCORE": "0.50",
-            # Governor Level 2 — strict
-            "GOV_LEVEL2_MIN_WIN_RATE": "0.35",
-            "GOV_LEVEL2_MIN_PROFIT_FACTOR": "0.70",
-            "GOV_LEVEL2_MAX_NEGATIVE_AVG_PNL": "-0.15",
-            "GOV_LEVEL2_MAX_DRAWDOWN": "40",
+            "GOV_LEVEL1_MIN_ENTRY_CONFIDENCE": "0.18",
+            "GOV_LEVEL1_MIN_LIQUIDITY_SCORE": "0.40",
+            # Governor Level 2 - strict
+            "GOV_LEVEL2_MIN_WIN_RATE": "0.32",
+            "GOV_LEVEL2_MIN_PROFIT_FACTOR": "0.60",
+            "GOV_LEVEL2_MAX_NEGATIVE_AVG_PNL": "-0.18",
+            "GOV_LEVEL2_MAX_DRAWDOWN": "45",
             "GOV_LEVEL2_SIZE_MULTIPLIER": "0.25",
-            "GOV_LEVEL2_MIN_ENTRY_CONFIDENCE": "0.65",
-            "GOV_LEVEL2_MIN_LIQUIDITY_SCORE": "0.60",
+            "GOV_LEVEL2_MIN_ENTRY_CONFIDENCE": "0.15",
+            "GOV_LEVEL2_MIN_LIQUIDITY_SCORE": "0.50",
         },
     },
     4: {
@@ -159,7 +162,7 @@ PRESETS = {
             "MIN_ENTRY_USDC": 5.00,
         },
         "env": {
-            "ENTRY_MIN_SCORE": "0.25",
+            "ENTRY_MIN_SCORE": "0.20",
             "ENTRY_MAX_SPREAD": "0.15",
             "ENTRY_MIN_LIQUIDITY": "1.5",
             "ENTRY_MIN_LIQUIDITY_SCORE": "0.02",
@@ -168,22 +171,22 @@ PRESETS = {
             "ALWAYS_ON_SIGNAL_SIZE": "10",
             "SESSION_MAX_DRAWDOWN_USDC": "15.0",
             "SESSION_MAX_FAILED_ENTRIES": "5",
-            # Governor Level 1 — very tight
-            "GOV_LEVEL1_MIN_WIN_RATE": "0.48",
-            "GOV_LEVEL1_MIN_PROFIT_FACTOR": "1.00",
-            "GOV_LEVEL1_MAX_NEGATIVE_AVG_PNL": "-0.04",
-            "GOV_LEVEL1_MAX_DRAWDOWN": "12",
+            # Governor Level 1 - very tight
+            "GOV_LEVEL1_MIN_WIN_RATE": "0.42",
+            "GOV_LEVEL1_MIN_PROFIT_FACTOR": "0.85",
+            "GOV_LEVEL1_MAX_NEGATIVE_AVG_PNL": "-0.05",
+            "GOV_LEVEL1_MAX_DRAWDOWN": "15",
             "GOV_LEVEL1_SIZE_MULTIPLIER": "0.30",
-            "GOV_LEVEL1_MIN_ENTRY_CONFIDENCE": "0.80",
-            "GOV_LEVEL1_MIN_LIQUIDITY_SCORE": "0.60",
-            # Governor Level 2 — strictest
-            "GOV_LEVEL2_MIN_WIN_RATE": "0.40",
-            "GOV_LEVEL2_MIN_PROFIT_FACTOR": "0.85",
-            "GOV_LEVEL2_MAX_NEGATIVE_AVG_PNL": "-0.08",
-            "GOV_LEVEL2_MAX_DRAWDOWN": "25",
+            "GOV_LEVEL1_MIN_ENTRY_CONFIDENCE": "0.22",
+            "GOV_LEVEL1_MIN_LIQUIDITY_SCORE": "0.50",
+            # Governor Level 2 - strictest
+            "GOV_LEVEL2_MIN_WIN_RATE": "0.38",
+            "GOV_LEVEL2_MIN_PROFIT_FACTOR": "0.75",
+            "GOV_LEVEL2_MAX_NEGATIVE_AVG_PNL": "-0.10",
+            "GOV_LEVEL2_MAX_DRAWDOWN": "30",
             "GOV_LEVEL2_SIZE_MULTIPLIER": "0.15",
-            "GOV_LEVEL2_MIN_ENTRY_CONFIDENCE": "0.82",
-            "GOV_LEVEL2_MIN_LIQUIDITY_SCORE": "0.70",
+            "GOV_LEVEL2_MIN_ENTRY_CONFIDENCE": "0.20",
+            "GOV_LEVEL2_MIN_LIQUIDITY_SCORE": "0.60",
         },
     },
 }
@@ -225,7 +228,7 @@ def select_trading_mode(timeout_seconds: int = 30, default_mode: int = 2) -> int
     else:
         mode = default_mode
         if raw:
-            print(f"  Invalid input '{raw}' — using default mode {default_mode}.")
+            print(f"  Invalid input '{raw}' -- using default mode {default_mode}.")
     print(f"\n  >>> Mode {mode}: {PRESETS[mode]['name']} <<<\n")
     return mode
 
@@ -235,11 +238,12 @@ def apply_preset(mode: int) -> dict:
     Apply the chosen preset.  Returns the preset dict for logging.
 
     - Patches TradingConfig class attributes
-    - Sets env vars (only those NOT already overridden by the user's .env)
+    - Sets env vars (ALWAYS applied -- preset overrides .env for governor/entry
+      tuning so the mode selection is authoritative)
     """
     preset = PRESETS.get(mode)
     if preset is None:
-        logger.warning("Unknown trading mode %s — no preset applied.", mode)
+        logger.warning("Unknown trading mode %s -- no preset applied.", mode)
         return {}
 
     # --- Patch TradingConfig ---
@@ -247,15 +251,9 @@ def apply_preset(mode: int) -> dict:
         setattr(TradingConfig, attr, value)
         logger.debug("TradingConfig.%s = %s", attr, value)
 
-    # --- Set env vars (respect user overrides from .env) ---
-    applied_env = {}
+    # --- Set env vars (preset ALWAYS wins — it is the authoritative source) ---
     for key, value in preset["env"].items():
-        existing = os.getenv(key)
-        if existing is None:
-            os.environ[key] = value
-            applied_env[key] = value
-        else:
-            applied_env[key] = f"{existing} (user override)"
+        os.environ[key] = value
 
     logger.info(
         "Applied trading mode %d (%s): config=%d overrides, env=%d vars",

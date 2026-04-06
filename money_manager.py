@@ -49,10 +49,14 @@ class MoneyManager:
         return 0.25  # After 4+ losses, bet 25% of normal
 
     def _confidence_bet_pct(self, confidence: float) -> float:
-        """Map confidence to bet size as % of balance."""
-        if confidence >= 0.70:
+        """Map confidence to bet size as % of balance.
+
+        Model confidence range is ~0.08-0.28, so thresholds are
+        calibrated to the actual output distribution (p75=0.15, p90=0.18).
+        """
+        if confidence >= 0.20:
             return TradingConfig.HIGH_CONFIDENCE_BET_PCT
-        if confidence >= 0.50:
+        if confidence >= 0.13:
             return TradingConfig.MEDIUM_CONFIDENCE_BET_PCT
         return TradingConfig.LOW_CONFIDENCE_BET_PCT
 
