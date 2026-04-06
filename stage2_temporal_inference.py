@@ -41,7 +41,7 @@ class Stage2TemporalInference:
         work = frame.copy()
         missing = {col: 0.0 for col in feature_names if col not in work.columns}
         if missing:
-            work = work.assign(**missing)
+            work = pd.concat([work, pd.DataFrame({c: [0.0] * len(work) for c in missing}, index=work.index)], axis=1)
 
         x = work[feature_names].copy()
         for col in x.columns:
