@@ -150,16 +150,12 @@ class EntryRuleLayer:
             and not fractal_trigger_ready
         )
         if ta_bias_conflicts:
-            macro_veto = True
-            logging.info(
-                "StrategyLayer: Trend veto. target=%s bias=%s alligator=%s adx=%.2f/%.2f avwap_above=%s avwap_below=%s market=%s",
+            # Soft penalty instead of hard veto — raise threshold significantly
+            dynamic_min_score = min(0.95, dynamic_min_score + 0.10)
+            logging.debug(
+                "StrategyLayer: Trend conflict penalty +0.10. target=%s bias=%s market=%s",
                 target_direction,
                 ta_bias,
-                alligator_alignment,
-                adx_value,
-                adx_threshold,
-                price_above_anchored_vwap,
-                price_below_anchored_vwap,
                 row.get("market_slug", row.get("market_title", "market")),
             )
         elif ta_entry_ready:
@@ -196,12 +192,12 @@ class EntryRuleLayer:
             or (target_direction == "SHORT" and momentum_regime in {"BULLISH", "OVERSOLD_EXHAUSTION"})
         )
         if volatility_regime == "EXTREME" and volatility_regime_score >= 0.90 and momentum_conflicts and target_direction in {"LONG", "SHORT"}:
-            macro_veto = True
-            logging.info(
-                "StrategyLayer: Volatility/momentum veto. target=%s vol_regime=%s vol_score=%.2f momentum=%s market=%s",
+            # Soft penalty instead of hard veto
+            dynamic_min_score = min(0.95, dynamic_min_score + 0.08)
+            logging.debug(
+                "StrategyLayer: Volatility/momentum penalty +0.08. target=%s vol_regime=%s momentum=%s market=%s",
                 target_direction,
                 volatility_regime,
-                volatility_regime_score,
                 momentum_regime,
                 row.get("market_slug", row.get("market_title", "market")),
             )
