@@ -39,6 +39,13 @@ class TradeLifecycle:
     confidence_at_entry: float = 0.0
     signal_label: str = "UNKNOWN"
     entry_btc_trend_bias: str = "NEUTRAL"
+    entry_btc_predicted_direction: int = 0
+    entry_btc_predicted_return: float = 0.0
+    entry_btc_forecast_confidence: float = 0.0
+    entry_btc_price: float = 0.0
+    entry_btc_mtf_agreement: float = 0.0
+    entry_btc_mtf_source: str = ""
+    exit_btc_price: float = 0.0
     entry_alligator_alignment: str = "NEUTRAL"
     entry_adx_value: float = 0.0
     entry_adx_threshold: float = 0.0
@@ -94,6 +101,12 @@ class TradeLifecycle:
         self.confidence_at_entry = float(normalized_signal_row.get("confidence", 0.0) or 0.0)
         self.signal_label = str(normalized_signal_row.get("signal_label", "UNKNOWN") or "UNKNOWN")
         self.entry_btc_trend_bias = str(normalized_signal_row.get("btc_trend_bias", "NEUTRAL") or "NEUTRAL")
+        self.entry_btc_predicted_direction = int(normalized_signal_row.get("btc_predicted_direction", 0) or 0)
+        self.entry_btc_predicted_return = float(normalized_signal_row.get("btc_predicted_return_15", 0.0) or 0.0)
+        self.entry_btc_forecast_confidence = float(normalized_signal_row.get("btc_forecast_confidence", 0.0) or 0.0)
+        self.entry_btc_price = float(normalized_signal_row.get("btc_live_price", 0.0) or 0.0)
+        self.entry_btc_mtf_agreement = float(normalized_signal_row.get("btc_mtf_agreement", 0.0) or 0.0)
+        self.entry_btc_mtf_source = str(normalized_signal_row.get("btc_mtf_source", "") or "")
         self.entry_alligator_alignment = str(normalized_signal_row.get("alligator_alignment", "NEUTRAL") or "NEUTRAL")
         self.entry_adx_value = float(normalized_signal_row.get("adx_value", 0.0) or 0.0)
         self.entry_adx_threshold = float(normalized_signal_row.get("adx_threshold", 0.0) or 0.0)
@@ -201,12 +214,14 @@ class TradeLifecycle:
             self.closed_at = datetime.now(timezone.utc).isoformat()
         return pnl
 
-    def close(self, exit_price: float, reason: str = "policy_exit"):
+    def close(self, exit_price: float, reason: str = "policy_exit", exit_btc_price: float = 0.0):
         pnl = self.shares * (float(exit_price) - float(self.entry_price))
         self.realized_pnl += pnl
         self.current_price = float(exit_price)
         self.unrealized_pnl = 0.0
         self.closed_at = datetime.now(timezone.utc).isoformat()
+        if exit_btc_price > 0:
+            self.exit_btc_price = float(exit_btc_price)
         # self.shares = 0.0 # BUG 1 FIX: Keep shares intact so supervisor knows how much to sell
         # self.size_usdc = 0.0
         self.state = TradeState.CLOSED

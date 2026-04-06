@@ -158,6 +158,18 @@ class Retrainer:
 
     def _retrain_btc_forecast(self, candidate_weights_dir):
         """Retrain BTC price forecast models (multi-timeframe if data available)."""
+        # Load trade feedback weights for sample weighting
+        feedback_weights = None
+        try:
+            from btc_trade_feedback import BTCTradeFeedback
+            feedback_weights = BTCTradeFeedback(logs_dir=str(self.logs_dir)).get_sample_weights_for_retraining()
+            if feedback_weights:
+                logging.info("BTC retrain using trade feedback: accuracy=%.1f%% error_scale=%.3f",
+                             feedback_weights.get("overall_accuracy", 0) * 100,
+                             feedback_weights.get("error_scale", 1.0))
+        except Exception as exc:
+            logging.debug("BTC trade feedback not available for retraining: %s", exc)
+
         try:
             from btc_multitimeframe import BTCMultiTimeframeForecaster
 
@@ -165,7 +177,7 @@ class Retrainer:
                 weights_dir=str(candidate_weights_dir),
                 logs_dir=str(self.logs_dir),
             )
-            results = forecaster.train_all(enrich_derivatives=False)
+            results = forecaster.train_all(enrich_derivatives=False, feedback_weights=feedback_weights)
             for tf, metrics in results.items():
                 if "error" in metrics:
                     logging.warning("BTC %s retrain error: %s", tf, metrics["error"])
@@ -188,7 +200,7 @@ class Retrainer:
                     logging.info("BTC forecast retrain skipped: dataset has %d rows", len(dataset))
                     return
                 model = BTCForecastModel(weights_dir=str(candidate_weights_dir), logs_dir=str(self.logs_dir))
-                metrics = model.train(dataset)
+                metrics = model.train(dataset, feedback_weights=feedback_weights)
                 logging.info("BTC forecast retrained (single model): %s", metrics)
             except Exception as exc2:
                 logging.warning("BTC forecast retrain failed (non-blocking): %s / %s", exc, exc2)
