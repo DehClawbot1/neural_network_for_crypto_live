@@ -529,9 +529,9 @@ class BTCForecastModel:
             if len(available) < 5:
                 return default
 
-            X = features[available].values.astype(np.float32)
+            X = features[available].astype(np.float32)
             # Replace NaN/inf with 0 for robustness
-            X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+            X = pd.DataFrame(np.nan_to_num(X.values, nan=0.0, posinf=0.0, neginf=0.0), columns=available, index=X.index)
 
             reg_pred = float(self._ensemble_predict_reg(self._ensemble_reg, X)[0])
             cls_pred_raw = self._ensemble_predict_cls(self._ensemble_cls, X)
