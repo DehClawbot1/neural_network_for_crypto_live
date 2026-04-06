@@ -49,18 +49,20 @@ class SequenceFeatureBuilder:
 
         parts = []
         lag_cols = []
+        for col in base_cols:
+            for lag in lags:
+                lag_cols.append(f"{col}_lag_{lag}")
         for token_id, group in df.groupby("token_id"):
             group = group.copy().reset_index(drop=True)
+            new_cols = {}
             for col in base_cols:
                 for lag in lags:
-                    l_name = f"{col}_lag_{lag}"
-                    group[l_name] = group[col].shift(lag)
-                    if l_name not in lag_cols:
-                        lag_cols.append(l_name)
+                    new_cols[f"{col}_lag_{lag}"] = group[col].shift(lag)
             if "trader_wallet" in group.columns:
-                group["recent_token_activity_5"] = group["trader_wallet"].rolling(5).count()
+                new_cols["recent_token_activity_5"] = group["trader_wallet"].rolling(5).count()
             if "side" in group.columns:
-                group["recent_yes_ratio_5"] = (group["side"].astype(str).str.upper() == "YES").rolling(5).mean()
+                new_cols["recent_yes_ratio_5"] = (group["side"].astype(str).str.upper() == "YES").rolling(5).mean()
+            group = pd.concat([group, pd.DataFrame(new_cols, index=group.index)], axis=1)
             parts.append(group)
 
         combined = pd.concat(parts, ignore_index=True)
