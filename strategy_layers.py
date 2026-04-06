@@ -139,7 +139,8 @@ class EntryRuleLayer:
             and (price_above_anchored_vwap or price_below_anchored_vwap)
             and (not fractal_available or fractal_trigger_ready)
         )
-        ta_trigger_blocked = (
+        ta_trigger_blocked = False  # Fractal pending is now a soft penalty, not a hard block
+        ta_fractal_pending = (
             ta_bias in {"LONG", "SHORT"}
             and target_direction == ta_bias
             and alligator_alignment in {"BULLISH", "BEARISH"}
@@ -163,15 +164,9 @@ class EntryRuleLayer:
             )
         elif ta_entry_ready:
             dynamic_min_score = max(0.05, dynamic_min_score - min(0.08, trend_confluence * 0.08))
-        elif ta_trigger_blocked:
-            logging.info(
-                "StrategyLayer: Fractal trigger pending. target=%s bias=%s long_breakout=%s short_breakout=%s market=%s",
-                target_direction,
-                ta_bias,
-                long_fractal_breakout,
-                short_fractal_breakout,
-                row.get("market_slug", row.get("market_title", "market")),
-            )
+        elif ta_fractal_pending:
+            # Raise threshold slightly instead of blocking entirely
+            dynamic_min_score = min(0.95, dynamic_min_score + 0.03)
 
         live_bias_aligns = live_bias in {"LONG", "SHORT"} and live_bias == target_direction
         live_bias_conflicts = live_bias in {"LONG", "SHORT"} and target_direction in {"LONG", "SHORT"} and live_bias != target_direction
