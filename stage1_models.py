@@ -81,15 +81,17 @@ class Stage1Models:
                 if k != "n_jobs":
                     lgb_params[k] = v
             base = LGBMClassifier(**lgb_params)
+            model = CalibratedClassifierCV(base, method="sigmoid", cv=cv) if cv else base
             return Pipeline([
                 ("imputer", SimpleImputer(strategy="median")),
-                ("model", CalibratedClassifierCV(base, method="sigmoid", cv=cv)),
+                ("model", model),
             ])
         if CatBoostClassifier is not None:
             base = CatBoostClassifier(iterations=300, learning_rate=0.05, depth=6, verbose=False, thread_count=_N_JOBS)
+            model = CalibratedClassifierCV(base, method="sigmoid", cv=cv) if cv else base
             return Pipeline([
                 ("imputer", SimpleImputer(strategy="median")),
-                ("model", CalibratedClassifierCV(base, method="sigmoid", cv=cv)),
+                ("model", model),
             ])
         return Pipeline([
             ("imputer", SimpleImputer(strategy="median")),
@@ -133,12 +135,12 @@ class Stage1Models:
             values = [0.0] * len(feature_names)
         pd.DataFrame({"feature": feature_names, "importance": values}).sort_values("importance", ascending=False).to_csv(self.importance_file, index=False)
 
-    def _safe_cv_folds(self, y) -> int:
-        """Return the max CV folds we can safely use (at least 2, capped at 3)."""
+    def _safe_cv_folds(self, y) -> int | None:
+        """Return the max CV folds we can safely use (2 or 3), or None to skip calibration."""
         counts = y.value_counts()
-        if counts.empty:
-            return 2
-        return max(2, min(3, int(counts.min())))
+        if counts.empty or int(counts.min()) < 2:
+            return None
+        return min(3, int(counts.min()))
 
     def train(self):
         df = self._safe_read()
