@@ -1726,10 +1726,8 @@ def main_loop():
             signals_df = _annotate_signal_freshness(signals_df, cycle_observed_iso)
 
             # --------------------------------------------------
-            # Attach macro context columns to all signals
-            if not signals_df.empty:
-                for k, v in macro_context.items():
-                    signals_df[k] = v
+            if not signals_df.empty and macro_context:
+                signals_df = pd.concat([signals_df, pd.DataFrame({k: [v] * len(signals_df) for k, v in macro_context.items()}, index=signals_df.index)], axis=1)
             # --------------------------------------------------
             
             if always_on_enabled and always_on_only and signals_df is not None and not signals_df.empty:
