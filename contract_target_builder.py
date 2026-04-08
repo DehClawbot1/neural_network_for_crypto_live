@@ -138,6 +138,8 @@ class ContractTargetBuilder:
                     c
                     for c in [
                         ts_col,
+                        "market_structure",
+                        "trend_score",
                         "btc_atr_pct_15m",
                         "btc_realized_vol_1h",
                         "btc_realized_vol_4h",

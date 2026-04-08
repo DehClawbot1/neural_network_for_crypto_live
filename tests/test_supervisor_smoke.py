@@ -32,6 +32,20 @@ class TestSupervisorSmoke(unittest.TestCase):
         self.assertEqual(sleep_seconds, 10.0)
         self.assertEqual(reason, "entry freeze active; rechecking soon")
 
+    def test_performance_governor_top_signal_allows_only_first_eligible_candidate(self):
+        allow_first, eligible_count = supervisor.performance_governor_top_signal_decision(
+            {"top_signal_only": True},
+            eligible_count=0,
+        )
+        allow_second, eligible_count = supervisor.performance_governor_top_signal_decision(
+            {"top_signal_only": True},
+            eligible_count=eligible_count,
+        )
+
+        self.assertTrue(allow_first)
+        self.assertEqual(eligible_count, 1)
+        self.assertFalse(allow_second)
+
 
 if __name__ == "__main__":
     unittest.main()

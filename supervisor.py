@@ -672,6 +672,18 @@ def choose_cycle_sleep_interval(
         return max(1.0, float(entry_freeze_poll_seconds)), "entry freeze active; rechecking soon"
     return max(1.0, float(idle_poll_seconds)), "idle market scan"
 
+
+def performance_governor_top_signal_decision(governor_state: dict, eligible_count: int) -> tuple[bool, int]:
+    """
+    In governor top-signal mode, allow exactly one ranked eligible entry per cycle.
+    This avoids depending on stale paper-only signal labels in the live path.
+    """
+    if not bool((governor_state or {}).get("top_signal_only")):
+        return True, int(eligible_count or 0)
+    if int(eligible_count or 0) > 0:
+        return False, int(eligible_count or 0)
+    return True, 1
+
 _shutdown_requested = False
 
 
@@ -2687,6 +2699,7 @@ def main_loop():
                             _trade.close_reason = "ai_close_long"
 
             # FIX 1B: Normal entry loop
+            governor_top_signal_eligible_count = 0
             for candidate_rank, (_, row) in enumerate(scored_df.iterrows(), start=1):
                 signal_row = row.to_dict()
                 if cadence_boost_active and candidate_rank <= entry_aggression_top_k:
@@ -2974,7 +2987,11 @@ def main_loop():
                             required_liquidity_score=round(governor_min_liquidity, 4),
                         )
                         continue
-                    if bool(governor_state.get("top_signal_only")) and str(signal_row.get("signal_label", "") or "") != "HIGHEST-RANKED PAPER SIGNAL":
+                    allow_top_signal, governor_top_signal_eligible_count = performance_governor_top_signal_decision(
+                        governor_state,
+                        governor_top_signal_eligible_count,
+                    )
+                    if not allow_top_signal:
                         _log_candidate_skip(
                             signal_row,
                             "performance_governor_top_signal_only",
@@ -2985,6 +3002,8 @@ def main_loop():
                         continue
 
                     # ── Get balance (with paper mode fallback) ──
+                    if bool(governor_state.get("top_signal_only")):
+                        signal_row["signal_label"] = "HIGHEST-RANKED PAPER SIGNAL"
                     _available_bal = _get_entry_available_balance()
                     # ── BUGFIX: Paper mode needs simulated balance ──
                     if _available_bal <= 0 and trading_mode == "paper":

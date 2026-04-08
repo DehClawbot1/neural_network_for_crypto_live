@@ -191,6 +191,8 @@ class BTCLivePriceTracker:
                 return dict(self._cached_context)
 
         premium = self._fetch_binance_premium_index()
+        raw_index_price = premium.get("index_price")
+        raw_mark_price = premium.get("mark_price")
         spot_sources = {
             "binance_spot": self._fetch_binance_spot_price(),
             "coinbase_spot": self._fetch_coinbase_spot_price(),
@@ -198,8 +200,8 @@ class BTCLivePriceTracker:
         }
         valid_spot_prices = [price for price in spot_sources.values() if price not in (None, 0.0)]
         spot_price = float(np.median(valid_spot_prices)) if valid_spot_prices else None
-        index_price = premium.get("index_price") or spot_price
-        mark_price = premium.get("mark_price") or index_price or spot_price
+        index_price = raw_index_price or spot_price
+        mark_price = raw_mark_price or raw_index_price or spot_price
         live_price = spot_price or index_price or mark_price
 
         source_divergence_bps = 0.0
@@ -270,7 +272,9 @@ class BTCLivePriceTracker:
             "btc_live_bias": live_bias,
             "btc_live_confluence": round(live_confluence, 6),
             "btc_live_price_source": "spot_median" if spot_price not in (None, 0.0) else "binance_index",
-            "btc_live_index_ready": bool(index_price not in (None, 0.0) and mark_price not in (None, 0.0)),
+            "btc_live_index_ready": bool(raw_index_price not in (None, 0.0) and raw_mark_price not in (None, 0.0)),
+            "btc_live_index_feed_available": bool(raw_index_price not in (None, 0.0)),
+            "btc_live_mark_feed_available": bool(raw_mark_price not in (None, 0.0)),
             "btc_live_sources_json": str({k: round(v, 2) for k, v in spot_sources.items() if v not in (None, 0.0)}),
         }
         with self._ctx_lock:

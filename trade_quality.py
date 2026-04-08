@@ -313,20 +313,66 @@ def infer_volatility_bucket(source: Mapping | None) -> str:
 
 def infer_technical_regime_bucket(source: Mapping | None) -> str:
     source = source or {}
+    explicit_bucket = str(source.get("technical_regime_bucket", "") or "").strip().lower()
+    if explicit_bucket and explicit_bucket not in {"unknown", "nan", "none"}:
+        return explicit_bucket
+
     bias = str(source.get("btc_trend_bias", source.get("entry_btc_trend_bias", "NEUTRAL")) or "NEUTRAL").strip().upper()
     alligator = str(source.get("alligator_alignment", source.get("entry_alligator_alignment", "NEUTRAL")) or "NEUTRAL").strip().upper()
     adx_value = safe_float(source.get("adx_value", source.get("entry_adx_value")), default=0.0)
     adx_threshold = safe_float(source.get("adx_threshold", source.get("entry_adx_threshold")), default=0.0)
+    market_structure = str(source.get("market_structure", source.get("entry_market_structure", "UNKNOWN")) or "UNKNOWN").strip().upper()
+    trend_score = safe_float(source.get("trend_score", source.get("entry_trend_score")), default=0.5)
+    volatility_regime = str(source.get("btc_volatility_regime", source.get("entry_btc_volatility_regime", "NORMAL")) or "NORMAL").strip().upper()
+    volatility_score = safe_float(
+        source.get("btc_volatility_regime_score", source.get("entry_btc_volatility_regime_score")),
+        default=0.0,
+    )
+    momentum_regime = str(source.get("btc_momentum_regime", source.get("entry_btc_momentum_regime", "NEUTRAL")) or "NEUTRAL").strip().upper()
+    momentum_confluence = safe_float(
+        source.get("btc_momentum_confluence", source.get("entry_btc_momentum_confluence")),
+        default=0.0,
+    )
     trending = adx_value >= max(0.0, adx_threshold)
+    base_bucket = "neutral"
     if bias == "LONG" and alligator == "BULLISH":
-        return "bull_trending" if trending else "bull_soft"
-    if bias == "SHORT" and alligator == "BEARISH":
-        return "bear_trending" if trending else "bear_soft"
-    if alligator == "BULLISH":
-        return "bull_mixed"
-    if alligator == "BEARISH":
-        return "bear_mixed"
-    return "neutral"
+        base_bucket = "bull_trending" if trending else "bull_soft"
+    elif bias == "SHORT" and alligator == "BEARISH":
+        base_bucket = "bear_trending" if trending else "bear_soft"
+    elif alligator == "BULLISH":
+        base_bucket = "bull_mixed"
+    elif alligator == "BEARISH":
+        base_bucket = "bear_mixed"
+    elif market_structure == "BULLISH" and trend_score >= 0.65:
+        base_bucket = "bull_macro"
+    elif market_structure == "BEARISH" and trend_score <= 0.35:
+        base_bucket = "bear_macro"
+
+    momentum_tag = "neutral"
+    if momentum_regime in {"OVERBOUGHT_EXHAUSTION", "OVERSOLD_EXHAUSTION"} and momentum_confluence >= 0.35:
+        momentum_tag = "exhaustion"
+    elif base_bucket.startswith("bull") and momentum_regime == "BULLISH" and momentum_confluence >= 0.45:
+        momentum_tag = "impulse"
+    elif base_bucket.startswith("bear") and momentum_regime == "BEARISH" and momentum_confluence >= 0.45:
+        momentum_tag = "impulse"
+    elif base_bucket.startswith("bull") and momentum_regime == "BEARISH" and momentum_confluence >= 0.45:
+        momentum_tag = "counter"
+    elif base_bucket.startswith("bear") and momentum_regime == "BULLISH" and momentum_confluence >= 0.45:
+        momentum_tag = "counter"
+
+    volatility_tag = "normal"
+    if volatility_regime in {"HIGH", "EXTREME"} or volatility_score >= 0.65:
+        volatility_tag = "volatile"
+    elif volatility_regime == "LOW" and volatility_score <= 0.25:
+        volatility_tag = "calm"
+
+    if momentum_tag == "neutral" and volatility_tag == "normal":
+        return base_bucket
+    if momentum_tag == "neutral":
+        return f"{base_bucket}_{volatility_tag}"
+    if volatility_tag == "normal":
+        return f"{base_bucket}_{momentum_tag}"
+    return f"{base_bucket}_{momentum_tag}_{volatility_tag}"
 
 
 def entry_context_complete(source: Mapping | None) -> bool:
