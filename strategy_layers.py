@@ -245,10 +245,24 @@ class EntryRuleLayer:
             liquidity_metric = "missing"
             liquidity_ok = True
 
-        score_ok = score >= dynamic_min_score
         spread_threshold = self.max_spread + spread_relax
         spread_ok = spread <= spread_threshold
-        allow = score_ok and spread_ok and liquidity_ok and not macro_veto and not ta_trigger_blocked
+        spread_penalty = 0.0
+        if not spread_ok:
+            spread_excess = max(0.0, spread - spread_threshold)
+            spread_excess_ratio = spread_excess / max(spread_threshold, 0.01)
+            spread_penalty = min(0.12, 0.04 + (spread_excess_ratio * 0.08))
+            dynamic_min_score = min(0.95, dynamic_min_score + spread_penalty)
+
+        liquidity_penalty = 0.0
+        if not liquidity_ok and liquidity_value is not None and liquidity_threshold not in [None, 0]:
+            liquidity_gap = max(0.0, float(liquidity_threshold) - float(liquidity_value))
+            liquidity_gap_ratio = liquidity_gap / max(float(liquidity_threshold), 1e-9)
+            liquidity_penalty = min(0.10, 0.04 + (liquidity_gap_ratio * 0.06))
+            dynamic_min_score = min(0.95, dynamic_min_score + liquidity_penalty)
+
+        score_ok = score >= dynamic_min_score
+        allow = score_ok and not macro_veto and not ta_trigger_blocked
 
         return {
             "allow": allow,
@@ -258,10 +272,12 @@ class EntryRuleLayer:
             "spread": spread,
             "spread_threshold": spread_threshold,
             "spread_ok": spread_ok,
+            "spread_penalty": spread_penalty,
             "liquidity_value": liquidity_value,
             "liquidity_threshold": liquidity_threshold,
             "liquidity_metric": liquidity_metric,
             "liquidity_ok": liquidity_ok,
+            "liquidity_penalty": liquidity_penalty,
             "macro_veto": macro_veto,
             "score_relax": score_relax,
             "spread_relax": spread_relax,

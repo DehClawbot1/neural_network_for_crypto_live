@@ -1,3 +1,4 @@
+import json
 import logging
 from pathlib import Path
 from datetime import datetime
@@ -37,14 +38,19 @@ class AutonomousMonitor:
         safe_csv_append(path, pd.DataFrame([record]))
 
     def write_heartbeat(self, service: str, status: str = "ok", message: str = "", extra: dict | None = None):
+        rows_value = ""
+        if extra:
+            if set(extra.keys()) == {"rows"}:
+                rows_value = str(extra.get("rows", ""))
+            else:
+                rows_value = json.dumps(extra, sort_keys=True, default=str)
         record = {
             "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
             "service": service,
             "status": status,
             "message": message,
+            "rows": rows_value,
         }
-        if extra:
-            record.update(extra)
         self._append(self.heartbeat_file, record)
 
     def write_failure(self, service: str, error: str, extra: dict | None = None):

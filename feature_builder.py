@@ -175,6 +175,13 @@ class FeatureBuilder:
         probability_momentum = self._probability_momentum_proxy(signal_price, last_trade_price)
         volatility_score = self._volatility_proxy(signal_price, last_trade_price, volume)
         whale_consensus_score = self._whale_consensus_score(normalized_trade_size, trader_win_rate)
+        wallet_quality_score = _clip01(_safe_float(signal.get("wallet_quality_score", trader_win_rate), trader_win_rate))
+        wallet_agreement_score = _clip01(_safe_float(signal.get("wallet_agreement_score", 0.5), 0.5))
+        wallet_state_confidence = _clip01(_safe_float(signal.get("source_wallet_direction_confidence", 0.0), 0.0))
+        wallet_state_freshness_score = _clip01(_safe_float(signal.get("source_wallet_freshness_score", 0.0), 0.0))
+        wallet_size_change_score = _clip01(_safe_float(signal.get("source_wallet_size_delta_ratio", normalized_trade_size), normalized_trade_size))
+        wallet_distance_from_market = abs(signal_price - last_trade_price)
+        wallet_distance_score = _clip01(1.0 - min(wallet_distance_from_market / 0.20, 1.0))
 
         whale_pressure = _clip01((trader_win_rate * 0.4) + (normalized_trade_size * 0.35) + (whale_consensus_score * 0.25))
         market_structure_score = _clip01((signal_price * 0.2) + (liquidity_score * 0.3) + (volume_score * 0.25) + (probability_momentum * 0.25))
@@ -225,6 +232,12 @@ class FeatureBuilder:
             "wallet_signal_precision_tp": wallet_info.get("tp_precision", np.nan),
             "wallet_recent_streak": wallet_info.get("recent_streak", 0),
             "wallet_same_market_history": wallet_info.get("same_market_history", 0),
+            "wallet_quality_score": wallet_quality_score,
+            "wallet_watchlist_approved": bool(signal.get("wallet_watchlist_approved", True)),
+            "wallet_agreement_score": wallet_agreement_score,
+            "wallet_conflict_with_stronger": bool(signal.get("wallet_conflict_with_stronger", False)),
+            "wallet_stronger_conflict_score": _safe_float(signal.get("wallet_stronger_conflict_score"), 0.0),
+            "wallet_state_gate_pass": bool(signal.get("wallet_state_gate_pass", True)),
             "normalized_trade_size": normalized_trade_size,
             "current_price": signal_price,
             "time_left": time_left,
@@ -237,6 +250,25 @@ class FeatureBuilder:
             "market_timestamp": market_row.get("timestamp"),
             "probability_momentum": probability_momentum,
             "volatility_score": volatility_score,
+            "wallet_state_confidence": wallet_state_confidence,
+            "wallet_state_freshness_score": wallet_state_freshness_score,
+            "wallet_size_change_score": wallet_size_change_score,
+            "wallet_distance_from_market": wallet_distance_from_market,
+            "wallet_distance_score": wallet_distance_score,
+            "source_wallet_position_event": signal.get("source_wallet_position_event", ""),
+            "source_wallet_net_position_increased": bool(signal.get("source_wallet_net_position_increased", False)),
+            "source_wallet_current_net_exposure": _safe_float(signal.get("source_wallet_current_net_exposure"), 0.0),
+            "source_wallet_average_entry": _safe_float(signal.get("source_wallet_average_entry"), np.nan),
+            "source_wallet_last_add": signal.get("source_wallet_last_add"),
+            "source_wallet_last_reduce": signal.get("source_wallet_last_reduce"),
+            "source_wallet_last_close": signal.get("source_wallet_last_close"),
+            "source_wallet_current_direction": signal.get("source_wallet_current_direction", "FLAT"),
+            "source_wallet_reduce_fraction": _safe_float(signal.get("source_wallet_reduce_fraction"), 0.0),
+            "source_wallet_state_freshness_seconds": _safe_float(signal.get("source_wallet_state_freshness_seconds"), 0.0),
+            "source_wallet_fresh": bool(signal.get("source_wallet_fresh", False)),
+            "source_wallet_exit_signal": bool(signal.get("source_wallet_exit_signal", False)),
+            "source_wallet_reduce_signal": bool(signal.get("source_wallet_reduce_signal", False)),
+            "source_wallet_reversal_signal": bool(signal.get("source_wallet_reversal_signal", False)),
             "btc_fee_fastest_satvb": _safe_float(signal.get("btc_fee_fastest_satvb"), np.nan),
             "btc_fee_hour_satvb": _safe_float(signal.get("btc_fee_hour_satvb"), np.nan),
             "btc_difficulty_change_pct": _safe_float(signal.get("btc_difficulty_change_pct"), np.nan),

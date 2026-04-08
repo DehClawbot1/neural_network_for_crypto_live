@@ -319,7 +319,7 @@ def start_supervisor():
     print("    - manage open positions and exit via RL / rule-based decisions")
     print("    - retrain RL model from closed trade outcomes")
     print("    - write execution and episode logs")
-    print("    - sleep 60 seconds and repeat")
+    print("    - recheck on the configured supervisor cadence and repeat")
     print("\n[+] Open the dashboard in another terminal with:")
     print("    streamlit run dashboard.py\n")
 

@@ -78,6 +78,11 @@ from macro_analyzer import MacroAnalyzer
 from onchain_analyzer import OnChainAnalyzer
 from trade_feedback_learner import TradeFeedbackLearner
 from position_telemetry import PositionTelemetry
+from wallet_state_engine import (
+    resolve_source_wallet_reduce_fraction,
+    should_convert_reduce_to_exit,
+    source_wallet_signal_matches_trade,
+)
 from performance_governor import PerformanceGovernor
 from trade_lifecycle_audit import TradeLifecycleAuditor
 from benchmark_strategy import BenchmarkStrategy
@@ -113,6 +118,94 @@ CANDIDATE_DECISIONS_FILE = "logs/candidate_decisions.csv"
 CANDIDATE_CYCLE_STATS_FILE = "logs/candidate_cycle_stats.csv"
 ALWAYS_ON_STATE_FILE = Path("logs/always_on_slug_state.json")
 UPDOWN_SLUG_RE = re.compile(r"^btc-updown-(?P<minutes>\d+)m-(?P<epoch>\d{9,})$")
+RAW_CANDIDATE_LOG_COLUMNS = [
+    "timestamp",
+    "trader_wallet",
+    "market_title",
+    "condition_id",
+    "token_id",
+    "market_slug",
+    "order_side",
+    "trade_side",
+    "outcome_side",
+    "entry_intent",
+    "side",
+    "entry_price",
+    "best_bid",
+    "best_ask",
+    "spread",
+    "trader_win_rate",
+    "wallet_trade_count_30d",
+    "wallet_avg_size_30d",
+    "wallet_winrate_30d",
+    "wallet_alpha_30d",
+    "wallet_avg_forward_return_15m",
+    "wallet_signal_precision_tp",
+    "wallet_recent_streak",
+    "wallet_same_market_history",
+    "normalized_trade_size",
+    "current_price",
+    "time_left",
+    "market_liquidity",
+    "market_volume",
+    "liquidity_score",
+    "volume_score",
+    "market_last_trade_price",
+    "probability_momentum",
+    "volatility_score",
+    "whale_consensus_score",
+    "whale_pressure",
+    "market_structure_score",
+    "volatility_risk",
+    "time_decay_score",
+    "raw_size",
+    "market_url",
+]
+RANKED_SIGNAL_LOG_COLUMNS = [
+    "timestamp",
+    "market",
+    "market_title",
+    "market_slug",
+    "wallet_copied",
+    "wallet_short",
+    "trader_wallet",
+    "token_id",
+    "condition_id",
+    "order_side",
+    "trade_side",
+    "outcome_side",
+    "entry_intent",
+    "side",
+    "signal_label",
+    "confidence",
+    "reason",
+    "reason_summary",
+    "recommended_action",
+    "action",
+    "market_url",
+    "trader_win_rate",
+    "normalized_trade_size",
+    "current_price",
+    "market_last_trade_price",
+    "price",
+    "best_bid",
+    "best_ask",
+    "time_left",
+    "liquidity_score",
+    "volume_score",
+    "probability_momentum",
+    "volatility_score",
+    "whale_pressure",
+    "market_structure_score",
+    "volatility_risk",
+    "time_decay_score",
+    "edge_score",
+    "expected_return",
+    "p_tp_before_sl",
+    "risk_adjusted_ev",
+    "entry_ev",
+    "execution_quality_score",
+]
 
 
 class StatefulRecurrentBrain:
@@ -304,6 +397,7 @@ def log_raw_candidates(candidates_df):
     raw_df = candidates_df.copy()
     if "timestamp" not in raw_df.columns:
         raw_df["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    raw_df = raw_df.reindex(columns=RAW_CANDIDATE_LOG_COLUMNS)
     append_csv_frame(RAW_CANDIDATES_FILE, raw_df)
 
 
@@ -311,7 +405,11 @@ def log_ranked_signal(signal_row):
     record = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "market": signal_row.get("market_title", "Unknown Market"),
+        "market_title": signal_row.get("market_title", signal_row.get("market", "Unknown Market")),
+        "market_slug": signal_row.get("market_slug"),
         "wallet_copied": str(signal_row.get("trader_wallet", signal_row.get("wallet_copied", "Unknown"))),
+        "wallet_short": signal_row.get("wallet_short", str(signal_row.get("trader_wallet", signal_row.get("wallet_copied", "Unknown")))[:8]),
+        "trader_wallet": signal_row.get("trader_wallet", signal_row.get("wallet_copied")),
         "token_id": signal_row.get("token_id"),
         "condition_id": signal_row.get("condition_id"),
         "order_side": signal_row.get("order_side", signal_row.get("trade_side", "BUY")),
@@ -322,10 +420,17 @@ def log_ranked_signal(signal_row):
         "signal_label": signal_row.get("signal_label", "UNKNOWN"),
         "confidence": signal_row.get("confidence", 0.0),
         "reason": signal_row.get("reason", ""),
+        "reason_summary": signal_row.get("reason_summary", signal_row.get("reason", "")),
+        "recommended_action": signal_row.get("recommended_action", signal_row.get("entry_intent", "OPEN_LONG")),
+        "action": signal_row.get("action", signal_row.get("entry_intent", "OPEN_LONG")),
         "market_url": signal_row.get("market_url"),
         "trader_win_rate": signal_row.get("trader_win_rate"),
         "normalized_trade_size": signal_row.get("normalized_trade_size"),
         "current_price": signal_row.get("current_price"),
+        "market_last_trade_price": signal_row.get("market_last_trade_price"),
+        "price": signal_row.get("price", signal_row.get("entry_price", signal_row.get("current_price"))),
+        "best_bid": signal_row.get("best_bid"),
+        "best_ask": signal_row.get("best_ask"),
         "time_left": signal_row.get("time_left"),
         "liquidity_score": signal_row.get("liquidity_score"),
         "volume_score": signal_row.get("volume_score"),
@@ -335,13 +440,14 @@ def log_ranked_signal(signal_row):
         "market_structure_score": signal_row.get("market_structure_score"),
         "volatility_risk": signal_row.get("volatility_risk"),
         "time_decay_score": signal_row.get("time_decay_score"),
-        "market_structure": signal_row.get("market_structure", "UNKNOWN"),
-        "trend_score": signal_row.get("trend_score", 0.5),
-        "fgi_value": signal_row.get("fgi_value", 50),
-        "fgi_status": signal_row.get("fgi_status", "Neutral"),
-        "btc_funding_rate": signal_row.get("btc_funding_rate", 0.0),
-        "is_overheated_long": signal_row.get("is_overheated_long", False),
+        "edge_score": signal_row.get("edge_score"),
+        "expected_return": signal_row.get("expected_return"),
+        "p_tp_before_sl": signal_row.get("p_tp_before_sl"),
+        "risk_adjusted_ev": signal_row.get("risk_adjusted_ev"),
+        "entry_ev": signal_row.get("entry_ev"),
+        "execution_quality_score": signal_row.get("execution_quality_score"),
     }
+    record = {key: record.get(key) for key in RANKED_SIGNAL_LOG_COLUMNS}
     append_csv_record(SIGNALS_FILE, record)
 
 
@@ -440,7 +546,7 @@ def choose_action(
 
     # For pinned always-on market candidates, allow rule-based fallback
     # even when RL models return HOLD/0, so the bot keeps attempting entries.
-    if force_candidate and entry_rule.should_enter(signal_row):
+    if force_candidate and rule_allows_entry:
         return 1
 
     # Optional safety valve: if RL keeps returning HOLD, allow rule fallback.
@@ -457,7 +563,7 @@ def choose_action(
         confidence = _safe_float(signal_row.get("confidence", 0.0), default=float("nan"))
         if not np.isfinite(confidence) or confidence <= 0.0:
             confidence = _safe_float(PredictionLayer.select_signal_score(signal_row), default=0.0)
-        if confidence >= rl_hold_min_confidence and entry_rule.should_enter(signal_row):
+        if confidence >= rl_hold_min_confidence and rule_allows_entry:
             expected_return = _safe_float(signal_row.get("expected_return", 0.0), default=0.0)
             if expected_return <= aggressive_expected_return_floor:
                 return 0
@@ -469,7 +575,7 @@ def choose_action(
         return 0
 
     # Fallback: rule-based decision (ONLY used if no RL models are loaded)
-    if not entry_rule.should_enter(signal_row):
+    if not rule_allows_entry:
         return 0
     edge_score = float(signal_row.get("edge_score", 0.0) or 0.0)
     return 2 if edge_score >= 0.04 else 1
@@ -673,16 +779,20 @@ def choose_cycle_sleep_interval(
     return max(1.0, float(idle_poll_seconds)), "idle market scan"
 
 
-def performance_governor_top_signal_decision(governor_state: dict, eligible_count: int) -> tuple[bool, int]:
+def performance_governor_top_signal_decision(governor_state: dict, consumed_count: int) -> bool:
     """
-    In governor top-signal mode, allow exactly one ranked eligible entry per cycle.
-    This avoids depending on stale paper-only signal labels in the live path.
+    In governor top-signal mode, allow entries until one actual entry opens in-cycle.
+    Failed execution attempts must not consume the slot.
     """
     if not bool((governor_state or {}).get("top_signal_only")):
-        return True, int(eligible_count or 0)
-    if int(eligible_count or 0) > 0:
-        return False, int(eligible_count or 0)
-    return True, 1
+        return True
+    return int(consumed_count or 0) <= 0
+
+
+def performance_governor_consume_top_signal_slot(governor_state: dict, consumed_count: int) -> int:
+    if not bool((governor_state or {}).get("top_signal_only")):
+        return int(consumed_count or 0)
+    return int(consumed_count or 0) + 1
 
 _shutdown_requested = False
 
@@ -2453,6 +2563,99 @@ def main_loop():
                 trade.exit_cancel_count = int((exit_result or {}).get("cancel_count", 0) or 0)
                 trade.exit_partial_fill_ratio = float((exit_result or {}).get("partial_fill_ratio", 0.0) or 0.0)
                 trade.exit_realized_slippage_bps = float((exit_result or {}).get("slippage_bps", 0.0) or 0.0)
+
+            def _apply_source_wallet_reduce(trade, signal_row: dict, reason: str) -> bool:
+                if trade is None:
+                    return False
+                token_id = str(getattr(trade, "token_id", "") or "")
+                current_price = float(getattr(trade, "current_price", 0.0) or getattr(trade, "entry_price", 0.0) or 0.0)
+                pre_reduce_shares = max(float(getattr(trade, "shares", 0.0) or 0.0), 0.0)
+                if not token_id or pre_reduce_shares <= 1e-6:
+                    return False
+
+                try:
+                    _ob_exit = orderbook_guard.analyze_book(token_id, depth=5)
+                    exit_price = _ob_exit.get("best_bid") or current_price
+                except Exception:
+                    exit_price = current_price
+                exit_price = float(exit_price or 0.0)
+                if exit_price <= 0:
+                    logging.warning("Source-wallet REDUCE skipped for %s due to invalid exit price.", token_id)
+                    return False
+
+                min_reduce_notional = max(
+                    float(getattr(TradingConfig, "MIN_BET_USDC", 1.0)),
+                    float(getattr(TradingConfig, "MIN_REDUCE_NOTIONAL_USDC", 2.5)),
+                )
+                min_remainder_notional = max(
+                    0.0,
+                    float(getattr(TradingConfig, "MIN_POSITION_REMAINDER_USDC", min_reduce_notional)),
+                )
+                reduce_fraction = resolve_source_wallet_reduce_fraction(signal_row)
+                if should_convert_reduce_to_exit(
+                    total_shares=pre_reduce_shares,
+                    reduce_fraction=reduce_fraction,
+                    reference_price=exit_price,
+                    min_reduce_notional=min_reduce_notional,
+                    min_remainder_notional=min_remainder_notional,
+                ):
+                    return False
+
+                requested_shares = min(pre_reduce_shares, pre_reduce_shares * reduce_fraction)
+                if requested_shares <= 1e-6:
+                    return False
+
+                if trading_mode == "live" and order_manager is not None:
+                    reduce_result = _execute_live_sell_ladder(
+                        token_id=token_id,
+                        requested_shares=requested_shares,
+                        condition_id=trade.condition_id,
+                        outcome_side=trade.outcome_side,
+                        reference_price=exit_price,
+                        close_reason=reason,
+                    )
+                    if str(reduce_result.get("status") or "").strip().lower() == "dead_orderbook":
+                        logging.warning(
+                            "Source-wallet REDUCE converted to local operational close for dead token %s.",
+                            token_id,
+                        )
+                        _force_local_dead_orderbook_close(trade, reason, reduce_result)
+                        return True
+                    actual_fill_size = min(float(reduce_result.get("filled_shares", 0.0) or 0.0), pre_reduce_shares)
+                    if actual_fill_size <= 1e-6:
+                        logging.warning(
+                            "Source-wallet REDUCE remained unfilled for %s after %s attempt(s).",
+                            token_id,
+                            len(reduce_result.get("attempts", [])),
+                        )
+                        return True
+                    actual_fill_price = float(reduce_result.get("avg_price", exit_price) or exit_price)
+                    _apply_exit_execution_metrics(trade, reduce_result, reason, exit_price)
+                    log_live_fill_event(signal_row, actual_fill_price, actual_fill_size, action_type="LIVE_SOURCE_REDUCE")
+                    trade.partial_exit(
+                        fraction=min(1.0, actual_fill_size / max(pre_reduce_shares, 1e-9)),
+                        exit_price=actual_fill_price,
+                    )
+                    logging.info(
+                        "Source-wallet REDUCE filled %.6f/%.6f shares for %s (reason=%s).",
+                        actual_fill_size,
+                        pre_reduce_shares,
+                        token_id,
+                        reason,
+                    )
+                    return True
+
+                trade.actual_execution_path = "paper_source_wallet_reduce"
+                trade.intended_exit_reason = reason
+                trade.partial_exit(fraction=reduce_fraction, exit_price=exit_price)
+                logging.info(
+                    "Paper source-wallet REDUCE for %s fraction=%.3f reason=%s",
+                    token_id,
+                    reduce_fraction,
+                    reason,
+                )
+                return True
+
             live_entry_freeze = pre_cycle_entry_freeze
             freeze_reason = pre_cycle_freeze_reason
             freeze_detail = pre_cycle_freeze_detail or {}
@@ -2686,20 +2889,39 @@ def main_loop():
             # FIX 1A: Process all AI exits FIRST, ignoring max_pos restrictions
             for _, row in scored_df.iterrows():
                 s_row = row.to_dict()
-                if str(s_row.get("entry_intent", "")).upper() == "CLOSE_LONG":
+                source_wallet_exit_signal = bool(s_row.get("source_wallet_exit_signal", False))
+                source_wallet_reduce_signal = bool(s_row.get("source_wallet_reduce_signal", False))
+                if str(s_row.get("entry_intent", "")).upper() == "CLOSE_LONG" or source_wallet_exit_signal or source_wallet_reduce_signal:
                     m_key = _trade_key_from_signal(s_row)
                     if m_key in trade_manager.active_trades:
-                        logging.warning("AI Veto! CLOSE_LONG received for %s. Forcing exit.", m_key)
                         _trade = trade_manager.active_trades[m_key]
+                        if not source_wallet_signal_matches_trade(s_row, _trade):
+                            continue
+                        close_reason = "ai_close_long"
+                        if source_wallet_reduce_signal:
+                            close_reason = "source_wallet_sharp_reduce"
+                        elif str(s_row.get("source_wallet_position_event", "")).upper() == "REVERSAL_EXIT":
+                            close_reason = "source_wallet_reversal"
+                        elif source_wallet_exit_signal:
+                            close_reason = "source_wallet_exit"
+                        logging.warning(
+                            "Source/AI exit received for %s. wallet=%s reason=%s",
+                            m_key,
+                            s_row.get("trader_wallet"),
+                            close_reason,
+                        )
+                        if source_wallet_reduce_signal:
+                            if _apply_source_wallet_reduce(_trade, s_row, close_reason):
+                                continue
                         _px = float(getattr(_trade, "current_price", 0.0) or getattr(_trade, "entry_price", 0.0) or 0.0)
                         if _px > 0:
-                            _trade.close(exit_price=_px, reason="ai_close_long", exit_btc_price=btc_live_price)
+                            _trade.close(exit_price=_px, reason=close_reason, exit_btc_price=btc_live_price)
                         else:
                             _trade.state = TradeState.CLOSED
-                            _trade.close_reason = "ai_close_long"
+                            _trade.close_reason = close_reason
 
             # FIX 1B: Normal entry loop
-            governor_top_signal_eligible_count = 0
+            governor_top_signal_consumed_count = 0
             for candidate_rank, (_, row) in enumerate(scored_df.iterrows(), start=1):
                 signal_row = row.to_dict()
                 if cadence_boost_active and candidate_rank <= entry_aggression_top_k:
@@ -2818,6 +3040,20 @@ def main_loop():
                         gate="market_universe",
                         open_market_count=len(open_market_slugs),
                         open_token_count=len(open_token_ids),
+                    )
+                    continue
+                wallet_state_gate_pass = bool(signal_row.get("wallet_state_gate_pass", True))
+                if entry_intent == "OPEN_LONG" and not wallet_state_gate_pass:
+                    _log_candidate_skip(
+                        signal_row,
+                        "wallet_state_gate_failed",
+                        gate="wallet_state",
+                        wallet_state_gate_reason=signal_row.get("wallet_state_gate_reason"),
+                        wallet_watchlist_approved=bool(signal_row.get("wallet_watchlist_approved", True)),
+                        wallet_quality_score=_safe_float(signal_row.get("wallet_quality_score", 0.0), default=0.0),
+                        wallet_fresh=bool(signal_row.get("source_wallet_fresh", False)),
+                        wallet_conflict_with_stronger=bool(signal_row.get("wallet_conflict_with_stronger", False)),
+                        source_wallet_position_event=signal_row.get("source_wallet_position_event"),
                     )
                     continue
 
@@ -2976,20 +3212,15 @@ def main_loop():
                         signal_row.get("liquidity_score", signal_row.get("liquidity_depth_score", signal_row.get("market_liquidity_score", 1.0))),
                         default=1.0,
                     )
+                    governor_liquidity_floor_failed = False
                     if governor_min_liquidity > 0 and liquidity_score < governor_min_liquidity:
-                        _log_candidate_skip(
-                            signal_row,
-                            "performance_governor_liquidity_floor",
-                            gate="performance_governor",
-                            model_action=action_map.get(action_val, "UNKNOWN"),
-                            governor_level=int(governor_state.get("governor_level", 0) or 0),
-                            liquidity_score=round(liquidity_score, 4),
-                            required_liquidity_score=round(governor_min_liquidity, 4),
-                        )
-                        continue
-                    allow_top_signal, governor_top_signal_eligible_count = performance_governor_top_signal_decision(
+                        governor_liquidity_floor_failed = True
+                        signal_row["governor_liquidity_floor_failed"] = True
+                        signal_row["governor_liquidity_score"] = round(liquidity_score, 4)
+                        signal_row["governor_required_liquidity_score"] = round(governor_min_liquidity, 4)
+                    allow_top_signal = performance_governor_top_signal_decision(
                         governor_state,
-                        governor_top_signal_eligible_count,
+                        governor_top_signal_consumed_count,
                     )
                     if not allow_top_signal:
                         _log_candidate_skip(
@@ -3017,6 +3248,8 @@ def main_loop():
                         current_exposure=_current_exposure,
                     )
                     size_usdc *= float(governor_state.get("size_multiplier", 1.0) or 1.0)
+                    if governor_liquidity_floor_failed:
+                        size_usdc *= float(governor_state.get("liquidity_size_multiplier", 1.0) or 1.0)
                     sizing_context = _entry_balance_sizing_context(_available_bal)
                     min_bet_usdc = sizing_context["min_bet_usdc"]
                     configured_min_entry = sizing_context["configured_min_entry"]
@@ -3248,6 +3481,10 @@ def main_loop():
                             fill_price=actual_fill_price,
                             fill_shares=actual_fill_size,
                         )
+                        governor_top_signal_consumed_count = performance_governor_consume_top_signal_slot(
+                            governor_state,
+                            governor_top_signal_consumed_count,
+                        )
                     else:
                         # Paper trade: register in TradeManager (which logs to execution_log.csv)
                         # FIX C7: Don't also call execute_paper_trade — it creates duplicate log entries
@@ -3273,6 +3510,10 @@ def main_loop():
                                 final_size_usdc=size_usdc,
                                 available_balance=_available_bal,
                                 paper_fill_price=fill_price,
+                            )
+                            governor_top_signal_consumed_count = performance_governor_consume_top_signal_slot(
+                                governor_state,
+                                governor_top_signal_consumed_count,
                             )
                         else:
                             _record_candidate_decision(

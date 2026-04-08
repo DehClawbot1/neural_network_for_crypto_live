@@ -1,5 +1,4 @@
 import logging
-
 import numpy as np
 import pandas as pd
 
@@ -49,6 +48,12 @@ class SignalEngine:
         time_decay_score = float(np.clip(_safe_float(row.get("time_decay_score", 0.5), default=0.5), 0.0, 1.0))
         network_activity_score = float(np.clip(_safe_float(row.get("btc_network_activity_score", 0.5), default=0.5), 0.0, 1.0))
         network_stress_score = float(np.clip(_safe_float(row.get("btc_network_stress_score", 0.5), default=0.5), 0.0, 1.0))
+        wallet_quality_score = float(np.clip(_safe_float(row.get("wallet_quality_score", 0.5), default=0.5), 0.0, 1.0))
+        wallet_state_confidence = float(np.clip(_safe_float(row.get("wallet_state_confidence", 0.0), default=0.0), 0.0, 1.0))
+        wallet_state_freshness_score = float(np.clip(_safe_float(row.get("wallet_state_freshness_score", 0.0), default=0.0), 0.0, 1.0))
+        wallet_size_change_score = float(np.clip(_safe_float(row.get("wallet_size_change_score", 0.0), default=0.0), 0.0, 1.0))
+        wallet_agreement_score = float(np.clip(_safe_float(row.get("wallet_agreement_score", 0.5), default=0.5), 0.0, 1.0))
+        wallet_distance_score = float(np.clip(_safe_float(row.get("wallet_distance_score", 0.5), default=0.5), 0.0, 1.0))
         p_tp = float(np.clip(_safe_float(row.get("p_tp_before_sl", 0.0), default=0.0), 0.0, 1.0))
         expected_return = _safe_float(row.get("expected_return", 0.0), default=0.0)
         edge_score = _safe_float(row.get("edge_score"), default=p_tp * expected_return)
@@ -76,6 +81,15 @@ class SignalEngine:
         elif network_stress_score <= 0.20:
             network_regime_bonus -= 0.02
 
+        wallet_state_score = (
+            wallet_quality_score * 0.28
+            + wallet_state_freshness_score * 0.20
+            + wallet_size_change_score * 0.18
+            + wallet_agreement_score * 0.18
+            + wallet_distance_score * 0.08
+            + wallet_state_confidence * 0.08
+        )
+
         heuristic_confidence = (
             whale_pressure * 0.40
             + market_structure_score * 0.35
@@ -84,6 +98,7 @@ class SignalEngine:
             + network_activity_score * 0.03
             + network_regime_bonus
         )
+        heuristic_confidence = float(np.clip((heuristic_confidence * 0.82) + (wallet_state_score * 0.18), 0.0, 1.0))
         if ta_support:
             heuristic_confidence += min(0.08, trend_confluence * 0.08)
             if fractal_trigger_ready:
@@ -113,6 +128,12 @@ class SignalEngine:
         if fractal_trigger_pending:
             confidence = min(confidence, 0.42)
 
+        wallet_state_gate_pass = bool(row.get("wallet_state_gate_pass", True))
+        entry_intent = str(row.get("entry_intent", "OPEN_LONG") or "OPEN_LONG").upper()
+        wallet_entry_gate_fail = entry_intent == "OPEN_LONG" and not wallet_state_gate_pass
+        if entry_intent == "CLOSE_LONG":
+            confidence = max(confidence, 0.65 if bool(row.get("source_wallet_exit_signal", False)) else 0.50)
+
         if confidence < 0.45:
             action_code = 0
         elif confidence < 0.60:
@@ -127,6 +148,8 @@ class SignalEngine:
             "confidence": round(confidence, 4),
             "signal_label": self.LABELS[action_code],
             "action_code": action_code,
+            "wallet_state_score": round(wallet_state_score, 4),
+            "wallet_entry_gate_fail": bool(wallet_entry_gate_fail),
             "reason": self._build_reason(row, confidence),
         }
 
@@ -138,6 +161,8 @@ class SignalEngine:
             f"whale_pressure={_safe_float(row.get('whale_pressure', 0.5), default=0.5):.2f}, "
             f"market_structure={_safe_float(row.get('market_structure_score', 0.5), default=0.5):.2f}, "
             f"network_stress={_safe_float(row.get('btc_network_stress_score', 0.5), default=0.5):.2f}, "
+            f"wallet_quality={_safe_float(row.get('wallet_quality_score', 0.5), default=0.5):.2f}, "
+            f"wallet_state_score={_safe_float(row.get('wallet_state_score', 0.0), default=0.0):.2f}, "
             f"confidence={_safe_float(confidence, default=0.0):.2f}"
         )
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 from pathlib import Path
 
@@ -15,6 +16,36 @@ def _read_csv(path: Path) -> pd.DataFrame:
         return pd.read_csv(path, engine="python", on_bad_lines="skip")
     except Exception:
         return pd.DataFrame()
+
+
+def _read_service_heartbeats_csv(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame(columns=["timestamp", "service", "status", "message", "rows"])
+    rows = []
+    try:
+        with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+            reader = csv.reader(handle)
+            header = next(reader, None)
+            if not header:
+                return pd.DataFrame(columns=["timestamp", "service", "status", "message", "rows"])
+            for row in reader:
+                if not row:
+                    continue
+                padded = (row + ["", "", "", "", ""])[:5]
+                if len(row) > 5:
+                    padded[4] = ",".join(part for part in row[4:] if part not in (None, ""))
+                rows.append(
+                    {
+                        "timestamp": padded[0],
+                        "service": padded[1],
+                        "status": padded[2],
+                        "message": padded[3],
+                        "rows": padded[4],
+                    }
+                )
+    except Exception:
+        return pd.DataFrame(columns=["timestamp", "service", "status", "message", "rows"])
+    return pd.DataFrame(rows)
 
 
 def _event_id(prefix: str, row: dict) -> str:
@@ -41,14 +72,14 @@ def sync_ops_state_to_db(logs_dir="logs"):
             (incident_id, category, severity, summary, detail, created_at),
         )
 
-    heartbeats_df = _read_csv(logs_path / "service_heartbeats.csv")
+    heartbeats_df = _read_service_heartbeats_csv(logs_path / "service_heartbeats.csv")
     for _, row in heartbeats_df.iterrows():
         record = row.to_dict()
         heartbeat_id = _event_id("heartbeat", record)
         created_at = record.get("timestamp") or record.get("created_at")
         service = record.get("service") or record.get("component") or record.get("source")
         status = record.get("status") or record.get("heartbeat") or record.get("state")
-        detail = record.get("detail") or record.get("message")
+        detail = record.get("detail") or record.get("rows") or record.get("message")
         db.execute(
             "INSERT OR REPLACE INTO service_heartbeats (heartbeat_id, service, status, detail, created_at) VALUES (?, ?, ?, ?, ?)",
             (heartbeat_id, service, status, detail, created_at),

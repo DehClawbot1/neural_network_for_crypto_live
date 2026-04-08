@@ -19,11 +19,11 @@ class TestCoreTradingLogic(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "max_position_size_exceeded")
 
-    def test_risk_manager_blocks_wide_spread(self):
+    def test_risk_manager_no_longer_owns_spread_veto(self):
         risk = LiveRiskManager(max_spread=0.02)
         decision = risk.pre_trade_check(price=0.5, size=10, spread=0.05, open_orders=0, daily_pnl=0)
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "spread_too_wide")
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason, "ok")
 
 
 if __name__ == "__main__":

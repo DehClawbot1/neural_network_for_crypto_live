@@ -9,6 +9,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from token_utils import normalize_token_id
 from urllib3.util.retry import Retry
+from wallet_state_engine import WalletStateEngine
 
 # Configure logging for zero-intervention monitoring
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -33,6 +34,13 @@ def _env_float(name, default, minimum=0.0, maximum=60.0):
     value = max(float(minimum), value)
     value = min(float(maximum), value)
     return value
+
+
+def _safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
 
 
 def _today_start_iso():
@@ -96,8 +104,27 @@ def _build_session():
     return session
 
 
-def get_top_crypto_traders(limit=100):
-    """Fetches the top proxy wallets by PnL in the CRYPTO category for the week."""
+def _parse_watchlist_env():
+    raw = str(os.getenv("LEADERBOARD_APPROVED_WALLETS", "") or "").strip()
+    if not raw:
+        return set()
+    return {
+        item.strip().lower()
+        for item in raw.split(",")
+        if item and item.strip()
+    }
+
+
+def _leaderboard_wallet_quality(rank_index: int, total_count: int, pnl_value) -> float:
+    total_count = max(int(total_count), 1)
+    rank_score = 1.0 - (rank_index / max(total_count - 1, 1))
+    pnl = _safe_float(pnl_value, 0.0)
+    pnl_score = 0.5 + min(0.5, max(-0.25, pnl / 10_000.0))
+    return max(0.05, min(0.99, 0.25 + (rank_score * 0.45) + (pnl_score * 0.30)))
+
+
+def get_top_crypto_traders(limit=100, return_details=False):
+    """Fetch the top proxy wallets by weekly CRYPTO PnL."""
     url = "https://data-api.polymarket.com/v1/leaderboard"
     params = {
         "category": "CRYPTO",
@@ -112,15 +139,32 @@ def get_top_crypto_traders(limit=100):
         response.raise_for_status()
         data = response.json()
 
-        top_wallets = [user.get("proxyWallet") for user in data if user.get("proxyWallet")]
-        logging.info(f"Successfully fetched {len(top_wallets)} top traders from the leaderboard.")
-        return top_wallets
+        watchlist = _parse_watchlist_env()
+        detailed_rows = []
+        for idx, user in enumerate(data):
+            wallet = str(user.get("proxyWallet") or "").strip().lower()
+            if not wallet:
+                continue
+            detailed_rows.append(
+                {
+                    "wallet": wallet,
+                    "rank": idx + 1,
+                    "pnl": _safe_float(user.get("pnl", user.get("PnL", 0.0)), 0.0),
+                    "quality_score": _leaderboard_wallet_quality(idx, len(data), user.get("pnl", user.get("PnL", 0.0))),
+                    "approved": (wallet in watchlist) if watchlist else True,
+                }
+            )
+
+        logging.info("Successfully fetched %s top traders from the leaderboard.", len(detailed_rows))
+        if return_details:
+            return detailed_rows
+        return [row["wallet"] for row in detailed_rows]
     except Exception as e:
         logging.error(f"Error fetching leaderboard: {e}")
-        return []
+        return [] if not return_details else []
 
 
-def _trade_to_signal(trade, market_universe=None, wallet_fallback=None):
+def _trade_to_signal(trade, market_universe=None, wallet_fallback=None, wallet_quality_score=None, wallet_watchlist_approved=None):
     market_universe = market_universe or {"condition_ids": set(), "token_ids": set(), "slugs": set()}
     cond_id = trade.get("conditionId") or trade.get("condition_id")
     token_id = trade.get("tokenId") or trade.get("token_id") or trade.get("asset")
@@ -180,6 +224,8 @@ def _trade_to_signal(trade, market_universe=None, wallet_fallback=None):
         "price": float(trade.get("price", 0)),
         "size": float(trade.get("size", 0)),
         "timestamp": normalized_ts,
+        "wallet_quality_score": _safe_float(wallet_quality_score, 0.50),
+        "wallet_watchlist_approved": True if wallet_watchlist_approved is None else bool(wallet_watchlist_approved),
     }
 
 
@@ -204,7 +250,7 @@ def load_btc_market_universe(logs_dir="logs"):
     return {"condition_ids": condition_ids, "token_ids": token_ids, "slugs": slugs}
 
 
-def get_recent_btc_trades(wallet_address, limit=50, market_universe=None, session=None):
+def get_recent_btc_trades(wallet_address, limit=50, market_universe=None, session=None, wallet_quality_score=None, wallet_watchlist_approved=None):
     """Fetch recent wallet trades from the public Data API and keep only trades that map into the BTC universe."""
     url = "https://data-api.polymarket.com/trades"
     params = {
@@ -220,7 +266,13 @@ def get_recent_btc_trades(wallet_address, limit=50, market_universe=None, sessio
 
         signals = []
         for trade in trades:
-            signal = _trade_to_signal(trade, market_universe=market_universe, wallet_fallback=wallet_address)
+            signal = _trade_to_signal(
+                trade,
+                market_universe=market_universe,
+                wallet_fallback=wallet_address,
+                wallet_quality_score=wallet_quality_score,
+                wallet_watchlist_approved=wallet_watchlist_approved,
+            )
             if signal is not None:
                 signals.append(signal)
         return signals
@@ -262,7 +314,13 @@ def get_recent_btc_global_trades(limit=300, page_size=100, market_universe=None,
             trade_ts = pd.to_datetime(normalized_ts, utc=True, errors="coerce")
             if pd.notna(trade_ts):
                 oldest_seen = trade_ts if oldest_seen is None else min(oldest_seen, trade_ts)
-            signal = _trade_to_signal(trade, market_universe=market_universe, wallet_fallback=trade.get("proxyWallet"))
+            signal = _trade_to_signal(
+                trade,
+                market_universe=market_universe,
+                wallet_fallback=trade.get("proxyWallet"),
+                wallet_quality_score=0.35,
+                wallet_watchlist_approved=False,
+            )
             if signal is not None:
                 signals.append(signal)
                 fetched += 1
@@ -271,6 +329,60 @@ def get_recent_btc_global_trades(limit=300, page_size=100, market_universe=None,
             break
     logging.info("Global BTC trade scan captured %s candidate signals.", fetched)
     return signals
+
+
+def _resolve_signal_market_key(df: pd.DataFrame) -> pd.Series:
+    market_key = pd.Series([""] * len(df), index=df.index, dtype="object")
+    for col in ("condition_id", "market_slug", "market_title", "market"):
+        if col not in df.columns:
+            continue
+        values = df[col].fillna("").astype(str).str.strip()
+        market_key = market_key.where(market_key.astype(str).str.len() > 0, values)
+    return market_key
+
+
+def _keep_latest_open_long_state_per_wallet_market_side(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame() if df is None else df
+
+    work_df = df.copy()
+    if "entry_intent" not in work_df.columns:
+        return work_df
+
+    entry_mask = work_df["entry_intent"].fillna("").astype(str).str.upper() == "OPEN_LONG"
+    if not entry_mask.any():
+        return work_df
+
+    open_df = work_df.loc[entry_mask].copy()
+    other_df = work_df.loc[~entry_mask].copy()
+    if open_df.empty:
+        return work_df
+
+    open_df["timestamp"] = pd.to_datetime(open_df.get("timestamp"), utc=True, errors="coerce")
+    open_df["_market_key"] = _resolve_signal_market_key(open_df)
+    wallet_series = open_df["trader_wallet"] if "trader_wallet" in open_df.columns else pd.Series([""] * len(open_df), index=open_df.index)
+    if "outcome_side" in open_df.columns:
+        side_series = open_df["outcome_side"]
+    elif "side" in open_df.columns:
+        side_series = open_df["side"]
+    else:
+        side_series = pd.Series([""] * len(open_df), index=open_df.index)
+    open_df["_wallet_key"] = wallet_series.fillna("").astype(str).str.strip().str.lower()
+    open_df["_side_key"] = side_series.fillna("").astype(str).str.strip().str.upper()
+    open_df = open_df.sort_values(["timestamp"], ascending=True, na_position="first")
+    open_df = open_df.drop_duplicates(
+        subset=["_wallet_key", "_market_key", "_side_key"],
+        keep="last",
+    ).drop(columns=["_market_key", "_wallet_key", "_side_key"], errors="ignore")
+
+    frames = [frame for frame in (open_df, other_df) if frame is not None and not frame.empty]
+    if not frames:
+        return pd.DataFrame()
+    collapsed = pd.concat(frames, ignore_index=False)
+    if "timestamp" in collapsed.columns:
+        collapsed["timestamp"] = pd.to_datetime(collapsed.get("timestamp"), utc=True, errors="coerce")
+        collapsed = collapsed.sort_values("timestamp", ascending=False, na_position="last")
+    return collapsed.reset_index(drop=True)
 
 
 def run_scraper_cycle():
@@ -283,14 +395,26 @@ def run_scraper_cycle():
     global_limit = _env_int("GLOBAL_BTC_TRADE_LIMIT", 300, minimum=50, maximum=5000)
     global_page_size = _env_int("GLOBAL_BTC_TRADE_PAGE_SIZE", 100, minimum=20, maximum=500)
 
-    top_traders = get_top_crypto_traders(limit=leaderboard_limit)
+    top_trader_details = get_top_crypto_traders(limit=leaderboard_limit, return_details=True)
 
     market_universe = load_btc_market_universe()
     all_signals = []
     shared_session = _build_session()
-    for trader in top_traders:
+    wallet_meta = {}
+    for detail in top_trader_details:
+        trader = detail.get("wallet")
+        if not trader:
+            continue
+        wallet_meta[str(trader).strip().lower()] = detail
         logging.info(f"Scanning recent trades for wallet: {trader[:8]}...")
-        trades = get_recent_btc_trades(trader, limit=per_wallet_limit, market_universe=market_universe, session=shared_session)
+        trades = get_recent_btc_trades(
+            trader,
+            limit=per_wallet_limit,
+            market_universe=market_universe,
+            session=shared_session,
+            wallet_quality_score=detail.get("quality_score"),
+            wallet_watchlist_approved=detail.get("approved"),
+        )
         all_signals.extend(trades)
         if wallet_sleep > 0:
             time.sleep(wallet_sleep)
@@ -329,8 +453,21 @@ def run_scraper_cycle():
             removed = before - len(df)
             if removed > 0:
                 logging.info("Removed %s duplicate raw wallet trades in scraper cycle.", removed)
-        df = df.sort_values(by="timestamp", ascending=False).reset_index(drop=True)
-        logging.info(f"Extracted {len(df)} relevant BTC trade signals.")
+        raw_count = len(df)
+        state_engine = WalletStateEngine()
+        df = state_engine.build_state_signals(df, wallet_meta=wallet_meta)
+        if df is None or df.empty:
+            logging.info("Wallet state engine produced no actionable BTC wallet-state signals from %s raw trades.", raw_count)
+            return pd.DataFrame()
+        before_collapse = len(df)
+        df = _keep_latest_open_long_state_per_wallet_market_side(df)
+        collapsed_count = before_collapse - len(df)
+        if collapsed_count > 0:
+            logging.info(
+                "Collapsed %s historical OPEN_LONG wallet-state rows to latest state snapshots.",
+                collapsed_count,
+            )
+        logging.info("Extracted %s actionable BTC wallet-state signals from %s raw trades.", len(df), raw_count)
         return df
     else:
         logging.info("No relevant BTC trade signals found in this cycle.")

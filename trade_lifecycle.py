@@ -38,6 +38,10 @@ class TradeLifecycle:
     close_reason: str | None = None
     confidence_at_entry: float = 0.0
     signal_label: str = "UNKNOWN"
+    source_wallet: str = ""
+    source_wallet_direction_confidence: float = 0.0
+    source_wallet_position_event: str = ""
+    source_wallet_quality_score: float = 0.0
     entry_btc_trend_bias: str = "NEUTRAL"
     entry_btc_predicted_direction: int = 0
     entry_btc_predicted_return: float = 0.0
@@ -100,6 +104,10 @@ class TradeLifecycle:
         self.state = TradeState.NEW_SIGNAL
         self.confidence_at_entry = float(normalized_signal_row.get("confidence", 0.0) or 0.0)
         self.signal_label = str(normalized_signal_row.get("signal_label", "UNKNOWN") or "UNKNOWN")
+        self.source_wallet = str(normalized_signal_row.get("trader_wallet", "") or "")
+        self.source_wallet_direction_confidence = float(normalized_signal_row.get("source_wallet_direction_confidence", 0.0) or 0.0)
+        self.source_wallet_position_event = str(normalized_signal_row.get("source_wallet_position_event", "") or "")
+        self.source_wallet_quality_score = float(normalized_signal_row.get("wallet_quality_score", 0.0) or 0.0)
         self.entry_btc_trend_bias = str(normalized_signal_row.get("btc_trend_bias", "NEUTRAL") or "NEUTRAL")
         self.entry_btc_predicted_direction = int(normalized_signal_row.get("btc_predicted_direction", 0) or 0)
         self.entry_btc_predicted_return = float(normalized_signal_row.get("btc_predicted_return_15", 0.0) or 0.0)

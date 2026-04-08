@@ -35,8 +35,8 @@ class LiveRiskManager:
             return RiskDecision(False, "max_open_orders_exceeded")
         if daily_pnl <= -abs(self.max_daily_loss):
             return RiskDecision(False, "max_daily_loss_hit")
-        if spread is not None and float(spread) > self.max_spread:
-            return RiskDecision(False, "spread_too_wide")
+        # Live spread/depth enforcement belongs to OrderBookGuard upstream so we
+        # do not duplicate or contradict the real-time orderbook gate here.
         if self.last_loss_time and datetime.now(timezone.utc) - self.last_loss_time < timedelta(minutes=self.cooldown_after_loss_minutes):
             return RiskDecision(False, "cooldown_after_loss")
         if self.failed_orders >= self.max_failed_orders:

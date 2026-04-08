@@ -27,7 +27,7 @@ def test_entry_rule_allows_trade_when_trend_regime_confirms_direction():
     assert result["ta_bias_conflicts"] is False
 
 
-def test_entry_rule_blocks_trade_until_fractal_breakout_confirms():
+def test_entry_rule_penalizes_trade_until_fractal_breakout_confirms():
     layer = EntryRuleLayer(min_score=0.25, max_spread=0.20, min_liquidity=5, min_liquidity_score=0.05)
     result = layer.evaluate(
         {
@@ -48,12 +48,13 @@ def test_entry_rule_blocks_trade_until_fractal_breakout_confirms():
         }
     )
 
-    assert result["allow"] is False
-    assert result["ta_trigger_blocked"] is True
+    assert result["allow"] is True
+    assert result["ta_trigger_blocked"] is False
     assert result["ta_entry_ready"] is False
+    assert result["score_threshold"] > 0.25
 
 
-def test_entry_rule_vetoes_trade_when_trend_bias_conflicts():
+def test_entry_rule_penalizes_trade_when_trend_bias_conflicts():
     layer = EntryRuleLayer(min_score=0.25, max_spread=0.20, min_liquidity=5, min_liquidity_score=0.05)
     result = layer.evaluate(
         {
@@ -72,6 +73,25 @@ def test_entry_rule_vetoes_trade_when_trend_bias_conflicts():
         }
     )
 
-    assert result["allow"] is False
-    assert result["macro_veto"] is True
+    assert result["allow"] is True
+    assert result["macro_veto"] is False
     assert result["ta_bias_conflicts"] is True
+    assert result["score_threshold"] > 0.25
+
+
+def test_entry_rule_uses_spread_and_liquidity_as_penalties_not_hard_blocks():
+    layer = EntryRuleLayer(min_score=0.25, max_spread=0.20, min_liquidity=5, min_liquidity_score=0.05)
+    result = layer.evaluate(
+        {
+            "confidence": 0.95,
+            "spread": 0.32,
+            "liquidity": 1.5,
+            "outcome_side": "YES",
+        }
+    )
+
+    assert result["spread_ok"] is False
+    assert result["liquidity_ok"] is False
+    assert result["spread_penalty"] > 0.0
+    assert result["liquidity_penalty"] > 0.0
+    assert result["allow"] is True

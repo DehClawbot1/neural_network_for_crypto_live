@@ -80,6 +80,20 @@ class TestFeatureLogic(unittest.TestCase):
             "short_fractal_breakout": False,
             "fractal_trigger_direction": "LONG",
             "fractal_entry_ready": True,
+            "wallet_quality_score": 0.77,
+            "wallet_watchlist_approved": True,
+            "wallet_agreement_score": 0.81,
+            "wallet_conflict_with_stronger": False,
+            "wallet_state_gate_pass": True,
+            "source_wallet_position_event": "NEW_ENTRY",
+            "source_wallet_net_position_increased": True,
+            "source_wallet_current_net_exposure": 500.0,
+            "source_wallet_average_entry": 0.61,
+            "source_wallet_current_direction": "YES",
+            "source_wallet_direction_confidence": 0.83,
+            "source_wallet_size_delta_ratio": 0.64,
+            "source_wallet_freshness_score": 0.92,
+            "source_wallet_fresh": True,
         }
         market = {
             "condition_id": "cond_1",
@@ -107,6 +121,13 @@ class TestFeatureLogic(unittest.TestCase):
         self.assertEqual(row["latest_bullish_fractal"], 66550.0)
         self.assertTrue(row["long_fractal_breakout"])
         self.assertTrue(row["fractal_entry_ready"])
+        self.assertEqual(row["wallet_quality_score"], 0.77)
+        self.assertEqual(row["wallet_agreement_score"], 0.81)
+        self.assertEqual(row["source_wallet_position_event"], "NEW_ENTRY")
+        self.assertTrue(row["source_wallet_net_position_increased"])
+        self.assertEqual(row["wallet_state_confidence"], 0.83)
+        self.assertEqual(row["wallet_size_change_score"], 0.64)
+        self.assertTrue(row["source_wallet_fresh"])
 
 
 if __name__ == "__main__":

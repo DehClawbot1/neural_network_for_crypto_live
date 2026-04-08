@@ -262,7 +262,7 @@ Important current caveat:
 
 ## Roadmap and Completion Status
 
-This repository is following the roadmap from `PLAN.md`. Below is the practical project status as of the current codebase.
+This repository is following the roadmap in this README. Below is the practical project status as of the current codebase.
 
 ### Phase 1: Stop the bleeding without shutting the bot off
 Status: mostly done
