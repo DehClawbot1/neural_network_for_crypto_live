@@ -1047,7 +1047,10 @@ def split_entry_pipeline_signals(signals_df: pd.DataFrame) -> tuple[pd.DataFrame
         if isinstance(raw, pd.DataFrame):
             if raw.empty:
                 return pd.Series([default_value] * len(frame), index=frame.index)
-            series = raw.bfill(axis=1).iloc[:, 0]
+            series = raw.apply(
+                lambda row: next((value for value in row if not pd.isna(value)), default_value),
+                axis=1,
+            )
         elif isinstance(raw, pd.Series):
             series = raw
         else:
@@ -1064,6 +1067,21 @@ def split_entry_pipeline_signals(signals_df: pd.DataFrame) -> tuple[pd.DataFrame
             series = series.iloc[: len(frame)]
         series.index = frame.index
         return series
+
+    def _stringify_series(series: pd.Series, default_value: str = "", *, upper: bool = False, lower: bool = False) -> pd.Series:
+        def _coerce(value):
+            if pd.isna(value):
+                text = default_value
+            else:
+                text = str(value)
+            text = text.strip()
+            if lower:
+                return text.lower()
+            if upper:
+                return text.upper()
+            return text
+
+        return series.map(_coerce)
 
     def _boolify_series(series: pd.Series, default_value: bool = False) -> pd.Series:
         def _coerce(value):
@@ -1088,11 +1106,11 @@ def split_entry_pipeline_signals(signals_df: pd.DataFrame) -> tuple[pd.DataFrame
         return signals_df.copy(), {"dropped_rows": 0, "dropped_global_btc_scan": 0, "dropped_stale_wallet_entries": 0}
 
     work = signals_df.copy()
-    signal_source = _column_as_series(work, "signal_source", "").fillna("").astype(str).str.strip().str.lower()
+    signal_source = _stringify_series(_column_as_series(work, "signal_source", ""), default_value="", lower=True)
     analytics_only_mask = signal_source.eq("global_btc_scan")
 
     if "entry_intent" in work.columns:
-        entry_intent = _column_as_series(work, "entry_intent", "").fillna("").astype(str).str.strip().str.upper()
+        entry_intent = _stringify_series(_column_as_series(work, "entry_intent", ""), default_value="", upper=True)
     else:
         entry_intent = pd.Series([""] * len(work), index=work.index)
     if "source_wallet_fresh" in work.columns:

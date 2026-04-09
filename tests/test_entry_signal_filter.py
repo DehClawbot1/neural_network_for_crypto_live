@@ -1,4 +1,5 @@
 import ast
+import warnings
 from pathlib import Path
 from textwrap import dedent
 
@@ -92,3 +93,27 @@ def test_split_entry_pipeline_signals_handles_duplicate_source_wallet_fresh_colu
     assert set(filtered["market_slug"]) == {"m2", "m3"}
     assert stats["dropped_rows"] == 1
     assert stats["dropped_stale_wallet_entries"] == 1
+
+
+def test_split_entry_pipeline_signals_avoids_fillna_downcast_futurewarning():
+    split_entry_pipeline_signals = _load_split_entry_pipeline_signals()
+    signals_df = pd.DataFrame(
+        [
+            ["leaderboard_wallet", "OPEN_LONG", None, False, "m1"],
+            ["leaderboard_wallet", None, "OPEN_LONG", True, "m2"],
+        ],
+        columns=[
+            "signal_source",
+            "entry_intent",
+            "entry_intent",
+            "source_wallet_fresh",
+            "market_slug",
+        ],
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        filtered, stats = split_entry_pipeline_signals(signals_df)
+
+    assert set(filtered["market_slug"]) == {"m2"}
+    assert stats["dropped_rows"] == 1
