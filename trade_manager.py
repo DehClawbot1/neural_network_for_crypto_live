@@ -10,6 +10,7 @@ from pathlib import Path
 import pandas as pd
 
 from balance_normalization import maybe_trace_allowance_payload
+from csv_utils import safe_csv_append
 from db import Database
 from trade_lifecycle import TradeLifecycle, TradeState
 from trade_quality import build_quality_context, classify_exit_reason_family, resolve_entry_signal_label
@@ -777,10 +778,16 @@ class TradeManager:
         for column in append_df.columns:
             if column not in ordered_cols:
                 ordered_cols.append(column)
-        existing_df = existing_df.reindex(columns=ordered_cols)
+        schema_changed = bool(existing_df.columns.tolist()) and existing_df.columns.tolist() != ordered_cols
         append_df = append_df.reindex(columns=ordered_cols)
-        merged = append_df.copy() if existing_df.empty else pd.concat([existing_df, append_df], ignore_index=True)
-        merged.to_csv(self.closed_file, index=False)
+        existing_df = existing_df.reindex(columns=ordered_cols)
+        if not self.closed_file.exists() or self.closed_file.stat().st_size == 0:
+            append_df.to_csv(self.closed_file, index=False)
+        elif schema_changed:
+            existing_df.to_csv(self.closed_file, index=False)
+            safe_csv_append(self.closed_file, append_df)
+        else:
+            safe_csv_append(self.closed_file, append_df)
         self._upsert_position_rows_to_db(deduped_rows)
         self._refresh_lifecycle_audit_reports()
         return len(deduped_rows)

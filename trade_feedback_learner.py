@@ -750,6 +750,8 @@ class TradeFeedbackLearner:
                     "close_reason": close_reason,
                 }
             )
+            if bool(quality_context.get("reconciliation_close_flag", False)):
+                continue
             grade = self._grade_trade(realized_pnl, roi)
             takeaways = self._extract_takeaways(
                 realized_pnl=realized_pnl,

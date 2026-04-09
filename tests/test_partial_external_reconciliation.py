@@ -1,4 +1,5 @@
 import pandas as pd
+import warnings
 
 from live_position_book import LivePositionBook
 from trade_feedback_learner import TradeFeedbackLearner
@@ -78,6 +79,42 @@ def test_closed_trade_persistence_is_idempotent(tmp_path):
     assert df.iloc[0]["close_reason"] == "rl_exit"
 
 
+def test_append_closed_rows_avoids_pandas_concat_futurewarning(tmp_path):
+    manager = TradeManager(logs_dir=tmp_path)
+    existing = pd.DataFrame(
+        [
+            {
+                "token_id": "tok-0",
+                "condition_id": "cond-0",
+                "outcome_side": "Yes",
+                "close_reason": "rl_exit",
+                "close_fingerprint": "fp-0",
+                "legacy_empty_col": None,
+            }
+        ]
+    )
+    existing.to_csv(tmp_path / "closed_positions.csv", index=False)
+
+    row = {
+        "token_id": "tok-1",
+        "condition_id": "cond-1",
+        "outcome_side": "No",
+        "close_reason": "take_profit_roi",
+        "close_fingerprint": "fp-1",
+        "shares": 10.0,
+    }
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        appended = manager._append_closed_rows([row])
+
+    assert appended == 1
+    df = pd.read_csv(tmp_path / "closed_positions.csv")
+    assert len(df.index) == 2
+    assert "legacy_empty_col" in df.columns
+    assert "shares" in df.columns
+
+
 def test_external_manual_close_is_skipped_from_learning_reports(tmp_path):
     learner = TradeFeedbackLearner(logs_dir=tmp_path)
     trade = TradeLifecycle(market="BTC", token_id="tok-1", condition_id="cond-1", outcome_side="Yes", logs_dir=str(tmp_path))
@@ -91,6 +128,7 @@ def test_external_manual_close_is_skipped_from_learning_reports(tmp_path):
 
     assert processed == 0
     assert not learner.report_csv.exists()
+    assert list(learner.reports_dir.glob("*")) == []
 
 
 def test_archive_and_prune_redundant_external_sync_fills(tmp_path):
