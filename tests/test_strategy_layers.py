@@ -95,3 +95,34 @@ def test_entry_rule_uses_spread_and_liquidity_as_penalties_not_hard_blocks():
     assert result["spread_penalty"] > 0.0
     assert result["liquidity_penalty"] > 0.0
     assert result["allow"] is True
+
+
+def test_entry_rule_tightens_when_open_portfolio_is_underwater():
+    layer = EntryRuleLayer(min_score=0.25, max_spread=0.20, min_liquidity=5, min_liquidity_score=0.05)
+
+    baseline = layer.evaluate(
+        {
+            "confidence": 0.27,
+            "spread": 0.02,
+            "liquidity": 100.0,
+            "outcome_side": "YES",
+        }
+    )
+    stressed = layer.evaluate(
+        {
+            "confidence": 0.27,
+            "spread": 0.02,
+            "liquidity": 100.0,
+            "outcome_side": "YES",
+            "open_positions_count": 3,
+            "open_positions_unrealized_pnl_pct_total": -0.07,
+            "open_positions_avg_to_now_price_change_pct_mean": -0.06,
+            "open_positions_winner_count": 0,
+            "open_positions_loser_count": 3,
+        }
+    )
+
+    assert baseline["allow"] is True
+    assert stressed["allow"] is False
+    assert stressed["portfolio_pressure_penalty"] > 0.0
+    assert stressed["score_threshold"] > baseline["score_threshold"]

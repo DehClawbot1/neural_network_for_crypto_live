@@ -161,6 +161,37 @@ class TestFeatureLogic(unittest.TestCase):
         self.assertEqual(row["wallet_stronger_conflict_score"], 0.79)
         self.assertEqual(row["source_wallet_direction_confidence"], 0.76)
 
+    def test_build_feature_row_preserves_open_position_context_for_retraining(self):
+        builder = FeatureBuilder()
+        signal = {
+            "trader_wallet": "0xwhale5",
+            "size": 180,
+            "price": 0.57,
+            "timestamp": "2026-04-09T05:00:00Z",
+            "outcome_side": "YES",
+            "open_positions_count": 2,
+            "open_positions_negotiated_value_total": 5.70,
+            "open_positions_max_payout_total": 14.20,
+            "open_positions_current_value_total": 5.42,
+            "open_positions_unrealized_pnl_total": -0.28,
+            "open_positions_unrealized_pnl_pct_total": -0.0491228,
+            "open_positions_avg_to_now_price_change_pct_mean": -0.036,
+            "open_positions_avg_to_now_price_change_pct_min": -0.081,
+            "open_positions_avg_to_now_price_change_pct_max": 0.012,
+            "open_positions_winner_count": 1,
+            "open_positions_loser_count": 1,
+        }
+
+        row = builder.build_feature_row(signal, {"condition_id": "cond_3", "yes_token_id": "5", "no_token_id": "6"})
+
+        self.assertEqual(row["open_positions_count"], 2)
+        self.assertEqual(row["open_positions_negotiated_value_total"], 5.70)
+        self.assertEqual(row["open_positions_current_value_total"], 5.42)
+        self.assertAlmostEqual(row["open_positions_unrealized_pnl_pct_total"], -0.0491228)
+        self.assertEqual(row["open_positions_avg_to_now_price_change_pct_min"], -0.081)
+        self.assertEqual(row["open_positions_winner_count"], 1)
+        self.assertEqual(row["open_positions_loser_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

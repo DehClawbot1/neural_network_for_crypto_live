@@ -118,6 +118,17 @@ class EntryRuleLayer:
         macd_hist_slope = _finite_float(row.get("btc_macd_hist_slope"), default=0.0) or 0.0
         momentum_regime = str(row.get("btc_momentum_regime", "NEUTRAL") or "NEUTRAL").strip().upper()
         momentum_confluence = _finite_float(row.get("btc_momentum_confluence"), default=0.0) or 0.0
+        open_positions_count = int(max(0.0, _finite_float(row.get("open_positions_count"), default=0.0) or 0.0))
+        open_positions_unrealized_pnl_pct_total = _finite_float(
+            row.get("open_positions_unrealized_pnl_pct_total"),
+            default=0.0,
+        ) or 0.0
+        open_positions_avg_to_now_price_change_pct_mean = _finite_float(
+            row.get("open_positions_avg_to_now_price_change_pct_mean"),
+            default=0.0,
+        ) or 0.0
+        open_positions_winner_count = int(max(0.0, _finite_float(row.get("open_positions_winner_count"), default=0.0) or 0.0))
+        open_positions_loser_count = int(max(0.0, _finite_float(row.get("open_positions_loser_count"), default=0.0) or 0.0))
         ta_bias_conflicts = (
             (ta_bias == "LONG" and target_direction == "SHORT")
             or (ta_bias == "SHORT" and target_direction == "LONG")
@@ -209,6 +220,21 @@ class EntryRuleLayer:
             dynamic_min_score = min(0.95, dynamic_min_score + 0.08)
         elif target_direction == "SHORT" and rsi_value <= 22 and rsi_divergence_score > 0.20 and macd_hist_slope >= 0:
             dynamic_min_score = min(0.95, dynamic_min_score + 0.08)
+
+        portfolio_pressure_penalty = 0.0
+        if open_positions_count > 0:
+            loser_ratio = open_positions_loser_count / max(open_positions_count, 1)
+            if open_positions_unrealized_pnl_pct_total <= -0.06:
+                portfolio_pressure_penalty += 0.05
+            elif open_positions_unrealized_pnl_pct_total <= -0.02:
+                portfolio_pressure_penalty += 0.02
+            if loser_ratio >= 0.67:
+                portfolio_pressure_penalty += 0.03
+            elif open_positions_winner_count == open_positions_count and open_positions_unrealized_pnl_pct_total >= 0.08:
+                portfolio_pressure_penalty -= 0.01
+            if open_positions_avg_to_now_price_change_pct_mean <= -0.05:
+                portfolio_pressure_penalty += 0.02
+            dynamic_min_score = min(0.95, max(0.02, dynamic_min_score + portfolio_pressure_penalty))
 
         dynamic_min_score = max(0.02, dynamic_min_score - score_relax)
 
@@ -311,6 +337,12 @@ class EntryRuleLayer:
             "btc_macd_hist_slope": macd_hist_slope,
             "btc_momentum_regime": momentum_regime,
             "btc_momentum_confluence": momentum_confluence,
+            "open_positions_count": open_positions_count,
+            "open_positions_unrealized_pnl_pct_total": open_positions_unrealized_pnl_pct_total,
+            "open_positions_avg_to_now_price_change_pct_mean": open_positions_avg_to_now_price_change_pct_mean,
+            "open_positions_winner_count": open_positions_winner_count,
+            "open_positions_loser_count": open_positions_loser_count,
+            "portfolio_pressure_penalty": portfolio_pressure_penalty,
         }
 
     def should_enter(self, row: dict) -> bool:

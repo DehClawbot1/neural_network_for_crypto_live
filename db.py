@@ -64,6 +64,12 @@ class Database:
         self._ensure_column("positions", "market_title", "TEXT")
         self._ensure_column("positions", "order_side", "TEXT")
         self._ensure_column("positions", "size_usdc", "REAL")
+        self._ensure_column("positions", "negotiated_value_usdc", "REAL")
+        self._ensure_column("positions", "max_payout_usdc", "REAL")
+        self._ensure_column("positions", "current_value_usdc", "REAL")
+        self._ensure_column("positions", "unrealized_pnl_pct", "REAL")
+        self._ensure_column("positions", "avg_to_now_price_change", "REAL")
+        self._ensure_column("positions", "avg_to_now_price_change_pct", "REAL")
         self._ensure_column("positions", "net_realized_pnl", "REAL")
         self._ensure_column("positions", "confidence", "REAL")
         self._ensure_column("positions", "confidence_at_entry", "REAL")
@@ -126,11 +132,17 @@ class Database:
                 entry_price REAL,
                 current_price REAL,
                 size_usdc REAL,
+                negotiated_value_usdc REAL,
                 shares REAL,
+                max_payout_usdc REAL,
                 market_value REAL,
+                current_value_usdc REAL,
                 realized_pnl REAL,
                 net_realized_pnl REAL,
                 unrealized_pnl REAL,
+                unrealized_pnl_pct REAL,
+                avg_to_now_price_change REAL,
+                avg_to_now_price_change_pct REAL,
                 confidence REAL,
                 confidence_at_entry REAL,
                 signal_label TEXT,

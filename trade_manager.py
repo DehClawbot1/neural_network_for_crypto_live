@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from balance_normalization import maybe_trace_allowance_payload
@@ -543,6 +544,16 @@ class TradeManager:
         }
 
     def _trade_to_dict(self, trade: TradeLifecycle) -> dict:
+        negotiated_value_usdc = float(getattr(trade, "size_usdc", 0.0) or 0.0)
+        shares = float(getattr(trade, "shares", 0.0) or 0.0)
+        entry_price = float(getattr(trade, "entry_price", 0.0) or 0.0)
+        current_price = float(getattr(trade, "current_price", 0.0) or 0.0)
+        market_value = shares * current_price if current_price else 0.0
+        unrealized_pnl = float(getattr(trade, "unrealized_pnl", 0.0) or 0.0)
+        max_payout_usdc = shares
+        avg_to_now_price_change = current_price - entry_price if entry_price or current_price else 0.0
+        avg_to_now_price_change_pct = (avg_to_now_price_change / entry_price) if entry_price > 0 else 0.0
+        unrealized_pnl_pct = (unrealized_pnl / negotiated_value_usdc) if negotiated_value_usdc > 0 else 0.0
         return {
             "position_id": self._canonical_position_id(
                 token_id=trade.token_id,
@@ -557,12 +568,18 @@ class TradeManager:
             "condition_id": trade.condition_id,
             "outcome_side": trade.outcome_side,
             "order_side": "BUY",
-            "entry_price": trade.entry_price,
-            "current_price": trade.current_price,
-            "size_usdc": trade.size_usdc,
-            "shares": trade.shares,
-            "market_value": trade.shares * trade.current_price if trade.current_price else 0.0,
-            "unrealized_pnl": round(trade.unrealized_pnl, 4),
+            "entry_price": entry_price,
+            "current_price": current_price,
+            "size_usdc": negotiated_value_usdc,
+            "negotiated_value_usdc": negotiated_value_usdc,
+            "shares": shares,
+            "max_payout_usdc": max_payout_usdc,
+            "market_value": market_value,
+            "current_value_usdc": market_value,
+            "unrealized_pnl": round(unrealized_pnl, 4),
+            "unrealized_pnl_pct": round(unrealized_pnl_pct, 6),
+            "avg_to_now_price_change": round(avg_to_now_price_change, 6),
+            "avg_to_now_price_change_pct": round(avg_to_now_price_change_pct, 6),
             "realized_pnl": round(trade.realized_pnl, 4),
             "net_realized_pnl": round(trade.realized_pnl, 4),
             "opened_at": trade.opened_at,
@@ -846,15 +863,16 @@ class TradeManager:
                 """
                 INSERT OR REPLACE INTO positions (
                     position_id, market, market_title, token_id, condition_id, outcome_side, order_side,
-                    status, entry_price, current_price, size_usdc, shares, market_value, realized_pnl,
-                    net_realized_pnl, unrealized_pnl, confidence, confidence_at_entry, signal_label,
+                    status, entry_price, current_price, size_usdc, negotiated_value_usdc, shares, max_payout_usdc,
+                    market_value, current_value_usdc, realized_pnl, net_realized_pnl, unrealized_pnl, unrealized_pnl_pct,
+                    avg_to_now_price_change, avg_to_now_price_change_pct, confidence, confidence_at_entry, signal_label,
                     close_reason, exit_price, close_fingerprint, is_reconciliation_close, lifecycle_source,
                     entry_model_family, entry_model_version, performance_governor_level, market_family,
                     horizon_bucket, liquidity_bucket, volatility_bucket, technical_regime_bucket,
                     entry_context_complete, learning_eligible, operational_close_flag, reconciliation_close_flag, exit_reason_family,
                     intended_exit_reason, actual_execution_path, exit_fill_latency_seconds, exit_cancel_count,
                     exit_partial_fill_ratio, exit_realized_slippage_bps, market_slug, opened_at, closed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row.get("position_id"),
@@ -868,11 +886,17 @@ class TradeManager:
                     row.get("entry_price"),
                     row.get("current_price"),
                     row.get("size_usdc"),
+                    row.get("negotiated_value_usdc"),
                     row.get("shares"),
+                    row.get("max_payout_usdc"),
                     row.get("market_value"),
+                    row.get("current_value_usdc"),
                     row.get("realized_pnl"),
                     row.get("net_realized_pnl"),
                     row.get("unrealized_pnl"),
+                    row.get("unrealized_pnl_pct"),
+                    row.get("avg_to_now_price_change"),
+                    row.get("avg_to_now_price_change_pct"),
                     row.get("confidence"),
                     row.get("confidence_at_entry"),
                     row.get("signal_label"),
@@ -911,8 +935,9 @@ class TradeManager:
             columns=[
                 "position_id", "market", "market_title", "token_id",
                 "condition_id", "outcome_side", "order_side",
-                "entry_price", "current_price", "size_usdc", "shares",
-                "market_value", "unrealized_pnl", "realized_pnl",
+                "entry_price", "current_price", "size_usdc", "negotiated_value_usdc", "shares", "max_payout_usdc",
+                "market_value", "current_value_usdc", "unrealized_pnl", "unrealized_pnl_pct", "realized_pnl",
+                "avg_to_now_price_change", "avg_to_now_price_change_pct",
                 "net_realized_pnl", "opened_at", "status",
                 "confidence", "confidence_at_entry", "signal_label",
                 "entry_model_family", "entry_model_version", "performance_governor_level",
@@ -932,7 +957,7 @@ class TradeManager:
     def _normalize_reconciled_positions_for_csv(self, reconciled_positions_df: pd.DataFrame) -> pd.DataFrame:
         if reconciled_positions_df is None or reconciled_positions_df.empty:
             return self._empty_positions_frame()
-        df = reconciled_positions_df.copy()
+        df = reconciled_positions_df.loc[:, ~reconciled_positions_df.columns.duplicated()].copy()
         if "token_id" in df.columns:
             df["token_id"] = df["token_id"].astype(str)
         if "entry_price" not in df.columns and "avg_entry_price" in df.columns:
@@ -978,12 +1003,49 @@ class TradeManager:
             df["fast_adverse_move_count"] = pd.to_numeric(df["fast_adverse_move_count"], errors="coerce").fillna(0).astype(int)
         if "size_usdc" not in df.columns:
             df["size_usdc"] = df["shares"] * df["entry_price"]
+        if "negotiated_value_usdc" not in df.columns:
+            df["negotiated_value_usdc"] = pd.to_numeric(df["size_usdc"], errors="coerce").fillna(df["shares"] * df["entry_price"])
+        else:
+            df["negotiated_value_usdc"] = pd.to_numeric(df["negotiated_value_usdc"], errors="coerce").fillna(df["shares"] * df["entry_price"])
+        if "max_payout_usdc" not in df.columns:
+            df["max_payout_usdc"] = df["shares"]
+        else:
+            df["max_payout_usdc"] = pd.to_numeric(df["max_payout_usdc"], errors="coerce").fillna(df["shares"])
         if "market_value" not in df.columns:
             df["market_value"] = df["shares"] * df["current_price"]
+        else:
+            df["market_value"] = pd.to_numeric(df["market_value"], errors="coerce").fillna(df["shares"] * df["current_price"])
+        if "current_value_usdc" not in df.columns:
+            df["current_value_usdc"] = df["market_value"]
+        else:
+            df["current_value_usdc"] = pd.to_numeric(df["current_value_usdc"], errors="coerce").fillna(df["market_value"])
         if "unrealized_pnl" not in df.columns:
             df["unrealized_pnl"] = df["shares"] * (df["current_price"] - df["entry_price"])
+        else:
+            df["unrealized_pnl"] = pd.to_numeric(df["unrealized_pnl"], errors="coerce").fillna(df["shares"] * (df["current_price"] - df["entry_price"]))
+        fallback_unrealized_pnl_pct = pd.Series(
+            np.where(df["negotiated_value_usdc"] > 0, df["unrealized_pnl"] / df["negotiated_value_usdc"], 0.0),
+            index=df.index,
+        )
+        if "unrealized_pnl_pct" not in df.columns:
+            df["unrealized_pnl_pct"] = fallback_unrealized_pnl_pct
+        else:
+            df["unrealized_pnl_pct"] = pd.to_numeric(df["unrealized_pnl_pct"], errors="coerce").fillna(fallback_unrealized_pnl_pct)
+        if "avg_to_now_price_change" not in df.columns:
+            df["avg_to_now_price_change"] = df["current_price"] - df["entry_price"]
+        else:
+            df["avg_to_now_price_change"] = pd.to_numeric(df["avg_to_now_price_change"], errors="coerce").fillna(df["current_price"] - df["entry_price"])
+        fallback_avg_to_now_price_change_pct = pd.Series(
+            np.where(df["entry_price"] > 0, (df["current_price"] - df["entry_price"]) / df["entry_price"], 0.0),
+            index=df.index,
+        )
+        if "avg_to_now_price_change_pct" not in df.columns:
+            df["avg_to_now_price_change_pct"] = fallback_avg_to_now_price_change_pct
+        else:
+            df["avg_to_now_price_change_pct"] = pd.to_numeric(df["avg_to_now_price_change_pct"], errors="coerce").fillna(fallback_avg_to_now_price_change_pct)
         if "realized_pnl" not in df.columns:
-            df["realized_pnl"] = pd.to_numeric(df.get("realized_pnl", 0.0), errors="coerce").fillna(0.0)
+            realized_series = df["realized_pnl"] if "realized_pnl" in df.columns else pd.Series(0.0, index=df.index)
+            df["realized_pnl"] = pd.to_numeric(realized_series, errors="coerce").fillna(0.0)
         if "net_realized_pnl" not in df.columns:
             df["net_realized_pnl"] = pd.to_numeric(df["realized_pnl"], errors="coerce").fillna(0.0)
         if "opened_at" not in df.columns:

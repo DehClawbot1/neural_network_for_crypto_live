@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+from btc_threshold_guard import find_conflicting_btc_price_threshold_position
 
 try:
     from sb3_contrib import RecurrentPPO
@@ -158,6 +159,17 @@ RAW_CANDIDATE_LOG_COLUMNS = [
     "market_structure_score",
     "volatility_risk",
     "time_decay_score",
+    "open_positions_count",
+    "open_positions_negotiated_value_total",
+    "open_positions_max_payout_total",
+    "open_positions_current_value_total",
+    "open_positions_unrealized_pnl_total",
+    "open_positions_unrealized_pnl_pct_total",
+    "open_positions_avg_to_now_price_change_pct_mean",
+    "open_positions_avg_to_now_price_change_pct_min",
+    "open_positions_avg_to_now_price_change_pct_max",
+    "open_positions_winner_count",
+    "open_positions_loser_count",
     "raw_size",
     "market_url",
 ]
@@ -199,6 +211,17 @@ RANKED_SIGNAL_LOG_COLUMNS = [
     "market_structure_score",
     "volatility_risk",
     "time_decay_score",
+    "open_positions_count",
+    "open_positions_negotiated_value_total",
+    "open_positions_max_payout_total",
+    "open_positions_current_value_total",
+    "open_positions_unrealized_pnl_total",
+    "open_positions_unrealized_pnl_pct_total",
+    "open_positions_avg_to_now_price_change_pct_mean",
+    "open_positions_avg_to_now_price_change_pct_min",
+    "open_positions_avg_to_now_price_change_pct_max",
+    "open_positions_winner_count",
+    "open_positions_loser_count",
     "edge_score",
     "expected_return",
     "p_tp_before_sl",
@@ -293,15 +316,39 @@ def safe_read_csv(path):
 
 
 def append_csv_record(path, record):
-    from csv_utils import safe_csv_append
-    safe_csv_append(path, pd.DataFrame([record]))
+    append_csv_frame(path, pd.DataFrame([record]))
 
 
 def append_csv_frame(path, df):
     if df is None or df.empty:
         return
     from csv_utils import safe_csv_append
-    safe_csv_append(path, df)
+    csv_path = Path(path)
+    if not csv_path.exists() or csv_path.stat().st_size == 0:
+        safe_csv_append(csv_path, df)
+        return
+
+    try:
+        existing_header = pd.read_csv(csv_path, nrows=0, engine="python", on_bad_lines="skip")
+        existing_columns = existing_header.columns.tolist()
+    except Exception:
+        existing_columns = []
+
+    ordered_columns = list(existing_columns)
+    for column in df.columns:
+        if column not in ordered_columns:
+            ordered_columns.append(column)
+
+    schema_changed = bool(existing_columns) and ordered_columns != existing_columns
+    append_df = df.reindex(columns=ordered_columns)
+    if schema_changed:
+        try:
+            existing_df = pd.read_csv(csv_path, engine="python", on_bad_lines="skip")
+        except Exception:
+            existing_df = pd.DataFrame(columns=existing_columns)
+        existing_df = existing_df.reindex(columns=ordered_columns)
+        existing_df.to_csv(csv_path, index=False)
+    safe_csv_append(csv_path, append_df)
 
 
 def _is_truthy(value) -> bool:
@@ -440,6 +487,17 @@ def log_ranked_signal(signal_row):
         "market_structure_score": signal_row.get("market_structure_score"),
         "volatility_risk": signal_row.get("volatility_risk"),
         "time_decay_score": signal_row.get("time_decay_score"),
+        "open_positions_count": signal_row.get("open_positions_count"),
+        "open_positions_negotiated_value_total": signal_row.get("open_positions_negotiated_value_total"),
+        "open_positions_max_payout_total": signal_row.get("open_positions_max_payout_total"),
+        "open_positions_current_value_total": signal_row.get("open_positions_current_value_total"),
+        "open_positions_unrealized_pnl_total": signal_row.get("open_positions_unrealized_pnl_total"),
+        "open_positions_unrealized_pnl_pct_total": signal_row.get("open_positions_unrealized_pnl_pct_total"),
+        "open_positions_avg_to_now_price_change_pct_mean": signal_row.get("open_positions_avg_to_now_price_change_pct_mean"),
+        "open_positions_avg_to_now_price_change_pct_min": signal_row.get("open_positions_avg_to_now_price_change_pct_min"),
+        "open_positions_avg_to_now_price_change_pct_max": signal_row.get("open_positions_avg_to_now_price_change_pct_max"),
+        "open_positions_winner_count": signal_row.get("open_positions_winner_count"),
+        "open_positions_loser_count": signal_row.get("open_positions_loser_count"),
         "edge_score": signal_row.get("edge_score"),
         "expected_return": signal_row.get("expected_return"),
         "p_tp_before_sl": signal_row.get("p_tp_before_sl"),
@@ -449,6 +507,116 @@ def log_ranked_signal(signal_row):
     }
     record = {key: record.get(key) for key in RANKED_SIGNAL_LOG_COLUMNS}
     append_csv_record(SIGNALS_FILE, record)
+
+
+def _active_trades_to_positions_frame(active_trades):
+    rows = []
+    for trade in active_trades or []:
+        entry_price = _safe_float(getattr(trade, "entry_price", 0.0), default=0.0)
+        current_price = _safe_float(getattr(trade, "current_price", entry_price), default=entry_price)
+        shares = _safe_float(getattr(trade, "shares", 0.0), default=0.0)
+        negotiated_value_usdc = _safe_float(getattr(trade, "size_usdc", entry_price * shares), default=entry_price * shares)
+        current_value_usdc = _safe_float(getattr(trade, "market_value", current_price * shares), default=current_price * shares)
+        unrealized_pnl_total = _safe_float(
+            getattr(trade, "unrealized_pnl", current_value_usdc - negotiated_value_usdc),
+            default=current_value_usdc - negotiated_value_usdc,
+        )
+        avg_to_now_price_change = current_price - entry_price
+        rows.append(
+            {
+                "negotiated_value_usdc": negotiated_value_usdc,
+                "max_payout_usdc": _safe_float(getattr(trade, "max_payout_usdc", shares), default=shares),
+                "current_value_usdc": current_value_usdc,
+                "unrealized_pnl": unrealized_pnl_total,
+                "unrealized_pnl_pct": _safe_float(
+                    getattr(
+                        trade,
+                        "unrealized_pnl_pct",
+                        (unrealized_pnl_total / negotiated_value_usdc) if negotiated_value_usdc > 0 else 0.0,
+                    ),
+                    default=(unrealized_pnl_total / negotiated_value_usdc) if negotiated_value_usdc > 0 else 0.0,
+                ),
+                "avg_to_now_price_change_pct": _safe_float(
+                    getattr(
+                        trade,
+                        "avg_to_now_price_change_pct",
+                        (avg_to_now_price_change / entry_price) if entry_price > 0 else 0.0,
+                    ),
+                    default=(avg_to_now_price_change / entry_price) if entry_price > 0 else 0.0,
+                ),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def summarize_open_position_context(positions_df: pd.DataFrame | None = None, active_trades=None) -> dict:
+    work = positions_df.copy() if positions_df is not None and not positions_df.empty else _active_trades_to_positions_frame(active_trades)
+    if work is None or work.empty:
+        return {
+            "open_positions_count": 0,
+            "open_positions_negotiated_value_total": 0.0,
+            "open_positions_max_payout_total": 0.0,
+            "open_positions_current_value_total": 0.0,
+            "open_positions_unrealized_pnl_total": 0.0,
+            "open_positions_unrealized_pnl_pct_total": 0.0,
+            "open_positions_avg_to_now_price_change_pct_mean": 0.0,
+            "open_positions_avg_to_now_price_change_pct_min": 0.0,
+            "open_positions_avg_to_now_price_change_pct_max": 0.0,
+            "open_positions_winner_count": 0,
+            "open_positions_loser_count": 0,
+        }
+
+    shares = pd.to_numeric(work.get("shares", 0.0), errors="coerce").fillna(0.0)
+    entry_price = pd.to_numeric(work.get("entry_price", work.get("avg_entry_price", 0.0)), errors="coerce").fillna(0.0)
+    current_price = pd.to_numeric(work.get("current_price", work.get("mark_price", entry_price)), errors="coerce").fillna(entry_price)
+    negotiated = pd.to_numeric(work.get("negotiated_value_usdc", work.get("size_usdc", entry_price * shares)), errors="coerce").fillna(entry_price * shares)
+    max_payout = pd.to_numeric(work.get("max_payout_usdc", shares), errors="coerce").fillna(shares)
+    current_value = pd.to_numeric(
+        work.get("current_value_usdc", work.get("market_value", current_price * shares)),
+        errors="coerce",
+    ).fillna(current_price * shares)
+    unrealized = pd.to_numeric(
+        work.get("unrealized_pnl", current_value - negotiated),
+        errors="coerce",
+    ).fillna(0.0)
+    avg_change_pct = pd.to_numeric(
+        work.get(
+            "avg_to_now_price_change_pct",
+            work.get("price_change_pct", np.where(entry_price > 0, (current_price - entry_price) / entry_price, 0.0)),
+        ),
+        errors="coerce",
+    ).fillna(0.0)
+    unrealized_pct = pd.to_numeric(
+        work.get(
+            "unrealized_pnl_pct",
+            np.where(negotiated > 0, unrealized / negotiated, 0.0),
+        ),
+        errors="coerce",
+    ).fillna(0.0)
+
+    return {
+        "open_positions_count": int(len(work)),
+        "open_positions_negotiated_value_total": float(negotiated.sum()),
+        "open_positions_max_payout_total": float(max_payout.sum()),
+        "open_positions_current_value_total": float(current_value.sum()),
+        "open_positions_unrealized_pnl_total": float(unrealized.sum()),
+        "open_positions_unrealized_pnl_pct_total": float(unrealized.sum() / negotiated.sum()) if float(negotiated.sum()) > 0 else 0.0,
+        "open_positions_avg_to_now_price_change_pct_mean": float(avg_change_pct.mean()) if len(avg_change_pct) else 0.0,
+        "open_positions_avg_to_now_price_change_pct_min": float(avg_change_pct.min()) if len(avg_change_pct) else 0.0,
+        "open_positions_avg_to_now_price_change_pct_max": float(avg_change_pct.max()) if len(avg_change_pct) else 0.0,
+        "open_positions_winner_count": int((unrealized_pct > 0).sum()),
+        "open_positions_loser_count": int((unrealized_pct < 0).sum()),
+    }
+
+
+def attach_open_position_context(signals_df: pd.DataFrame, positions_df: pd.DataFrame | None = None, active_trades=None):
+    if signals_df is None or signals_df.empty:
+        return signals_df, summarize_open_position_context(positions_df=positions_df, active_trades=active_trades)
+    context = summarize_open_position_context(positions_df=positions_df, active_trades=active_trades)
+    work = signals_df.copy()
+    for key, value in context.items():
+        work[key] = value
+    return work, context
 
 
 def choose_action(
@@ -1987,6 +2155,21 @@ def main_loop():
                 extra=entry_signal_filter_stats,
             )
 
+            pre_cycle_positions_df = locals().get("pre_positions_df")
+            if pre_cycle_positions_df is None or (hasattr(pre_cycle_positions_df, "empty") and pre_cycle_positions_df.empty):
+                pre_cycle_positions_df = pd.DataFrame([trade.__dict__ for trade in trade_manager.active_trades.values()]) if trade_manager.active_trades else pd.DataFrame()
+            entry_signals_df, open_position_context = attach_open_position_context(
+                entry_signals_df,
+                positions_df=pre_cycle_positions_df,
+                active_trades=list(trade_manager.active_trades.values()),
+            )
+            autonomous_monitor.write_heartbeat(
+                "signal_engine",
+                status="ok",
+                message="entry_position_context_applied",
+                extra=open_position_context,
+            )
+
             if entry_signals_df is not None and not entry_signals_df.empty:
                 entry_signals_df = entry_signals_df.loc[:, ~entry_signals_df.columns.duplicated()]
             features_df = feature_builder.build_features(entry_signals_df, markets_df)
@@ -2853,6 +3036,17 @@ def main_loop():
                     "btc_live_source_quality_score",
                     "btc_live_source_divergence_bps",
                     "btc_live_mark_index_basis_bps",
+                    "open_positions_count",
+                    "open_positions_negotiated_value_total",
+                    "open_positions_max_payout_total",
+                    "open_positions_current_value_total",
+                    "open_positions_unrealized_pnl_total",
+                    "open_positions_unrealized_pnl_pct_total",
+                    "open_positions_avg_to_now_price_change_pct_mean",
+                    "open_positions_avg_to_now_price_change_pct_min",
+                    "open_positions_avg_to_now_price_change_pct_max",
+                    "open_positions_winner_count",
+                    "open_positions_loser_count",
                 ):
                     if live_field not in detail_payload:
                         detail_payload[live_field] = signal_row.get(live_field)
@@ -3277,6 +3471,24 @@ def main_loop():
                             **signal_quality_context,
                         }
                     )
+                    threshold_conflict = find_conflicting_btc_price_threshold_position(
+                        signal_row.to_dict() if hasattr(signal_row, "to_dict") else dict(signal_row),
+                        current_active_trades,
+                    )
+                    if threshold_conflict:
+                        existing = threshold_conflict["existing"]
+                        _log_candidate_skip(
+                            signal_row,
+                            "btc_threshold_conflict",
+                            gate="portfolio_consistency",
+                            conflicting_market=existing.get("market") or existing.get("market_title"),
+                            conflicting_condition_id=existing.get("condition_id"),
+                            conflicting_outcome_side=existing.get("outcome_side"),
+                            conflicting_threshold_price=round(float(existing.get("threshold_price", 0.0) or 0.0), 2),
+                            candidate_threshold_price=round(float(threshold_conflict["candidate_threshold_price"]), 2),
+                            expiry_key=threshold_conflict["expiry_key"],
+                        )
+                        continue
                     governor_min_conf = float(governor_state.get("min_confidence", 0.0) or 0.0)
                     if governor_min_conf > 0 and confidence < governor_min_conf:
                         _log_candidate_skip(
@@ -3631,6 +3843,7 @@ def main_loop():
                         rule_liquidity_metric=rule_eval.get("liquidity_metric") if isinstance(rule_eval, dict) else None,
                         rule_liquidity_value=rule_eval.get("liquidity_value") if isinstance(rule_eval, dict) else None,
                         rule_liquidity_threshold=rule_eval.get("liquidity_threshold") if isinstance(rule_eval, dict) else None,
+                        portfolio_pressure_penalty=rule_eval.get("portfolio_pressure_penalty") if isinstance(rule_eval, dict) else None,
                         rule_vetoed_rl_action=bool(_action_meta.get("rule_vetoed_rl_action")),
                         rule_vetoed_action=vetoed_action,
                     )

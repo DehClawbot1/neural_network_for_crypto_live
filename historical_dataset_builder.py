@@ -84,6 +84,7 @@ class HistoricalDatasetBuilder:
         btc_targets_df = self._safe_read("btc_targets.csv")
         btc_live_df = self._safe_read("btc_live_snapshot.csv")
         technical_regime_df = self._safe_read("technical_regime_snapshot.csv")
+        portfolio_curve_df = self._safe_read("portfolio_equity_curve.csv")
 
         if signals_df.empty:
             return pd.DataFrame()
@@ -249,6 +250,46 @@ class HistoricalDatasetBuilder:
                 ]
                 regime_view = technical_regime_df[regime_cols].sort_values(ts_col).rename(columns={ts_col: "timestamp"})
                 dataset = self._safe_merge_asof(dataset, regime_view, on="timestamp")
+                dataset = self._dedupe_columns(dataset)
+
+        if not portfolio_curve_df.empty and "timestamp" in dataset.columns and "timestamp" in portfolio_curve_df.columns:
+            portfolio_curve_df = portfolio_curve_df.copy()
+            portfolio_curve_df["timestamp"] = pd.to_datetime(portfolio_curve_df["timestamp"], utc=True, errors="coerce")
+            portfolio_curve_df = portfolio_curve_df[portfolio_curve_df["timestamp"].notna()].copy()
+            if not portfolio_curve_df.empty:
+                portfolio_curve_df = portfolio_curve_df.sort_values("timestamp")
+                portfolio_curve_df["open_positions_unrealized_pnl_pct_total"] = (
+                    pd.to_numeric(portfolio_curve_df.get("unrealized_pnl", 0.0), errors="coerce").fillna(0.0)
+                    / pd.to_numeric(portfolio_curve_df.get("entry_notional", 0.0), errors="coerce").replace(0, pd.NA)
+                ).fillna(0.0)
+                portfolio_view = portfolio_curve_df.rename(
+                    columns={
+                        "open_positions": "open_positions_count",
+                        "entry_notional": "open_positions_negotiated_value_total",
+                        "gross_market_value": "open_positions_current_value_total",
+                        "unrealized_pnl": "open_positions_unrealized_pnl_total",
+                    }
+                )
+                portfolio_cols = [
+                    c
+                    for c in [
+                        "timestamp",
+                        "open_positions_count",
+                        "open_positions_negotiated_value_total",
+                        "open_positions_current_value_total",
+                        "open_positions_unrealized_pnl_total",
+                        "open_positions_unrealized_pnl_pct_total",
+                    ]
+                    if c in portfolio_view.columns
+                ]
+                merged = self._safe_merge_asof(dataset, portfolio_view[portfolio_cols], on="timestamp")
+                for col in portfolio_cols:
+                    if col == "timestamp" or col not in merged.columns:
+                        continue
+                    if col not in dataset.columns:
+                        dataset[col] = merged[col]
+                    else:
+                        dataset[col] = dataset[col].fillna(merged[col])
                 dataset = self._dedupe_columns(dataset)
 
         if "best_ask" in dataset.columns and "best_bid" in dataset.columns:

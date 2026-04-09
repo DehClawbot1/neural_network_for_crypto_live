@@ -277,7 +277,34 @@ def _write_markdown_report(
     report_path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def _run_one_cycle_safely() -> str:
+def _seeded_open_position_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "position_key": "audit-seed|btc-above-72k-apr14|YES",
+                "token_id": "audit-seed-token",
+                "condition_id": "audit-seed-condition",
+                "outcome_side": "YES",
+                "market": "Audit Seed - BTC Above 72k",
+                "market_title": "Audit Seed - BTC Above 72k",
+                "entry_price": 0.39,
+                "current_price": 0.34,
+                "shares": 7.4,
+                "size_usdc": 2.886,
+                "negotiated_value_usdc": 2.886,
+                "max_payout_usdc": 7.4,
+                "market_value": 2.516,
+                "current_value_usdc": 2.516,
+                "unrealized_pnl": -0.37,
+                "unrealized_pnl_pct": -0.1282,
+                "avg_to_now_price_change_pct": -0.1282,
+                "status": "OPEN",
+            }
+        ]
+    )
+
+
+def _run_one_cycle_safely(seed_open_position: bool = False) -> str:
     import supervisor
 
     class _StopAfterCycle(KeyboardInterrupt):
@@ -288,6 +315,8 @@ def _run_one_cycle_safely() -> str:
     original_submit_market_entry = supervisor.OrderManager.submit_market_entry
     original_wait_for_fill = supervisor.OrderManager.wait_for_fill
     original_cancel_stale_order = supervisor.OrderManager.cancel_stale_order
+    original_get_enriched_open_positions = supervisor.LivePositionBook.get_enriched_open_positions
+    seeded_positions_df = _seeded_open_position_frame() if seed_open_position else pd.DataFrame()
 
     def _audit_submit(self, *args, **kwargs):
         return {"reason": "audit_no_submit"}, {"reason": "audit_no_submit"}
@@ -304,11 +333,21 @@ def _run_one_cycle_safely() -> str:
             raise _StopAfterCycle("decision audit finished after one cycle")
         return result
 
+    def _audit_get_enriched_open_positions(self, scored_df=None):
+        base = original_get_enriched_open_positions(self, scored_df=scored_df)
+        if not seed_open_position:
+            return base
+        if base is None or base.empty:
+            return seeded_positions_df.copy()
+        combined = pd.concat([base.copy(), seeded_positions_df.copy()], ignore_index=True, sort=False)
+        return combined.loc[:, ~combined.columns.duplicated()].copy()
+
     supervisor.OrderManager.submit_entry = _audit_submit
     supervisor.OrderManager.submit_market_entry = _audit_submit
     supervisor.OrderManager.wait_for_fill = _audit_wait
     supervisor.OrderManager.cancel_stale_order = _audit_cancel
     supervisor.append_csv_record = _append_and_stop
+    supervisor.LivePositionBook.get_enriched_open_positions = _audit_get_enriched_open_positions
 
     os.environ.setdefault("ENABLE_LIVE_RETRAIN", "false")
 
@@ -320,6 +359,7 @@ def _run_one_cycle_safely() -> str:
         supervisor.OrderManager.submit_market_entry = original_submit_market_entry
         supervisor.OrderManager.wait_for_fill = original_wait_for_fill
         supervisor.OrderManager.cancel_stale_order = original_cancel_stale_order
+        supervisor.LivePositionBook.get_enriched_open_positions = original_get_enriched_open_positions
 
     stats_df = _read_csv(CANDIDATE_CYCLE_STATS_CSV)
     cycle_id = _latest_cycle_id_from_stats(stats_df)
@@ -350,6 +390,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Only summarize existing cycles without generating a new safe audit cycle.",
     )
+    parser.add_argument(
+        "--seed-open-position",
+        action="store_true",
+        help="Inject a synthetic underwater open position into the live position view during the safe audit cycle.",
+    )
     return parser
 
 
@@ -365,7 +410,7 @@ def main() -> int:
     fresh_generated = False
     fresh_cycle_id = _latest_cycle_id_from_stats(stats_df)
     if not args.skip_fresh_run:
-        fresh_cycle_id = _run_one_cycle_safely()
+        fresh_cycle_id = _run_one_cycle_safely(seed_open_position=bool(args.seed_open_position))
         fresh_generated = True
         decisions_df = _read_csv(CANDIDATE_DECISIONS_CSV)
         stats_df = _read_csv(CANDIDATE_CYCLE_STATS_CSV)
@@ -383,6 +428,7 @@ def main() -> int:
         "baseline_cycle_id": baseline_cycle_id,
         "fresh_cycle_id": fresh_cycle_id,
         "fresh_cycle_generated": fresh_generated,
+        "seed_open_position": bool(args.seed_open_position),
         "baseline": baseline_report,
         "fresh": fresh_report,
         "reject_diff": _diff_counts(baseline_report.get("reject_counts", {}), fresh_report.get("reject_counts", {})),

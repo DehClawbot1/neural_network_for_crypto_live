@@ -12,7 +12,15 @@ class TestContractTargetBuilder(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             logs = Path(tmp)
             pd.DataFrame([
-                {"market": "BTC Test", "timestamp": "2026-03-22T00:00:00Z", "token_id": "1", "side": "YES", "confidence": 0.8}
+                {
+                    "market": "BTC Test",
+                    "timestamp": "2026-03-22T00:00:00Z",
+                    "token_id": "1",
+                    "side": "YES",
+                    "confidence": 0.8,
+                    "open_positions_count": 2,
+                    "open_positions_unrealized_pnl_pct_total": -0.04,
+                }
             ]).to_csv(logs / "signals.csv", index=False)
             pd.DataFrame([
                 {"question": "BTC Test", "yes_token_id": "1", "no_token_id": "2"}
@@ -27,6 +35,8 @@ class TestContractTargetBuilder(unittest.TestCase):
             self.assertFalse(df.empty)
             self.assertIn("forward_return_15m", df.columns)
             self.assertIn("tp_before_sl_60m", df.columns)
+            self.assertEqual(int(df.iloc[0]["open_positions_count"]), 2)
+            self.assertAlmostEqual(float(df.iloc[0]["open_positions_unrealized_pnl_pct_total"]), -0.04)
 
 
 if __name__ == "__main__":
