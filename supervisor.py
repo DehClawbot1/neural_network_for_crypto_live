@@ -1039,21 +1039,64 @@ def split_entry_pipeline_signals(signals_df: pd.DataFrame) -> tuple[pd.DataFrame
     Keep analytics and consensus signals upstream, but exclude analytics-only
     sources from the live entry scoring funnel.
     """
+    def _column_as_series(frame: pd.DataFrame, column_name: str, default_value):
+        if column_name not in frame.columns:
+            return pd.Series([default_value] * len(frame), index=frame.index)
+
+        raw = frame.loc[:, column_name]
+        if isinstance(raw, pd.DataFrame):
+            if raw.empty:
+                return pd.Series([default_value] * len(frame), index=frame.index)
+            series = raw.bfill(axis=1).iloc[:, 0]
+        elif isinstance(raw, pd.Series):
+            series = raw
+        else:
+            try:
+                series = pd.Series(raw, index=frame.index)
+            except Exception:
+                values = list(raw) if hasattr(raw, "__iter__") and not isinstance(raw, (str, bytes)) else [raw] * len(frame)
+                series = pd.Series(values)
+
+        series = series.reset_index(drop=True)
+        if len(series) < len(frame):
+            series = series.reindex(range(len(frame)), fill_value=default_value)
+        elif len(series) > len(frame):
+            series = series.iloc[: len(frame)]
+        series.index = frame.index
+        return series
+
+    def _boolify_series(series: pd.Series, default_value: bool = False) -> pd.Series:
+        def _coerce(value):
+            if isinstance(value, bool):
+                return value
+            if pd.isna(value):
+                return default_value
+            if isinstance(value, (int, float)) and value in (0, 1):
+                return bool(value)
+            text = str(value).strip().lower()
+            if text in {"1", "true", "yes", "on"}:
+                return True
+            if text in {"0", "false", "no", "off", "", "nan", "none", "null"}:
+                return False
+            return bool(value)
+
+        return series.map(_coerce).astype(bool)
+
     if signals_df is None or signals_df.empty:
         return signals_df, {"dropped_rows": 0, "dropped_global_btc_scan": 0, "dropped_stale_wallet_entries": 0}
     if "signal_source" not in signals_df.columns:
         return signals_df.copy(), {"dropped_rows": 0, "dropped_global_btc_scan": 0, "dropped_stale_wallet_entries": 0}
 
     work = signals_df.copy()
-    signal_source = work["signal_source"].fillna("").astype(str).str.strip().str.lower()
+    signal_source = _column_as_series(work, "signal_source", "").fillna("").astype(str).str.strip().str.lower()
     analytics_only_mask = signal_source.eq("global_btc_scan")
 
     if "entry_intent" in work.columns:
-        entry_intent = work["entry_intent"].fillna("").astype(str).str.strip().str.upper()
+        entry_intent = _column_as_series(work, "entry_intent", "").fillna("").astype(str).str.strip().str.upper()
     else:
         entry_intent = pd.Series([""] * len(work), index=work.index)
     if "source_wallet_fresh" in work.columns:
-        source_wallet_fresh = work["source_wallet_fresh"].fillna(False).astype(bool)
+        source_wallet_fresh = _boolify_series(_column_as_series(work, "source_wallet_fresh", False), default_value=False)
     else:
         source_wallet_fresh = pd.Series([True] * len(work), index=work.index)
     stale_wallet_entry_mask = entry_intent.eq("OPEN_LONG") & ~source_wallet_fresh
