@@ -492,7 +492,7 @@ Activated when recent live performance drops below thresholds. Reduces position 
 | `GOV_LEVEL1_MAX_RL_EXIT_RATE` | `0.45` | Trigger if RL-driven exit share exceeds this |
 | `GOV_LEVEL1_MAX_OPERATIONAL_CLOSE_RATE` | `0.15` | Trigger if operational close share exceeds this |
 | `GOV_LEVEL1_SIZE_MULTIPLIER` | `0.35` | Position size multiplier when Level 1 is active |
-| `GOV_LEVEL1_MIN_ENTRY_CONFIDENCE` | `0.68` | Minimum model confidence required to enter a trade |
+| `GOV_LEVEL1_MIN_ENTRY_CONFIDENCE` | `0.15` | Minimum model confidence required to enter a trade |
 | `GOV_LEVEL1_MIN_LIQUIDITY_SCORE` | `0.50` | Minimum market liquidity score required |
 
 #### Performance Governor Level 2 (Maximum Protection)
@@ -508,7 +508,7 @@ Most restrictive mode. Only the top signal is considered, minimum sizes enforced
 | `GOV_LEVEL2_MAX_RL_EXIT_RATE` | `0.60` | Trigger if RL-driven exit share exceeds this |
 | `GOV_LEVEL2_MAX_OPERATIONAL_CLOSE_RATE` | `0.10` | Trigger if operational close share exceeds this |
 | `GOV_LEVEL2_SIZE_MULTIPLIER` | `0.20` | Position size multiplier when Level 2 is active |
-| `GOV_LEVEL2_MIN_ENTRY_CONFIDENCE` | `0.35` | Minimum model confidence required to enter a trade |
+| `GOV_LEVEL2_MIN_ENTRY_CONFIDENCE` | `0.10` | Minimum model confidence required to enter a trade |
 | `GOV_LEVEL2_MIN_LIQUIDITY_SCORE` | `0.70` | Minimum market liquidity score required |
 
 #### Model Promotion Gates

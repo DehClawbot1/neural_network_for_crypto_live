@@ -866,6 +866,58 @@ def compute_leaderboard_consensus(signals_df: pd.DataFrame, market_slug_prefix: 
     return result
 
 
+def split_entry_pipeline_signals(signals_df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """
+    Keep analytics and consensus signals upstream, but exclude analytics-only
+    sources from the live entry scoring funnel.
+    """
+    if signals_df is None or signals_df.empty:
+        return signals_df, {"dropped_rows": 0, "dropped_global_btc_scan": 0, "dropped_stale_wallet_entries": 0}
+    if "signal_source" not in signals_df.columns:
+        return signals_df.copy(), {"dropped_rows": 0, "dropped_global_btc_scan": 0, "dropped_stale_wallet_entries": 0}
+
+    work = signals_df.copy()
+    signal_source = work["signal_source"].fillna("").astype(str).str.strip().str.lower()
+    analytics_only_mask = signal_source.eq("global_btc_scan")
+
+    if "entry_intent" in work.columns:
+        entry_intent = work["entry_intent"].fillna("").astype(str).str.strip().str.upper()
+    else:
+        entry_intent = pd.Series([""] * len(work), index=work.index)
+    if "source_wallet_fresh" in work.columns:
+        source_wallet_fresh = work["source_wallet_fresh"].fillna(False).astype(bool)
+    else:
+        source_wallet_fresh = pd.Series([True] * len(work), index=work.index)
+    stale_wallet_entry_mask = entry_intent.eq("OPEN_LONG") & ~source_wallet_fresh
+
+    drop_mask = analytics_only_mask | stale_wallet_entry_mask
+    dropped_rows = int(drop_mask.sum())
+    filtered = work.loc[~drop_mask].reset_index(drop=True)
+    return filtered, {
+        "dropped_rows": dropped_rows,
+        "dropped_global_btc_scan": int(analytics_only_mask.sum()),
+        "dropped_stale_wallet_entries": int(stale_wallet_entry_mask.sum()),
+    }
+
+
+def should_soften_wallet_state_conflict(signal_row) -> bool:
+    entry_intent = str(signal_row.get("entry_intent", "") or "").upper()
+    if entry_intent != "OPEN_LONG":
+        return False
+    if not bool(signal_row.get("wallet_conflict_with_stronger", False)):
+        return False
+    position_event = str(signal_row.get("source_wallet_position_event", "") or "").upper()
+    if position_event != "SCALE_IN":
+        return False
+    raw_reason = str(signal_row.get("wallet_state_gate_reason") or "").strip().replace("|", ",")
+    reason_tokens = {
+        token.strip()
+        for token in raw_reason.split(",")
+        if token and token.strip()
+    }
+    return bool(reason_tokens) and reason_tokens == {"conflict_with_stronger_wallet"}
+
+
 def main_loop():
     """The continuous autonomous loop (research + paper-trading mode)."""
     global _shutdown_requested
@@ -887,6 +939,11 @@ def main_loop():
         TradingConfig.CAPITAL_RESERVE_PCT * 100,
         TradingConfig.HARD_MAX_BET_USDC,
         TradingConfig.MAX_CONCURRENT_POSITIONS,
+    )
+    logging.info(
+        "Governor confidence thresholds: level1=%s level2=%s",
+        os.getenv("GOV_LEVEL1_MIN_ENTRY_CONFIDENCE", "0.15"),
+        os.getenv("GOV_LEVEL2_MIN_ENTRY_CONFIDENCE", "0.10"),
     )
 
     def _env_int(name: str, default: int, minimum: int = 0, maximum: int = 100000) -> int:
@@ -1917,8 +1974,22 @@ def main_loop():
             previous_markets_df = markets_df.copy()
 
             # 3. Build features, run supervised inference, and score paper-trading opportunities
-            if signals_df is not None and not signals_df.empty: signals_df = signals_df.loc[:, ~signals_df.columns.duplicated()]
-            features_df = feature_builder.build_features(signals_df, markets_df)
+            entry_signals_df, entry_signal_filter_stats = split_entry_pipeline_signals(signals_df)
+            if entry_signal_filter_stats.get("dropped_rows", 0) > 0:
+                logging.info(
+                    "Entry pipeline dropped %d analytics-only scraper signals before feature scoring.",
+                    entry_signal_filter_stats.get("dropped_rows", 0),
+                )
+            autonomous_monitor.write_heartbeat(
+                "signal_engine",
+                status="ok",
+                message="entry_signal_filter_applied",
+                extra=entry_signal_filter_stats,
+            )
+
+            if entry_signals_df is not None and not entry_signals_df.empty:
+                entry_signals_df = entry_signals_df.loc[:, ~entry_signals_df.columns.duplicated()]
+            features_df = feature_builder.build_features(entry_signals_df, markets_df)
             if features_df is not None: features_df = features_df.loc[:, ~features_df.columns.duplicated()].copy()
             if features_df is not None and not features_df.empty: features_df = features_df.loc[:, ~features_df.columns.duplicated()]
             log_raw_candidates(features_df)
@@ -3044,18 +3115,28 @@ def main_loop():
                     continue
                 wallet_state_gate_pass = bool(signal_row.get("wallet_state_gate_pass", True))
                 if entry_intent == "OPEN_LONG" and not wallet_state_gate_pass:
-                    _log_candidate_skip(
-                        signal_row,
-                        "wallet_state_gate_failed",
-                        gate="wallet_state",
-                        wallet_state_gate_reason=signal_row.get("wallet_state_gate_reason"),
-                        wallet_watchlist_approved=bool(signal_row.get("wallet_watchlist_approved", True)),
-                        wallet_quality_score=_safe_float(signal_row.get("wallet_quality_score", 0.0), default=0.0),
-                        wallet_fresh=bool(signal_row.get("source_wallet_fresh", False)),
-                        wallet_conflict_with_stronger=bool(signal_row.get("wallet_conflict_with_stronger", False)),
-                        source_wallet_position_event=signal_row.get("source_wallet_position_event"),
-                    )
-                    continue
+                    if should_soften_wallet_state_conflict(signal_row):
+                        signal_row = signal_row.copy()
+                        signal_row["wallet_state_gate_soft_override"] = True
+                        signal_row["wallet_state_gate_original_pass"] = False
+                        signal_row["wallet_state_gate_pass"] = True
+                    else:
+                        _log_candidate_skip(
+                            signal_row,
+                            "wallet_state_gate_failed",
+                            gate="wallet_state",
+                            wallet_state_gate_reason=signal_row.get("wallet_state_gate_reason"),
+                            wallet_watchlist_approved=bool(signal_row.get("wallet_watchlist_approved", True)),
+                            wallet_quality_score=_safe_float(signal_row.get("wallet_quality_score", 0.0), default=0.0),
+                            wallet_fresh=bool(signal_row.get("source_wallet_fresh", False)),
+                            wallet_conflict_with_stronger=bool(signal_row.get("wallet_conflict_with_stronger", False)),
+                            wallet_agreement_score=_safe_float(signal_row.get("wallet_agreement_score", 0.0), default=0.0),
+                            wallet_stronger_conflict_score=_safe_float(signal_row.get("wallet_stronger_conflict_score", 0.0), default=0.0),
+                            wallet_support_strength=_safe_float(signal_row.get("wallet_support_strength", 0.0), default=0.0),
+                            source_wallet_direction_confidence=_safe_float(signal_row.get("source_wallet_direction_confidence", 0.0), default=0.0),
+                            source_wallet_position_event=signal_row.get("source_wallet_position_event"),
+                        )
+                        continue
 
                 # FIX: Check dynamic active_trades to prevent Triple-Buy duplicates in the same loop
                 if market_key in active_trade_keys:

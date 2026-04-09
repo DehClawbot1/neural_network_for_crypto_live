@@ -21,6 +21,11 @@ from config import TradingConfig
 
 logger = logging.getLogger(__name__)
 
+_ENV_PRESERVE_KEYS = {
+    "GOV_LEVEL1_MIN_ENTRY_CONFIDENCE",
+    "GOV_LEVEL2_MIN_ENTRY_CONFIDENCE",
+}
+
 # ---------------------------------------------------------------------------
 # Preset definitions
 # ---------------------------------------------------------------------------
@@ -98,7 +103,7 @@ PRESETS = {
             "GOV_LEVEL1_MAX_NEGATIVE_AVG_PNL": "-0.15",
             "GOV_LEVEL1_MAX_DRAWDOWN": "50",
             "GOV_LEVEL1_SIZE_MULTIPLIER": "0.65",
-            "GOV_LEVEL1_MIN_ENTRY_CONFIDENCE": "0.06",
+            "GOV_LEVEL1_MIN_ENTRY_CONFIDENCE": "0.15",
             "GOV_LEVEL1_MIN_LIQUIDITY_SCORE": "0.10",
             # Governor Level 2
             "GOV_LEVEL2_MIN_WIN_RATE": "0.22",
@@ -106,7 +111,7 @@ PRESETS = {
             "GOV_LEVEL2_MAX_NEGATIVE_AVG_PNL": "-0.35",
             "GOV_LEVEL2_MAX_DRAWDOWN": "80",
             "GOV_LEVEL2_SIZE_MULTIPLIER": "0.45",
-            "GOV_LEVEL2_MIN_ENTRY_CONFIDENCE": "0.05",
+            "GOV_LEVEL2_MIN_ENTRY_CONFIDENCE": "0.10",
             "GOV_LEVEL2_MIN_LIQUIDITY_SCORE": "0.12",
         },
     },
@@ -239,8 +244,9 @@ def apply_preset(mode: int) -> dict:
     Apply the chosen preset.  Returns the preset dict for logging.
 
     - Patches TradingConfig class attributes
-    - Sets env vars (ALWAYS applied -- preset overrides .env for governor/entry
-      tuning so the mode selection is authoritative)
+    - Sets env vars for the chosen mode
+    - Preserves explicit governor confidence env values so startup does not
+      silently drift away from the configured live threshold
     """
     preset = PRESETS.get(mode)
     if preset is None:
@@ -252,8 +258,11 @@ def apply_preset(mode: int) -> dict:
         setattr(TradingConfig, attr, value)
         logger.debug("TradingConfig.%s = %s", attr, value)
 
-    # --- Set env vars (preset ALWAYS wins — it is the authoritative source) ---
+    # --- Set env vars, but keep explicit governor confidence values authoritative ---
     for key, value in preset["env"].items():
+        if key in _ENV_PRESERVE_KEYS and os.getenv(key, "").strip():
+            logger.info("Keeping explicit env override for %s=%s", key, os.getenv(key))
+            continue
         os.environ[key] = value
 
     logger.info(

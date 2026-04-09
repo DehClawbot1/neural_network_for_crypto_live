@@ -123,11 +123,43 @@ class TestFeatureLogic(unittest.TestCase):
         self.assertTrue(row["fractal_entry_ready"])
         self.assertEqual(row["wallet_quality_score"], 0.77)
         self.assertEqual(row["wallet_agreement_score"], 0.81)
+        self.assertEqual(row["wallet_support_strength"], 0.0)
         self.assertEqual(row["source_wallet_position_event"], "NEW_ENTRY")
         self.assertTrue(row["source_wallet_net_position_increased"])
         self.assertEqual(row["wallet_state_confidence"], 0.83)
+        self.assertEqual(row["source_wallet_direction_confidence"], 0.83)
         self.assertEqual(row["wallet_size_change_score"], 0.64)
         self.assertTrue(row["source_wallet_fresh"])
+
+    def test_build_feature_row_preserves_wallet_gate_reason_and_support_metrics(self):
+        builder = FeatureBuilder()
+        signal = {
+            "trader_wallet": "0xwhale4",
+            "size": 120,
+            "price": 0.44,
+            "timestamp": "2026-04-08T18:00:00Z",
+            "outcome_side": "YES",
+            "wallet_watchlist_approved": True,
+            "wallet_quality_score": 0.64,
+            "wallet_agreement_score": 0.38,
+            "wallet_conflict_with_stronger": True,
+            "wallet_stronger_conflict_score": 0.79,
+            "wallet_support_strength": 0.49,
+            "wallet_state_gate_pass": False,
+            "wallet_state_gate_reason": "conflict_with_stronger_wallet",
+            "source_wallet_position_event": "SCALE_IN",
+            "source_wallet_direction_confidence": 0.76,
+            "source_wallet_size_delta_ratio": 0.13,
+            "source_wallet_freshness_score": 0.91,
+            "source_wallet_fresh": True,
+        }
+
+        row = builder.build_feature_row(signal, {"condition_id": "cond_2", "yes_token_id": "3", "no_token_id": "4"})
+
+        self.assertEqual(row["wallet_state_gate_reason"], "conflict_with_stronger_wallet")
+        self.assertEqual(row["wallet_support_strength"], 0.49)
+        self.assertEqual(row["wallet_stronger_conflict_score"], 0.79)
+        self.assertEqual(row["source_wallet_direction_confidence"], 0.76)
 
 
 if __name__ == "__main__":

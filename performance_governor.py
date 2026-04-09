@@ -154,7 +154,7 @@ class PerformanceGovernor:
             },
             1: {
                 "size_multiplier": self._env_float("GOV_LEVEL1_SIZE_MULTIPLIER", 0.65),
-                "min_confidence": self._env_float("GOV_LEVEL1_MIN_ENTRY_CONFIDENCE", 0.06),
+                "min_confidence": self._env_float("GOV_LEVEL1_MIN_ENTRY_CONFIDENCE", 0.15),
                 "min_liquidity_score": self._env_float("GOV_LEVEL1_MIN_LIQUIDITY_SCORE", 0.10),
                 "liquidity_size_multiplier": self._env_float("GOV_LEVEL1_LIQUIDITY_SIZE_MULTIPLIER", 0.80),
                 "force_min_size": False,
@@ -162,7 +162,7 @@ class PerformanceGovernor:
             },
             2: {
                 "size_multiplier": self._env_float("GOV_LEVEL2_SIZE_MULTIPLIER", 0.45),
-                "min_confidence": self._env_float("GOV_LEVEL2_MIN_ENTRY_CONFIDENCE", 0.05),
+                "min_confidence": self._env_float("GOV_LEVEL2_MIN_ENTRY_CONFIDENCE", 0.10),
                 "min_liquidity_score": self._env_float("GOV_LEVEL2_MIN_LIQUIDITY_SCORE", 0.12),
                 "liquidity_size_multiplier": self._env_float("GOV_LEVEL2_LIQUIDITY_SIZE_MULTIPLIER", 0.60),
                 "force_min_size": True,

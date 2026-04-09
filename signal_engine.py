@@ -15,6 +15,18 @@ def _safe_float(value, default=0.0):
     return float(num)
 
 
+def _parse_reason_tokens(value) -> set[str]:
+    text = str(value or "").strip()
+    if not text:
+        return set()
+    text = text.replace("|", ",")
+    return {
+        token.strip()
+        for token in text.split(",")
+        if token and token.strip()
+    }
+
+
 class SignalEngine:
     """
     Safer signal scorer.
@@ -128,6 +140,16 @@ class SignalEngine:
         if fractal_trigger_pending:
             confidence = min(confidence, 0.42)
 
+        wallet_reason_tokens = _parse_reason_tokens(row.get("wallet_state_gate_reason"))
+        position_event = str(row.get("source_wallet_position_event", "") or "").upper()
+        scale_in_conflict_softened = (
+            "conflict_with_stronger_wallet" in wallet_reason_tokens
+            and position_event == "SCALE_IN"
+            and bool(row.get("wallet_state_gate_soft_override", False))
+        )
+        if scale_in_conflict_softened:
+            confidence = min(confidence * 0.88, 0.72)
+
         wallet_state_gate_pass = bool(row.get("wallet_state_gate_pass", True))
         entry_intent = str(row.get("entry_intent", "OPEN_LONG") or "OPEN_LONG").upper()
         wallet_entry_gate_fail = entry_intent == "OPEN_LONG" and not wallet_state_gate_pass
@@ -150,6 +172,7 @@ class SignalEngine:
             "action_code": action_code,
             "wallet_state_score": round(wallet_state_score, 4),
             "wallet_entry_gate_fail": bool(wallet_entry_gate_fail),
+            "wallet_conflict_softened": bool(scale_in_conflict_softened),
             "reason": self._build_reason(row, confidence),
         }
 

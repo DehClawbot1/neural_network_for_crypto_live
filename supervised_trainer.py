@@ -41,7 +41,11 @@ class SupervisedTrainer:
         if not usable_features or "target_up" not in df.columns:
             return None, None
 
-        X = df[usable_features]
+        X = df[usable_features].apply(pd.to_numeric, errors="coerce")
+        usable_features = [col for col in usable_features if X[col].notna().any()]
+        if not usable_features:
+            return None, None
+        X = X[usable_features]
         y = df["target_up"].astype(int)
 
         model = Pipeline(

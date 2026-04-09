@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -109,7 +110,7 @@ def _summarize_cycle(decisions_df: pd.DataFrame, stats_df: pd.DataFrame, cycle_i
         detail = row.get("details") or {}
         raw_reason = str(detail.get("wallet_state_gate_reason") or "").strip()
         if raw_reason:
-            for part in raw_reason.split("|"):
+            for part in re.split(r"[|,]", raw_reason):
                 token = part.strip()
                 if token:
                     wallet_reason_counts[token] += 1

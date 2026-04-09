@@ -164,7 +164,14 @@ def get_top_crypto_traders(limit=100, return_details=False):
         return [] if not return_details else []
 
 
-def _trade_to_signal(trade, market_universe=None, wallet_fallback=None, wallet_quality_score=None, wallet_watchlist_approved=None):
+def _trade_to_signal(
+    trade,
+    market_universe=None,
+    wallet_fallback=None,
+    wallet_quality_score=None,
+    wallet_watchlist_approved=None,
+    signal_source=None,
+):
     market_universe = market_universe or {"condition_ids": set(), "token_ids": set(), "slugs": set()}
     cond_id = trade.get("conditionId") or trade.get("condition_id")
     token_id = trade.get("tokenId") or trade.get("token_id") or trade.get("asset")
@@ -224,6 +231,7 @@ def _trade_to_signal(trade, market_universe=None, wallet_fallback=None, wallet_q
         "price": float(trade.get("price", 0)),
         "size": float(trade.get("size", 0)),
         "timestamp": normalized_ts,
+        "signal_source": str(signal_source or "leaderboard_wallet"),
         "wallet_quality_score": _safe_float(wallet_quality_score, 0.50),
         "wallet_watchlist_approved": True if wallet_watchlist_approved is None else bool(wallet_watchlist_approved),
     }
@@ -272,6 +280,7 @@ def get_recent_btc_trades(wallet_address, limit=50, market_universe=None, sessio
                 wallet_fallback=wallet_address,
                 wallet_quality_score=wallet_quality_score,
                 wallet_watchlist_approved=wallet_watchlist_approved,
+                signal_source="leaderboard_wallet",
             )
             if signal is not None:
                 signals.append(signal)
@@ -320,6 +329,7 @@ def get_recent_btc_global_trades(limit=300, page_size=100, market_universe=None,
                 wallet_fallback=trade.get("proxyWallet"),
                 wallet_quality_score=0.35,
                 wallet_watchlist_approved=False,
+                signal_source="global_btc_scan",
             )
             if signal is not None:
                 signals.append(signal)

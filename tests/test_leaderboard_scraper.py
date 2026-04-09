@@ -1,6 +1,6 @@
 import pandas as pd
 
-from leaderboard_scraper import _keep_latest_open_long_state_per_wallet_market_side
+from leaderboard_scraper import _keep_latest_open_long_state_per_wallet_market_side, _trade_to_signal
 
 
 def test_keep_latest_open_long_state_per_wallet_market_side_collapses_historical_entries():
@@ -96,3 +96,25 @@ def test_keep_latest_open_long_state_uses_market_slug_when_condition_missing():
 
     assert len(result) == 1
     assert result.iloc[0]["source_wallet_position_event"] == "SCALE_IN"
+
+
+def test_trade_to_signal_tags_signal_source():
+    signal = _trade_to_signal(
+        {
+            "id": "trade-1",
+            "title": "Will the price of Bitcoin be above $72,000 on April 12?",
+            "slug": "bitcoin-above-72k-on-april-12",
+            "conditionId": "cond-1",
+            "tokenId": "tok-1",
+            "timestamp": pd.Timestamp.now(tz="UTC").isoformat(),
+            "side": "BUY",
+            "outcome": "YES",
+            "price": 0.55,
+            "size": 10,
+        },
+        market_universe={"condition_ids": {"cond-1"}, "token_ids": {"tok-1"}, "slugs": set()},
+        signal_source="global_btc_scan",
+    )
+
+    assert signal is not None
+    assert signal["signal_source"] == "global_btc_scan"

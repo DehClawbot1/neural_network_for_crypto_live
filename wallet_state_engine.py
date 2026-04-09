@@ -487,6 +487,7 @@ class WalletStateEngine:
         out["wallet_agreement_score"] = 0.5
         out["wallet_conflict_with_stronger"] = False
         out["wallet_stronger_conflict_score"] = 0.0
+        out["wallet_support_strength"] = 0.0
 
         market_cols = ["condition_id", "market_slug", "market_title"]
         key_col = next((c for c in market_cols if c in out.columns), None)
@@ -501,24 +502,26 @@ class WalletStateEngine:
             group = group.copy()
             if group.empty:
                 continue
+            eligible_group = group[group["wallet_state_gate_pass"].fillna(False).astype(bool)].copy()
             for idx, row in group.iterrows():
-                same_side = group[group["outcome_side"].astype(str).str.upper() == str(row.get("outcome_side", "")).upper()]
-                opp_side = group[group["outcome_side"].astype(str).str.upper() != str(row.get("outcome_side", "")).upper()]
-                own_strength = _safe_float(row.get("wallet_quality_score"), 0.0) * _safe_float(row.get("source_wallet_direction_confidence"), 0.0)
+                row_side = str(row.get("outcome_side", "")).upper()
+                same_side = eligible_group[eligible_group["outcome_side"].astype(str).str.upper() == row_side]
+                opp_side = eligible_group[eligible_group["outcome_side"].astype(str).str.upper() != row_side]
                 support_strength = (
                     same_side["wallet_quality_score"].astype(float).fillna(0.0)
                     * same_side["source_wallet_direction_confidence"].astype(float).fillna(0.0)
-                ).sum()
+                ).sum() if not same_side.empty else 0.0
                 oppose_strength = (
                     opp_side["wallet_quality_score"].astype(float).fillna(0.0)
                     * opp_side["source_wallet_direction_confidence"].astype(float).fillna(0.0)
                 ).max() if not opp_side.empty else 0.0
                 total_strength = max(support_strength + oppose_strength, 1e-9)
                 agreement_score = support_strength / total_strength
-                conflict = oppose_strength > (own_strength + self.conflict_margin)
+                conflict = oppose_strength > (support_strength + self.conflict_margin)
                 out.at[idx, "wallet_agreement_score"] = round(_clip01(agreement_score), 4)
                 out.at[idx, "wallet_conflict_with_stronger"] = bool(conflict)
                 out.at[idx, "wallet_stronger_conflict_score"] = round(float(oppose_strength), 4)
+                out.at[idx, "wallet_support_strength"] = round(float(support_strength), 4)
                 if conflict:
                     existing_reason = str(out.at[idx, "wallet_state_gate_reason"] or "").strip()
                     reason_parts = [part for part in existing_reason.split(",") if part]

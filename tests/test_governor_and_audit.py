@@ -6,6 +6,53 @@ from performance_governor import PerformanceGovernor
 from trade_lifecycle_audit import TradeLifecycleAuditor
 
 
+def test_performance_governor_confidence_defaults_match_live_config(tmp_path, monkeypatch):
+    monkeypatch.delenv("GOV_LEVEL1_MIN_ENTRY_CONFIDENCE", raising=False)
+    monkeypatch.delenv("GOV_LEVEL2_MIN_ENTRY_CONFIDENCE", raising=False)
+
+    logs_dir = Path(tmp_path)
+    closed = pd.DataFrame(
+        [
+            {
+                "closed_at": f"2026-04-03T00:{i:02d}:00Z",
+                "realized_pnl": -0.5,
+                "close_reason": "rl_exit",
+                "exit_reason_family": "rl_discretionary",
+            }
+            for i in range(50)
+        ]
+    )
+    closed.to_csv(logs_dir / "closed_positions.csv", index=False)
+
+    state = PerformanceGovernor(logs_dir=str(logs_dir)).evaluate()
+
+    assert state["governor_level"] == 2
+    assert state["min_confidence"] == 0.10
+
+
+def test_performance_governor_confidence_env_override_wins(tmp_path, monkeypatch):
+    monkeypatch.setenv("GOV_LEVEL2_MIN_ENTRY_CONFIDENCE", "0.12")
+
+    logs_dir = Path(tmp_path)
+    closed = pd.DataFrame(
+        [
+            {
+                "closed_at": f"2026-04-03T00:{i:02d}:00Z",
+                "realized_pnl": -0.5,
+                "close_reason": "rl_exit",
+                "exit_reason_family": "rl_discretionary",
+            }
+            for i in range(50)
+        ]
+    )
+    closed.to_csv(logs_dir / "closed_positions.csv", index=False)
+
+    state = PerformanceGovernor(logs_dir=str(logs_dir)).evaluate()
+
+    assert state["governor_level"] == 2
+    assert state["min_confidence"] == 0.12
+
+
 def test_performance_governor_degrades_on_bad_recent_losses(tmp_path):
     logs_dir = Path(tmp_path)
     closed = pd.DataFrame(
@@ -64,5 +111,7 @@ def test_trade_lifecycle_audit_reports_operational_and_unknown_ratios(tmp_path):
 
     assert not audit_df.empty
     latest = audit_df.iloc[-1]
-    assert latest["operational_close_ratio"] > 0
-    assert latest["unknown_signal_label_ratio"] > 0
+    assert latest["reconciliation_close_ratio"] > 0
+    assert latest["external_manual_close_ratio"] > 0
+    assert latest["operational_close_ratio"] == 0
+    assert latest["unknown_signal_label_ratio"] == 0
