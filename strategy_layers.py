@@ -76,17 +76,16 @@ class EntryRuleLayer:
         if trend_score > 0.75 and fgi_value >= 60:
             # Huge Bullish Conviction: Lower threshold for YES, raise for NO
             if target_side == "YES":
-                dynamic_min_score = max(0.10, self.min_score - 0.15)
-                # logging.info(f"StrategyLayer: HUNT MODE. Lowering YES threshold to {dynamic_min_score:.2f}")
+                dynamic_min_score = max(0.02, self.min_score - 0.03)
             elif target_side == "NO":
-                dynamic_min_score = min(0.95, self.min_score + 0.15)
-                
+                dynamic_min_score = min(0.95, self.min_score + 0.05)
+
         elif trend_score < 0.25 and fgi_value <= 40:
             # Huge Bearish Conviction: Lower threshold for NO, raise for YES
             if target_side == "NO":
-                dynamic_min_score = max(0.10, self.min_score - 0.15)
+                dynamic_min_score = max(0.02, self.min_score - 0.03)
             elif target_side == "YES":
-                dynamic_min_score = min(0.95, self.min_score + 0.15)
+                dynamic_min_score = min(0.95, self.min_score + 0.05)
         # --------------------------------
 
         ta_bias = str(row.get("btc_trend_bias", "NEUTRAL")).strip().upper()
@@ -150,10 +149,10 @@ class EntryRuleLayer:
             and not fractal_trigger_ready
         )
         if ta_bias_conflicts:
-            # Soft penalty instead of hard veto — raise threshold significantly
-            dynamic_min_score = min(0.95, dynamic_min_score + 0.10)
+            # Soft penalty instead of hard veto — raise threshold moderately
+            dynamic_min_score = min(0.95, dynamic_min_score + 0.03)
             logging.debug(
-                "StrategyLayer: Trend conflict penalty +0.10. target=%s bias=%s market=%s",
+                "StrategyLayer: Trend conflict penalty +0.03. target=%s bias=%s market=%s",
                 target_direction,
                 ta_bias,
                 row.get("market_slug", row.get("market_title", "market")),

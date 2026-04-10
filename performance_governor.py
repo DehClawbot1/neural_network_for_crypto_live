@@ -146,7 +146,7 @@ class PerformanceGovernor:
         policy = {
             0: {"size_multiplier": 1.0, "min_confidence": 0.0, "min_liquidity_score": 0.0, "force_min_size": False, "top_signal_only": False},
             1: {"size_multiplier": self._env_float("GOV_LEVEL1_SIZE_MULTIPLIER", 0.65), "min_confidence": self._env_float("GOV_LEVEL1_MIN_ENTRY_CONFIDENCE", 0.06), "min_liquidity_score": self._env_float("GOV_LEVEL1_MIN_LIQUIDITY_SCORE", 0.10), "force_min_size": False, "top_signal_only": False},
-            2: {"size_multiplier": self._env_float("GOV_LEVEL2_SIZE_MULTIPLIER", 0.45), "min_confidence": self._env_float("GOV_LEVEL2_MIN_ENTRY_CONFIDENCE", 0.05), "min_liquidity_score": self._env_float("GOV_LEVEL2_MIN_LIQUIDITY_SCORE", 0.12), "force_min_size": True, "top_signal_only": True},
+            2: {"size_multiplier": self._env_float("GOV_LEVEL2_SIZE_MULTIPLIER", 0.45), "min_confidence": self._env_float("GOV_LEVEL2_MIN_ENTRY_CONFIDENCE", 0.05), "min_liquidity_score": self._env_float("GOV_LEVEL2_MIN_LIQUIDITY_SCORE", 0.12), "force_min_size": True, "top_signal_only": False},
         }[level]
 
         latest = metrics[-1] if metrics else {}
