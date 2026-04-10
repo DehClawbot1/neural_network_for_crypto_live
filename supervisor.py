@@ -636,32 +636,67 @@ def summarize_open_position_context(positions_df: pd.DataFrame | None = None, ac
             "open_positions_loser_count": 0,
         }
 
-    shares = pd.to_numeric(work.get("shares", 0.0), errors="coerce").fillna(0.0)
-    entry_price = pd.to_numeric(work.get("entry_price", work.get("avg_entry_price", 0.0)), errors="coerce").fillna(0.0)
-    current_price = pd.to_numeric(work.get("current_price", work.get("mark_price", entry_price)), errors="coerce").fillna(entry_price)
-    negotiated = pd.to_numeric(work.get("negotiated_value_usdc", work.get("size_usdc", entry_price * shares)), errors="coerce").fillna(entry_price * shares)
-    max_payout = pd.to_numeric(work.get("max_payout_usdc", shares), errors="coerce").fillna(shares)
-    current_value = pd.to_numeric(
-        work.get("current_value_usdc", work.get("market_value", current_price * shares)),
-        errors="coerce",
-    ).fillna(current_price * shares)
-    unrealized = pd.to_numeric(
-        work.get("unrealized_pnl", current_value - negotiated),
-        errors="coerce",
-    ).fillna(0.0)
-    avg_change_pct = pd.to_numeric(
-        work.get(
-            "avg_to_now_price_change_pct",
-            work.get("price_change_pct", np.where(entry_price > 0, (current_price - entry_price) / entry_price, 0.0)),
-        ),
-        errors="coerce",
-    ).fillna(0.0)
-    unrealized_pct = pd.to_numeric(
-        work.get(
-            "unrealized_pnl_pct",
-            np.where(negotiated > 0, unrealized / negotiated, 0.0),
-        ),
-        errors="coerce",
+    def _series_from_column(column_name: str, default_value):
+        if column_name not in work.columns:
+            return pd.Series([default_value] * len(work), index=work.index)
+
+        raw = work.loc[:, column_name]
+        if isinstance(raw, pd.DataFrame):
+            if raw.empty:
+                return pd.Series([default_value] * len(work), index=work.index)
+            series = raw.apply(
+                lambda row: next((value for value in row if not pd.isna(value)), default_value),
+                axis=1,
+            )
+        elif isinstance(raw, pd.Series):
+            series = raw
+        else:
+            try:
+                series = pd.Series(raw, index=work.index)
+            except Exception:
+                values = list(raw) if hasattr(raw, "__iter__") and not isinstance(raw, (str, bytes)) else [raw] * len(work)
+                series = pd.Series(values)
+
+        series = series.reset_index(drop=True)
+        if len(series) < len(work):
+            series = series.reindex(range(len(work)), fill_value=default_value)
+        elif len(series) > len(work):
+            series = series.iloc[: len(work)]
+        series.index = work.index
+        return series
+
+    def _numeric_series(column_name: str, default_value):
+        series = pd.to_numeric(_series_from_column(column_name, np.nan), errors="coerce")
+        if isinstance(default_value, pd.Series):
+            fallback = pd.to_numeric(default_value, errors="coerce")
+            fallback = fallback.reset_index(drop=True)
+            if len(fallback) < len(work):
+                fallback = fallback.reindex(range(len(work)), fill_value=np.nan)
+            elif len(fallback) > len(work):
+                fallback = fallback.iloc[: len(work)]
+            fallback.index = work.index
+            return series.where(series.notna(), fallback)
+        return series.fillna(float(default_value))
+
+    shares = _numeric_series("shares", 0.0)
+    avg_entry_price = _numeric_series("avg_entry_price", 0.0)
+    entry_price = _numeric_series("entry_price", avg_entry_price).fillna(0.0)
+    mark_price = _numeric_series("mark_price", entry_price)
+    current_price = _numeric_series("current_price", mark_price).fillna(entry_price)
+    negotiated_fallback = _numeric_series("size_usdc", entry_price * shares)
+    negotiated = _numeric_series("negotiated_value_usdc", negotiated_fallback).fillna(entry_price * shares)
+    max_payout = _numeric_series("max_payout_usdc", shares).fillna(shares)
+    current_value_fallback = _numeric_series("market_value", current_price * shares)
+    current_value = _numeric_series("current_value_usdc", current_value_fallback).fillna(current_price * shares)
+    unrealized = _numeric_series("unrealized_pnl", current_value - negotiated).fillna(0.0)
+    avg_change_fallback = _numeric_series(
+        "price_change_pct",
+        pd.Series(np.where(entry_price > 0, (current_price - entry_price) / entry_price, 0.0), index=work.index),
+    )
+    avg_change_pct = _numeric_series("avg_to_now_price_change_pct", avg_change_fallback).fillna(0.0)
+    unrealized_pct = _numeric_series(
+        "unrealized_pnl_pct",
+        pd.Series(np.where(negotiated > 0, unrealized / negotiated, 0.0), index=work.index),
     ).fillna(0.0)
 
     return {
