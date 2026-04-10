@@ -1,3 +1,5 @@
+import json
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -19,6 +21,41 @@ class TradeState(str, Enum):
     RESOLVED = "RESOLVED"
 
 
+def _json_safe_value(value):
+    if isinstance(value, dict):
+        return {str(k): _json_safe_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe_value(v) for v in value]
+    if isinstance(value, pd.Timestamp):
+        if pd.isna(value):
+            return None
+        return value.isoformat()
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return value.value
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return None
+    if hasattr(value, "item"):
+        try:
+            return _json_safe_value(value.item())
+        except Exception:
+            pass
+    return value
+
+
+def serialize_signal_snapshot(signal_row: dict) -> tuple[str, int]:
+    normalized = {str(key): _json_safe_value(value) for key, value in dict(signal_row or {}).items()}
+    return json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True), len(normalized)
+
+
 @dataclass
 class TradeLifecycle:
     market: str
@@ -38,6 +75,9 @@ class TradeLifecycle:
     close_reason: str | None = None
     confidence_at_entry: float = 0.0
     signal_label: str = "UNKNOWN"
+    entry_signal_snapshot_json: str = ""
+    entry_signal_snapshot_feature_count: int = 0
+    entry_signal_snapshot_version: int = 1
     source_wallet: str = ""
     source_wallet_direction_confidence: float = 0.0
     source_wallet_position_event: str = ""
@@ -91,6 +131,7 @@ class TradeLifecycle:
     def on_signal(self, signal_row: dict):
         normalized_signal_row = dict(signal_row or {})
         normalized_signal_row["signal_label"] = resolve_entry_signal_label(normalized_signal_row)
+        signal_snapshot_json, signal_snapshot_feature_count = serialize_signal_snapshot(normalized_signal_row)
         payload = {
             "event": "signal",
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -98,12 +139,17 @@ class TradeLifecycle:
             "token_id": self.token_id,
             "condition_id": self.condition_id,
             "outcome_side": self.outcome_side,
+            "signal_snapshot_json": signal_snapshot_json,
+            "signal_snapshot_feature_count": signal_snapshot_feature_count,
+            "signal_snapshot_version": self.entry_signal_snapshot_version,
         }
         self.ledger.append({**payload, "signal": normalized_signal_row})
         self._write_execution_event(payload)
         self.state = TradeState.NEW_SIGNAL
         self.confidence_at_entry = float(normalized_signal_row.get("confidence", 0.0) or 0.0)
         self.signal_label = str(normalized_signal_row.get("signal_label", "UNKNOWN") or "UNKNOWN")
+        self.entry_signal_snapshot_json = signal_snapshot_json
+        self.entry_signal_snapshot_feature_count = signal_snapshot_feature_count
         self.source_wallet = str(normalized_signal_row.get("trader_wallet", "") or "")
         self.source_wallet_direction_confidence = float(normalized_signal_row.get("source_wallet_direction_confidence", 0.0) or 0.0)
         self.source_wallet_position_event = str(normalized_signal_row.get("source_wallet_position_event", "") or "")

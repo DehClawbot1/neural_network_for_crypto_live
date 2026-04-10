@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import joblib
@@ -6,7 +7,9 @@ from model_feature_catalog import DEFAULT_TABULAR_FEATURE_COLUMNS
 from model_feature_safety import drop_all_nan_features
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 
 class SupervisedTrainer:
@@ -31,6 +34,52 @@ class SupervisedTrainer:
         except Exception:
             return pd.DataFrame()
 
+    def _train_sparse_classifier(self, X: pd.DataFrame, y: pd.Series) -> tuple[Pipeline, dict]:
+        regularization_c = float(os.getenv("SUPERVISED_L1_C", "0.35") or 0.35)
+        model = Pipeline(
+            steps=[
+                ("imputer", SimpleImputer(strategy="median")),
+                ("scaler", StandardScaler()),
+                (
+                    "clf",
+                    LogisticRegression(
+                        penalty="l1",
+                        solver="liblinear",
+                        class_weight="balanced",
+                        random_state=42,
+                        max_iter=2000,
+                        C=max(1e-4, regularization_c),
+                    ),
+                ),
+            ]
+        )
+        model.fit(X, y)
+        coef = getattr(model.named_steps["clf"], "coef_", None)
+        nonzero = int((abs(coef) > 1e-12).sum()) if coef is not None else 0
+        metadata = {
+            "model_kind": "logistic_l1",
+            "regularization": "l1",
+            "nonzero_feature_count": nonzero,
+            "fallback_used": False,
+        }
+        return model, metadata
+
+    def _train_fallback_classifier(self, X: pd.DataFrame, y: pd.Series) -> tuple[Pipeline, dict]:
+        model = Pipeline(
+            steps=[
+                ("imputer", SimpleImputer(strategy="median")),
+                ("clf", RandomForestClassifier(n_estimators=200, random_state=42, class_weight="balanced")),
+            ]
+        )
+        model.fit(X, y)
+        metadata = {
+            "model_kind": "random_forest_fallback",
+            "regularization": "none",
+            "nonzero_feature_count": None,
+            "fallback_used": True,
+        }
+        return model, metadata
+
     def train(self):
         df = self._safe_read()
         if df.empty:
@@ -47,14 +96,14 @@ class SupervisedTrainer:
             return None, None
         X = X[usable_features]
         y = df["target_up"].astype(int)
+        if y.nunique(dropna=True) < 2:
+            return None, None
 
-        model = Pipeline(
-            steps=[
-                ("imputer", SimpleImputer(strategy="median")),
-                ("clf", RandomForestClassifier(n_estimators=200, random_state=42, class_weight="balanced")),
-            ]
-        )
-        model.fit(X, y)
-        joblib.dump({"model": model, "features": usable_features}, self.model_file)
+        metadata = {}
+        try:
+            model, metadata = self._train_sparse_classifier(X, y)
+        except Exception:
+            model, metadata = self._train_fallback_classifier(X, y)
+        joblib.dump({"model": model, "features": usable_features, **metadata}, self.model_file)
         return model, usable_features
 

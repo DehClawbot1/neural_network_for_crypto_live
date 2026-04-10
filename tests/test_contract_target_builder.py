@@ -18,6 +18,8 @@ class TestContractTargetBuilder(unittest.TestCase):
                     "token_id": "1",
                     "side": "YES",
                     "confidence": 0.8,
+                    "btc_live_index_price": 68111.0,
+                    "reddit_sentiment": -0.14,
                     "open_positions_count": 2,
                     "open_positions_unrealized_pnl_pct_total": -0.04,
                 }
@@ -35,6 +37,8 @@ class TestContractTargetBuilder(unittest.TestCase):
             self.assertFalse(df.empty)
             self.assertIn("forward_return_15m", df.columns)
             self.assertIn("tp_before_sl_60m", df.columns)
+            self.assertEqual(float(df.iloc[0]["btc_live_index_price"]), 68111.0)
+            self.assertEqual(float(df.iloc[0]["reddit_sentiment"]), -0.14)
             self.assertEqual(int(df.iloc[0]["open_positions_count"]), 2)
             self.assertAlmostEqual(float(df.iloc[0]["open_positions_unrealized_pnl_pct_total"]), -0.04)
 

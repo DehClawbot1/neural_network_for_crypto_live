@@ -192,6 +192,34 @@ class TestFeatureLogic(unittest.TestCase):
         self.assertEqual(row["open_positions_winner_count"], 1)
         self.assertEqual(row["open_positions_loser_count"], 1)
 
+    def test_build_feature_row_preserves_sentiment_fields_for_sparse_training(self):
+        builder = FeatureBuilder()
+        signal = {
+            "trader_wallet": "0xwhale6",
+            "size": 210,
+            "price": 0.48,
+            "timestamp": "2026-04-10T11:00:00Z",
+            "outcome_side": "YES",
+            "sentiment_score": 0.61,
+            "btc_funding_rate": 0.0003,
+            "fgi_value": 74,
+            "fgi_normalized": 0.74,
+            "twitter_sentiment": 0.11,
+            "reddit_sentiment": -0.07,
+            "twitter_post_count": 42,
+            "reddit_post_count": 18,
+        }
+
+        row = builder.build_feature_row(signal, {"condition_id": "cond_4", "yes_token_id": "7", "no_token_id": "8"})
+
+        self.assertEqual(row["sentiment_score"], 0.61)
+        self.assertEqual(row["btc_funding_rate"], 0.0003)
+        self.assertEqual(row["fgi_value"], 74.0)
+        self.assertEqual(row["twitter_sentiment"], 0.11)
+        self.assertEqual(row["reddit_sentiment"], -0.07)
+        self.assertEqual(row["twitter_post_count"], 42.0)
+        self.assertEqual(row["reddit_post_count"], 18.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import joblib
 import pandas as pd
 
 from supervised_trainer import SupervisedTrainer
@@ -43,4 +44,8 @@ def test_supervised_trainer_coerces_schema_drift_strings(tmp_path):
     assert model is not None
     assert features is not None
     assert "volume_score" in features
-    assert (weights_dir / "btc_direction_model.joblib").exists()
+    model_path = weights_dir / "btc_direction_model.joblib"
+    assert model_path.exists()
+    saved = joblib.load(model_path)
+    assert saved["regularization"] in {"l1", "none"}
+    assert saved["model_kind"] in {"logistic_l1", "random_forest_fallback"}

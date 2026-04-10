@@ -74,6 +74,9 @@ class Database:
         self._ensure_column("positions", "confidence", "REAL")
         self._ensure_column("positions", "confidence_at_entry", "REAL")
         self._ensure_column("positions", "signal_label", "TEXT")
+        self._ensure_column("positions", "entry_signal_snapshot_json", "TEXT")
+        self._ensure_column("positions", "entry_signal_snapshot_feature_count", "INTEGER")
+        self._ensure_column("positions", "entry_signal_snapshot_version", "INTEGER")
         self._ensure_column("positions", "close_reason", "TEXT")
         self._ensure_column("positions", "exit_price", "REAL")
         self._ensure_column("positions", "close_fingerprint", "TEXT")
@@ -146,6 +149,9 @@ class Database:
                 confidence REAL,
                 confidence_at_entry REAL,
                 signal_label TEXT,
+                entry_signal_snapshot_json TEXT,
+                entry_signal_snapshot_feature_count INTEGER,
+                entry_signal_snapshot_version INTEGER,
                 close_reason TEXT,
                 exit_price REAL,
                 close_fingerprint TEXT,

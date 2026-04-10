@@ -588,6 +588,9 @@ class TradeManager:
             "confidence": trade.confidence_at_entry,
             "confidence_at_entry": trade.confidence_at_entry,
             "signal_label": trade.signal_label,
+            "entry_signal_snapshot_json": getattr(trade, "entry_signal_snapshot_json", ""),
+            "entry_signal_snapshot_feature_count": getattr(trade, "entry_signal_snapshot_feature_count", 0),
+            "entry_signal_snapshot_version": getattr(trade, "entry_signal_snapshot_version", 1),
             "entry_btc_predicted_direction": getattr(trade, "entry_btc_predicted_direction", 0),
             "entry_btc_predicted_return": getattr(trade, "entry_btc_predicted_return", 0.0),
             "entry_btc_forecast_confidence": getattr(trade, "entry_btc_forecast_confidence", 0.0),
@@ -658,6 +661,20 @@ class TradeManager:
         existing_trade.unrealized_pnl = float(rebuilt_trade.unrealized_pnl or 0.0)
         existing_trade.opened_at = rebuilt_trade.opened_at or existing_trade.opened_at
         existing_trade.state = TradeState.OPEN
+        existing_trade.entry_signal_snapshot_json = (
+            getattr(rebuilt_trade, "entry_signal_snapshot_json", None)
+            or getattr(existing_trade, "entry_signal_snapshot_json", "")
+        )
+        existing_trade.entry_signal_snapshot_feature_count = int(
+            getattr(rebuilt_trade, "entry_signal_snapshot_feature_count", 0)
+            or getattr(existing_trade, "entry_signal_snapshot_feature_count", 0)
+            or 0
+        )
+        existing_trade.entry_signal_snapshot_version = int(
+            getattr(rebuilt_trade, "entry_signal_snapshot_version", 1)
+            or getattr(existing_trade, "entry_signal_snapshot_version", 1)
+            or 1
+        )
         for key, value in getattr(rebuilt_trade, "__dict__", {}).items():
             if str(key).startswith(("weather_", "forecast_")):
                 setattr(existing_trade, key, value)
@@ -831,6 +848,7 @@ class TradeManager:
                 position_id, market, market_title, token_id, condition_id, outcome_side, order_side,
                 status, entry_price, current_price, size_usdc, shares, market_value, realized_pnl,
                 net_realized_pnl, unrealized_pnl, confidence, confidence_at_entry, signal_label,
+                entry_signal_snapshot_json, entry_signal_snapshot_feature_count, entry_signal_snapshot_version,
                 close_reason, exit_price, close_fingerprint, is_reconciliation_close, lifecycle_source,
                 entry_model_family, entry_model_version, performance_governor_level, market_family,
                 horizon_bucket, liquidity_bucket, volatility_bucket, technical_regime_bucket,
@@ -873,13 +891,14 @@ class TradeManager:
                     status, entry_price, current_price, size_usdc, negotiated_value_usdc, shares, max_payout_usdc,
                     market_value, current_value_usdc, realized_pnl, net_realized_pnl, unrealized_pnl, unrealized_pnl_pct,
                     avg_to_now_price_change, avg_to_now_price_change_pct, confidence, confidence_at_entry, signal_label,
+                    entry_signal_snapshot_json, entry_signal_snapshot_feature_count, entry_signal_snapshot_version,
                     close_reason, exit_price, close_fingerprint, is_reconciliation_close, lifecycle_source,
                     entry_model_family, entry_model_version, performance_governor_level, market_family,
                     horizon_bucket, liquidity_bucket, volatility_bucket, technical_regime_bucket,
                     entry_context_complete, learning_eligible, operational_close_flag, reconciliation_close_flag, exit_reason_family,
                     intended_exit_reason, actual_execution_path, exit_fill_latency_seconds, exit_cancel_count,
                     exit_partial_fill_ratio, exit_realized_slippage_bps, market_slug, opened_at, closed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row.get("position_id"),
@@ -907,6 +926,9 @@ class TradeManager:
                     row.get("confidence"),
                     row.get("confidence_at_entry"),
                     row.get("signal_label"),
+                    row.get("entry_signal_snapshot_json"),
+                    int(row.get("entry_signal_snapshot_feature_count", 0) or 0),
+                    int(row.get("entry_signal_snapshot_version", 1) or 1),
                     row.get("close_reason"),
                     row.get("exit_price"),
                     row.get("close_fingerprint"),
@@ -947,6 +969,7 @@ class TradeManager:
                 "avg_to_now_price_change", "avg_to_now_price_change_pct",
                 "net_realized_pnl", "opened_at", "status",
                 "confidence", "confidence_at_entry", "signal_label",
+                "entry_signal_snapshot_json", "entry_signal_snapshot_feature_count", "entry_signal_snapshot_version",
                 "entry_model_family", "entry_model_version", "performance_governor_level",
                 "market_family", "horizon_bucket", "liquidity_bucket", "volatility_bucket", "technical_regime_bucket",
                 "entry_context_complete", "learning_eligible", "operational_close_flag", "reconciliation_close_flag", "exit_reason_family",
@@ -991,6 +1014,12 @@ class TradeManager:
                 )
         if "order_side" not in df.columns:
             df["order_side"] = "BUY"
+        if "entry_signal_snapshot_json" not in df.columns:
+            df["entry_signal_snapshot_json"] = ""
+        if "entry_signal_snapshot_feature_count" not in df.columns:
+            df["entry_signal_snapshot_feature_count"] = 0
+        if "entry_signal_snapshot_version" not in df.columns:
+            df["entry_signal_snapshot_version"] = 1
         if "shares" not in df.columns:
             df["shares"] = 0.0
         if "entry_price" not in df.columns:
@@ -1008,6 +1037,12 @@ class TradeManager:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         if "fast_adverse_move_count" in df.columns:
             df["fast_adverse_move_count"] = pd.to_numeric(df["fast_adverse_move_count"], errors="coerce").fillna(0).astype(int)
+        df["entry_signal_snapshot_feature_count"] = pd.to_numeric(
+            df["entry_signal_snapshot_feature_count"], errors="coerce"
+        ).fillna(0).astype(int)
+        df["entry_signal_snapshot_version"] = pd.to_numeric(
+            df["entry_signal_snapshot_version"], errors="coerce"
+        ).fillna(1).astype(int)
         if "size_usdc" not in df.columns:
             df["size_usdc"] = df["shares"] * df["entry_price"]
         if "negotiated_value_usdc" not in df.columns:
@@ -1251,6 +1286,9 @@ class TradeManager:
             trade.size_usdc = trade.shares * trade.entry_price
             trade.realized_pnl = float(row.get("realized_pnl", 0.0) or 0.0)
             trade.unrealized_pnl = float(row.get("unrealized_pnl", 0.0) or 0.0)
+            trade.entry_signal_snapshot_json = str(row.get("entry_signal_snapshot_json", "") or "")
+            trade.entry_signal_snapshot_feature_count = int(row.get("entry_signal_snapshot_feature_count", 0) or 0)
+            trade.entry_signal_snapshot_version = int(row.get("entry_signal_snapshot_version", 1) or 1)
             for key, value in row.items():
                 if str(key).startswith(("weather_", "forecast_")):
                     setattr(trade, key, value)
