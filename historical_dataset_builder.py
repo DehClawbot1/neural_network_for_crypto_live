@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 import pandas as pd
+from entry_snapshot_enrichment import enrich_frame_with_entry_snapshots
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -86,10 +87,9 @@ class HistoricalDatasetBuilder:
         technical_regime_df = self._safe_read("technical_regime_snapshot.csv")
         portfolio_curve_df = self._safe_read("portfolio_equity_curve.csv")
 
-        if signals_df.empty:
+        dataset = enrich_frame_with_entry_snapshots(signals_df, logs_dir=self.logs_dir)
+        if dataset.empty:
             return pd.DataFrame()
-
-        dataset = signals_df.copy()
         rename_map = {
             "market": "market_title",
             "wallet_copied": "trader_wallet",
@@ -196,6 +196,10 @@ class HistoricalDatasetBuilder:
                         "btc_live_spot_price",
                         "btc_live_index_price",
                         "btc_live_mark_price",
+                        "btc_live_price_kalman",
+                        "btc_live_spot_price_kalman",
+                        "btc_live_index_price_kalman",
+                        "btc_live_mark_price_kalman",
                         "btc_live_funding_rate",
                         "btc_live_source_quality",
                         "btc_live_source_quality_score",
@@ -203,13 +207,21 @@ class HistoricalDatasetBuilder:
                         "btc_live_spot_index_basis_bps",
                         "btc_live_mark_index_basis_bps",
                         "btc_live_mark_spot_basis_bps",
+                        "btc_live_spot_index_basis_bps_kalman",
+                        "btc_live_mark_index_basis_bps_kalman",
+                        "btc_live_mark_spot_basis_bps_kalman",
                         "btc_live_return_1m",
                         "btc_live_return_5m",
                         "btc_live_return_15m",
                         "btc_live_return_1h",
+                        "btc_live_return_1m_kalman",
+                        "btc_live_return_5m_kalman",
+                        "btc_live_return_15m_kalman",
+                        "btc_live_return_1h_kalman",
                         "btc_live_volatility_proxy",
                         "btc_live_bias",
                         "btc_live_confluence",
+                        "btc_live_confluence_kalman",
                         "btc_live_index_ready",
                     ]
                     if c in btc_live_df.columns
@@ -245,6 +257,21 @@ class HistoricalDatasetBuilder:
                         "btc_macd_hist_slope",
                         "btc_momentum_regime",
                         "btc_momentum_confluence",
+                        "btc_market_regime_label",
+                        "btc_market_regime_score",
+                        "btc_market_regime_trend_score",
+                        "btc_market_regime_volatility_score",
+                        "btc_market_regime_chaos_score",
+                        "btc_market_regime_stability_score",
+                        "btc_market_regime_is_calm",
+                        "btc_market_regime_is_trend",
+                        "btc_market_regime_is_volatile",
+                        "btc_market_regime_is_chaotic",
+                        "btc_market_regime_primary_model",
+                        "btc_market_regime_confidence_multiplier",
+                        "btc_market_regime_weight_legacy",
+                        "btc_market_regime_weight_stage1",
+                        "btc_market_regime_weight_stage2",
                     ]
                     if c in technical_regime_df.columns
                 ]

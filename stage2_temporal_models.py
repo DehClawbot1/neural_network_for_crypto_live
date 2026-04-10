@@ -5,15 +5,32 @@ import numpy as np
 import pandas as pd
 import warnings
 from model_feature_safety import drop_all_nan_features
+from feature_treatment_policy import features_by_kind, features_for_scope, log_audit
 from return_calibration import fit_return_calibration, transform_return_targets
-from sklearn.impute import SimpleImputer
-from sklearn.utils import resample
-from sklearn.metrics import accuracy_score, mean_squared_error, precision_score, recall_score
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.neural_network import MLPClassifier, MLPRegressor
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
-from sklearn.exceptions import ConvergenceWarning, UndefinedMetricWarning
+
+
+def _load_sklearn_temporal_components():
+    from sklearn.exceptions import ConvergenceWarning, UndefinedMetricWarning
+    from sklearn.impute import SimpleImputer
+    from sklearn.metrics import accuracy_score, mean_squared_error, precision_score, recall_score
+    from sklearn.model_selection import TimeSeriesSplit
+    from sklearn.neural_network import MLPClassifier, MLPRegressor
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+    return {
+        "ConvergenceWarning": ConvergenceWarning,
+        "MLPClassifier": MLPClassifier,
+        "MLPRegressor": MLPRegressor,
+        "Pipeline": Pipeline,
+        "SimpleImputer": SimpleImputer,
+        "StandardScaler": StandardScaler,
+        "TimeSeriesSplit": TimeSeriesSplit,
+        "UndefinedMetricWarning": UndefinedMetricWarning,
+        "accuracy_score": accuracy_score,
+        "mean_squared_error": mean_squared_error,
+        "precision_score": precision_score,
+        "recall_score": recall_score,
+    }
 
 
 class Stage2TemporalModels:
@@ -51,21 +68,30 @@ class Stage2TemporalModels:
         minority_df = df[df[target_col].fillna(0).astype(int) == minority_class]
         if minority_df.empty or majority_df.empty:
             return df
-        minority_upsampled = resample(minority_df, replace=True, n_samples=len(majority_df), random_state=42)
+        minority_upsampled = minority_df.sample(n=len(majority_df), replace=True, random_state=42)
         balanced = pd.concat([majority_df, minority_upsampled], ignore_index=True)
         return balanced.sample(frac=1.0, random_state=42).reset_index(drop=True)
 
     def _stationarize_features(self, df, feature_cols):
+        """Apply policy-driven transforms before the sklearn pipeline.
+
+        ``log_scale`` features get ``log1p``; ``robust_scale`` features get
+        median/IQR normalisation.  Everything else is left for the pipeline's
+        ``StandardScaler`` to handle.
+        """
         out = df.copy()
-        price_cols = [c for c in feature_cols if "price" in c.lower()]
-        for col in price_cols:
+        log_cols = features_by_kind("log_scale", feature_cols)
+        for col in log_cols:
             out[col] = pd.to_numeric(out[col], errors="coerce")
             out[col] = np.log1p(out[col].clip(lower=0))
-        for prefix in ["volume", "liquidity"]:
-            cols = [c for c in feature_cols if prefix in c.lower()]
-            for col in cols:
-                series = pd.to_numeric(out[col], errors="coerce")
-                out[col] = (series - series.mean()) / (series.std(ddof=0) + 1e-9)
+        robust_cols = features_by_kind("robust_scale", feature_cols)
+        for col in robust_cols:
+            series = pd.to_numeric(out[col], errors="coerce")
+            median = series.median()
+            q1 = series.quantile(0.25)
+            q3 = series.quantile(0.75)
+            iqr = q3 - q1
+            out[col] = (series - median) / (iqr + 1e-9)
         return out
 
     def _pick_first_existing(self, df, candidates):
@@ -88,6 +114,20 @@ class Stage2TemporalModels:
         return n_val >= 2
 
     def train(self):
+        sklearn = _load_sklearn_temporal_components()
+        SimpleImputer = sklearn["SimpleImputer"]
+        TimeSeriesSplit = sklearn["TimeSeriesSplit"]
+        Pipeline = sklearn["Pipeline"]
+        StandardScaler = sklearn["StandardScaler"]
+        MLPClassifier = sklearn["MLPClassifier"]
+        MLPRegressor = sklearn["MLPRegressor"]
+        ConvergenceWarning = sklearn["ConvergenceWarning"]
+        UndefinedMetricWarning = sklearn["UndefinedMetricWarning"]
+        accuracy_score = sklearn["accuracy_score"]
+        mean_squared_error = sklearn["mean_squared_error"]
+        precision_score = sklearn["precision_score"]
+        recall_score = sklearn["recall_score"]
+
         df = self._safe_read()
         if df.empty:
             return pd.DataFrame()
@@ -125,10 +165,12 @@ class Stage2TemporalModels:
         feature_cols = base_features + lag_features + context_features
         if not feature_cols:
             return pd.DataFrame()
+        feature_cols = features_for_scope("nn", feature_cols)
         feature_cols, _ = drop_all_nan_features(df, feature_cols, context="stage2_temporal_models")
         if not feature_cols:
             return pd.DataFrame()
 
+        log_audit(feature_cols)
         df = self._stationarize_features(df, feature_cols)
         if len(df) < 6:
             return pd.DataFrame()

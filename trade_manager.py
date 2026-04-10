@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -64,6 +65,60 @@ class TradeManager:
         value = max(int(minimum), value)
         value = min(int(maximum), value)
         return value
+
+    @staticmethod
+    def _load_entry_snapshot(snapshot_json: str) -> dict:
+        text = str(snapshot_json or "").strip()
+        if not text:
+            return {}
+        try:
+            payload = json.loads(text)
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _hydrate_trade_from_entry_snapshot(self, trade: TradeLifecycle, snapshot_json: str):
+        snapshot = self._load_entry_snapshot(snapshot_json)
+        if not snapshot:
+            return
+        trade.confidence_at_entry = float(snapshot.get("confidence", trade.confidence_at_entry) or trade.confidence_at_entry or 0.0)
+        trade.signal_label = str(snapshot.get("signal_label", trade.signal_label or "UNKNOWN") or "UNKNOWN")
+        trade.source_wallet = str(snapshot.get("trader_wallet", trade.source_wallet or "") or "")
+        trade.source_wallet_direction_confidence = float(
+            snapshot.get("source_wallet_direction_confidence", trade.source_wallet_direction_confidence) or trade.source_wallet_direction_confidence or 0.0
+        )
+        trade.source_wallet_position_event = str(snapshot.get("source_wallet_position_event", trade.source_wallet_position_event or "") or "")
+        trade.source_wallet_quality_score = float(
+            snapshot.get("wallet_quality_score", trade.source_wallet_quality_score) or trade.source_wallet_quality_score or 0.0
+        )
+        trade.entry_btc_trend_bias = str(snapshot.get("btc_trend_bias", trade.entry_btc_trend_bias or "NEUTRAL") or "NEUTRAL")
+        trade.entry_btc_predicted_direction = int(snapshot.get("btc_predicted_direction", trade.entry_btc_predicted_direction) or trade.entry_btc_predicted_direction or 0)
+        trade.entry_btc_predicted_return = float(
+            snapshot.get("btc_predicted_return_15", trade.entry_btc_predicted_return) or trade.entry_btc_predicted_return or 0.0
+        )
+        trade.entry_btc_forecast_confidence = float(
+            snapshot.get("btc_forecast_confidence", trade.entry_btc_forecast_confidence) or trade.entry_btc_forecast_confidence or 0.0
+        )
+        trade.entry_btc_price = float(snapshot.get("btc_live_price", trade.entry_btc_price) or trade.entry_btc_price or 0.0)
+        trade.entry_btc_mtf_agreement = float(snapshot.get("btc_mtf_agreement", trade.entry_btc_mtf_agreement) or trade.entry_btc_mtf_agreement or 0.0)
+        trade.entry_btc_mtf_source = str(snapshot.get("btc_mtf_source", trade.entry_btc_mtf_source or "") or "")
+        trade.entry_alligator_alignment = str(snapshot.get("alligator_alignment", trade.entry_alligator_alignment or "NEUTRAL") or "NEUTRAL")
+        trade.entry_adx_value = float(snapshot.get("adx_value", trade.entry_adx_value) or trade.entry_adx_value or 0.0)
+        trade.entry_adx_threshold = float(snapshot.get("adx_threshold", trade.entry_adx_threshold) or trade.entry_adx_threshold or 0.0)
+        trade.entry_anchored_vwap = float(snapshot.get("anchored_vwap", trade.entry_anchored_vwap) or trade.entry_anchored_vwap or 0.0)
+        trade.entry_fractal_trigger_direction = str(snapshot.get("fractal_trigger_direction", trade.entry_fractal_trigger_direction or "NEUTRAL") or "NEUTRAL")
+        trade.entry_model_family = str(snapshot.get("entry_model_family", trade.entry_model_family or "") or "")
+        trade.entry_model_version = str(snapshot.get("entry_model_version", trade.entry_model_version or "") or "")
+        trade.performance_governor_level = int(snapshot.get("performance_governor_level", trade.performance_governor_level) or trade.performance_governor_level or 0)
+        trade.market_family = str(snapshot.get("market_family", trade.market_family or "other") or "other")
+        trade.horizon_bucket = str(snapshot.get("horizon_bucket", trade.horizon_bucket or "unknown") or "unknown")
+        trade.liquidity_bucket = str(snapshot.get("liquidity_bucket", trade.liquidity_bucket or "unknown") or "unknown")
+        trade.volatility_bucket = str(snapshot.get("volatility_bucket", trade.volatility_bucket or "unknown") or "unknown")
+        trade.technical_regime_bucket = str(snapshot.get("technical_regime_bucket", trade.technical_regime_bucket or "neutral") or "neutral")
+        trade.entry_context_complete = bool(snapshot.get("entry_context_complete", trade.entry_context_complete))
+        for key, value in snapshot.items():
+            if str(key).startswith(("weather_", "forecast_")):
+                setattr(trade, key, value)
 
     def _resolve_exit_thresholds(self) -> dict:
         open_count = len(self.get_open_positions())
@@ -675,6 +730,7 @@ class TradeManager:
             or getattr(existing_trade, "entry_signal_snapshot_version", 1)
             or 1
         )
+        self._hydrate_trade_from_entry_snapshot(existing_trade, existing_trade.entry_signal_snapshot_json)
         for key, value in getattr(rebuilt_trade, "__dict__", {}).items():
             if str(key).startswith(("weather_", "forecast_")):
                 setattr(existing_trade, key, value)
@@ -1091,7 +1147,9 @@ class TradeManager:
         if "net_realized_pnl" not in df.columns:
             df["net_realized_pnl"] = pd.to_numeric(df["realized_pnl"], errors="coerce").fillna(0.0)
         if "opened_at" not in df.columns:
-            df["opened_at"] = df.get("last_fill_at", datetime.now(timezone.utc).isoformat())
+            df["opened_at"] = df.get("first_fill_at", df.get("last_fill_at", datetime.now(timezone.utc).isoformat()))
+        else:
+            df["opened_at"] = df["opened_at"].fillna(df.get("first_fill_at", df.get("last_fill_at", datetime.now(timezone.utc).isoformat())))
         if "status" not in df.columns:
             df["status"] = "OPEN"
         if "confidence" not in df.columns:
@@ -1292,7 +1350,8 @@ class TradeManager:
             for key, value in row.items():
                 if str(key).startswith(("weather_", "forecast_")):
                     setattr(trade, key, value)
-            trade.opened_at = row.get("last_fill_at") or datetime.now().isoformat()
+            trade.opened_at = row.get("opened_at") or row.get("first_fill_at") or row.get("last_fill_at") or datetime.now().isoformat()
+            self._hydrate_trade_from_entry_snapshot(trade, trade.entry_signal_snapshot_json)
             trade.state = TradeState.OPEN
             rebuilt_trades[trade_key] = trade
 

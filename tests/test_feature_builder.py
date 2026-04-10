@@ -220,6 +220,42 @@ class TestFeatureLogic(unittest.TestCase):
         self.assertEqual(row["twitter_post_count"], 42.0)
         self.assertEqual(row["reddit_post_count"], 18.0)
 
+    def test_build_feature_row_preserves_kalman_and_regime_fields(self):
+        builder = FeatureBuilder()
+        signal = {
+            "trader_wallet": "0xwhale7",
+            "size": 190,
+            "price": 0.52,
+            "timestamp": "2026-04-10T12:00:00Z",
+            "outcome_side": "YES",
+            "btc_live_price_kalman": 68210.4,
+            "btc_live_index_price_kalman": 68212.2,
+            "btc_live_mark_price_kalman": 68218.5,
+            "btc_live_mark_index_basis_bps_kalman": 0.92,
+            "btc_live_return_5m_kalman": 0.0042,
+            "btc_live_confluence_kalman": 0.66,
+            "btc_market_regime_label": "trend",
+            "btc_market_regime_score": 0.73,
+            "btc_market_regime_trend_score": 0.81,
+            "btc_market_regime_volatility_score": 0.32,
+            "btc_market_regime_chaos_score": 0.14,
+            "btc_market_regime_stability_score": 0.71,
+            "btc_market_regime_is_trend": 1,
+            "btc_market_regime_confidence_multiplier": 1.08,
+            "btc_market_regime_weight_legacy": 0.20,
+            "btc_market_regime_weight_stage1": 0.45,
+            "btc_market_regime_weight_stage2": 0.35,
+        }
+
+        row = builder.build_feature_row(signal, {"condition_id": "cond_5", "yes_token_id": "9", "no_token_id": "10"})
+
+        self.assertEqual(row["btc_live_price_kalman"], 68210.4)
+        self.assertEqual(row["btc_live_mark_index_basis_bps_kalman"], 0.92)
+        self.assertEqual(row["btc_live_return_5m_kalman"], 0.0042)
+        self.assertEqual(row["btc_market_regime_label"], "trend")
+        self.assertEqual(row["btc_market_regime_trend_score"], 0.81)
+        self.assertEqual(row["btc_market_regime_weight_stage2"], 0.35)
+
 
 if __name__ == "__main__":
     unittest.main()

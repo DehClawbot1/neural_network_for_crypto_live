@@ -108,6 +108,16 @@ class Database:
         self._ensure_column("fills", "condition_id", "TEXT")
         self._ensure_column("fills", "outcome_side", "TEXT")
         self._ensure_column("fills", "side", "TEXT")
+        for column_name, column_type in [
+            ("first_fill_at", "TEXT"),
+            ("opened_at", "TEXT"),
+            ("market", "TEXT"),
+            ("market_title", "TEXT"),
+            ("entry_signal_snapshot_json", "TEXT"),
+            ("entry_signal_snapshot_feature_count", "INTEGER"),
+            ("entry_signal_snapshot_version", "INTEGER"),
+        ]:
+            self._ensure_column("live_positions", column_name, column_type)
 
     def _ensure_column(self, table_name, column_name, column_type):
         existing_columns = {
@@ -263,7 +273,14 @@ class Database:
                 shares REAL,
                 avg_entry_price REAL,
                 realized_pnl REAL,
+                first_fill_at TEXT,
                 last_fill_at TEXT,
+                opened_at TEXT,
+                market TEXT,
+                market_title TEXT,
+                entry_signal_snapshot_json TEXT,
+                entry_signal_snapshot_feature_count INTEGER,
+                entry_signal_snapshot_version INTEGER,
                 source TEXT,
                 status TEXT,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP

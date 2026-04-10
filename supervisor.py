@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+from btc_regime_router import apply_regime_model_blend
 from btc_threshold_guard import find_conflicting_btc_price_threshold_position
 from weather_temperature_guard import find_conflicting_weather_temperature_position
 
@@ -187,6 +188,79 @@ WEATHER_LOG_COLUMNS = [
     "analytics_only",
     "analytics_only_reason",
 ]
+BTC_CONTEXT_LOG_COLUMNS = [
+    "btc_live_price",
+    "btc_live_spot_price",
+    "btc_live_index_price",
+    "btc_live_mark_price",
+    "btc_live_price_kalman",
+    "btc_live_spot_price_kalman",
+    "btc_live_index_price_kalman",
+    "btc_live_mark_price_kalman",
+    "btc_live_funding_rate",
+    "btc_live_source_quality",
+    "btc_live_source_quality_score",
+    "btc_live_source_divergence_bps",
+    "btc_live_spot_index_basis_bps",
+    "btc_live_mark_index_basis_bps",
+    "btc_live_mark_spot_basis_bps",
+    "btc_live_spot_index_basis_bps_kalman",
+    "btc_live_mark_index_basis_bps_kalman",
+    "btc_live_mark_spot_basis_bps_kalman",
+    "btc_live_return_1m",
+    "btc_live_return_5m",
+    "btc_live_return_15m",
+    "btc_live_return_1h",
+    "btc_live_return_1m_kalman",
+    "btc_live_return_5m_kalman",
+    "btc_live_return_15m_kalman",
+    "btc_live_return_1h_kalman",
+    "btc_live_volatility_proxy",
+    "btc_live_bias",
+    "btc_live_confluence",
+    "btc_live_confluence_kalman",
+    "btc_live_index_ready",
+    "btc_live_index_feed_available",
+    "btc_live_mark_feed_available",
+    "market_structure",
+    "trend_score",
+    "btc_trend_bias",
+    "btc_trend_confluence",
+    "btc_volatility_regime",
+    "btc_volatility_regime_score",
+    "btc_momentum_regime",
+    "btc_momentum_confluence",
+    "btc_market_regime_label",
+    "btc_market_regime_score",
+    "btc_market_regime_trend_score",
+    "btc_market_regime_volatility_score",
+    "btc_market_regime_chaos_score",
+    "btc_market_regime_stability_score",
+    "btc_market_regime_is_calm",
+    "btc_market_regime_is_trend",
+    "btc_market_regime_is_volatile",
+    "btc_market_regime_is_chaotic",
+    "btc_market_regime_primary_model",
+    "btc_market_regime_confidence_multiplier",
+    "btc_market_regime_weight_legacy",
+    "btc_market_regime_weight_stage1",
+    "btc_market_regime_weight_stage2",
+    "legacy_p_tp_before_sl",
+    "legacy_expected_return",
+    "legacy_edge_score",
+    "stage1_p_tp_before_sl",
+    "stage1_expected_return",
+    "stage1_edge_score",
+    "stage1_lower_confidence_bound",
+    "stage1_return_std",
+    "temporal_p_tp_before_sl",
+    "temporal_expected_return",
+    "temporal_edge_score",
+    "regime_blended_p_tp_before_sl",
+    "regime_blended_expected_return",
+    "regime_blended_conservative_expected_return",
+    "regime_blended_edge_score",
+]
 RAW_CANDIDATE_LOG_COLUMNS = [
     "timestamp",
     "trader_wallet",
@@ -240,7 +314,7 @@ RAW_CANDIDATE_LOG_COLUMNS = [
     "open_positions_loser_count",
     "raw_size",
     "market_url",
-] + SOURCE_WALLET_LOG_COLUMNS + WEATHER_LOG_COLUMNS
+] + SOURCE_WALLET_LOG_COLUMNS + WEATHER_LOG_COLUMNS + BTC_CONTEXT_LOG_COLUMNS
 RANKED_SIGNAL_LOG_COLUMNS = [
     "timestamp",
     "market",
@@ -296,7 +370,7 @@ RANKED_SIGNAL_LOG_COLUMNS = [
     "risk_adjusted_ev",
     "entry_ev",
     "execution_quality_score",
-] + SOURCE_WALLET_LOG_COLUMNS + WEATHER_LOG_COLUMNS
+] + SOURCE_WALLET_LOG_COLUMNS + WEATHER_LOG_COLUMNS + BTC_CONTEXT_LOG_COLUMNS
 
 
 class StatefulRecurrentBrain:
@@ -573,7 +647,7 @@ def log_ranked_signal(signal_row):
         "entry_ev": signal_row.get("entry_ev"),
         "execution_quality_score": signal_row.get("execution_quality_score"),
     }
-    for extra_key in SOURCE_WALLET_LOG_COLUMNS + WEATHER_LOG_COLUMNS:
+    for extra_key in SOURCE_WALLET_LOG_COLUMNS + WEATHER_LOG_COLUMNS + BTC_CONTEXT_LOG_COLUMNS:
         record[extra_key] = signal_row.get(extra_key)
     record = {key: record.get(key) for key in RANKED_SIGNAL_LOG_COLUMNS}
     append_csv_record(SIGNALS_FILE, record)
@@ -2598,8 +2672,44 @@ def main_loop():
                             except Exception:
                                 pass
                 inferred_df = model_inference.run(features_df)
+                inferred_df["legacy_p_tp_before_sl"] = pd.to_numeric(
+                    inferred_df.get("p_tp_before_sl", 0.0), errors="coerce"
+                ).fillna(0.0)
+                inferred_df["legacy_expected_return"] = clip_expected_return_series(
+                    pd.to_numeric(inferred_df.get("expected_return", 0.0), errors="coerce").fillna(0.0)
+                )
+                inferred_df["legacy_edge_score"] = pd.to_numeric(
+                    inferred_df.get("edge_score", inferred_df["legacy_p_tp_before_sl"] * inferred_df["legacy_expected_return"]),
+                    errors="coerce",
+                ).fillna(0.0)
+
                 inferred_df = stage1_inference.run(inferred_df)
+                inferred_df["stage1_p_tp_before_sl"] = pd.to_numeric(
+                    inferred_df.get("p_tp_before_sl", 0.0), errors="coerce"
+                ).fillna(0.0)
+                inferred_df["stage1_expected_return"] = clip_expected_return_series(
+                    pd.to_numeric(inferred_df.get("expected_return", 0.0), errors="coerce").fillna(0.0)
+                )
+                inferred_df["stage1_edge_score"] = pd.to_numeric(
+                    inferred_df.get("edge_score", inferred_df["stage1_p_tp_before_sl"] * inferred_df["stage1_expected_return"]),
+                    errors="coerce",
+                ).fillna(0.0)
+                inferred_df["stage1_lower_confidence_bound"] = pd.to_numeric(
+                    inferred_df.get("lower_confidence_bound", inferred_df["stage1_expected_return"]),
+                    errors="coerce",
+                ).fillna(inferred_df["stage1_expected_return"])
+                inferred_df["stage1_return_std"] = pd.to_numeric(
+                    inferred_df.get("return_std", 0.0), errors="coerce"
+                ).fillna(0.0)
+
                 inferred_df = stage2_inference.run(inferred_df)
+                inferred_df["temporal_expected_return"] = clip_expected_return_series(
+                    pd.to_numeric(inferred_df.get("temporal_expected_return", 0.0), errors="coerce").fillna(0.0)
+                )
+                inferred_df["temporal_edge_score"] = (
+                    pd.to_numeric(inferred_df.get("temporal_p_tp_before_sl", 0.0), errors="coerce").fillna(0.0)
+                    * inferred_df["temporal_expected_return"]
+                )
                 if trading_mode == "live" and strict_inference_mode and _inference_guard_has_errors():
                     inference_errors = _inference_guard_get_errors(limit=20)
                     pre_cycle_entry_freeze = True
@@ -2634,20 +2744,7 @@ def main_loop():
                         message="strict_inference_freeze",
                         extra=pre_cycle_freeze_detail,
                     )
-                if "temporal_p_tp_before_sl" in inferred_df.columns:
-                    w_stage1 = float(np.clip(getattr(TradingConfig, "STAGE1_BLEND_WEIGHT", 0.65), 0.0, 1.0))
-                    w_stage2 = 1.0 - w_stage1
-                    inferred_df["p_tp_before_sl"] = (
-                        inferred_df["p_tp_before_sl"].astype(float).fillna(0.0) * w_stage1
-                        + inferred_df["temporal_p_tp_before_sl"].astype(float).fillna(0.0) * w_stage2
-                    ).clip(0.0, 1.0)
-                if "expected_return" in inferred_df.columns:
-                    inferred_df["expected_return"] = clip_expected_return_series(inferred_df["expected_return"])
-                if "temporal_expected_return" in inferred_df.columns:
-                    inferred_df["expected_return"] = clip_expected_return_series(
-                        inferred_df[["expected_return", "temporal_expected_return"]].mean(axis=1)
-                    )
-                    inferred_df["edge_score"] = inferred_df["p_tp_before_sl"].astype(float) * inferred_df["expected_return"].astype(float)
+                inferred_df = apply_regime_model_blend(inferred_df)
                 inferred_df = hybrid_scorer.run(inferred_df)
                 if "hybrid_edge" in inferred_df.columns:
                     inferred_df["edge_score"] = inferred_df["hybrid_edge"]
@@ -3405,6 +3502,13 @@ def main_loop():
                 detail_payload.setdefault("performance_governor_reason", governor_state.get("reason", ""))
                 detail_payload.setdefault("entry_model_version", active_model_version)
                 detail_payload.setdefault("entry_model_family", "runtime_live_stack")
+                # blocker / gate lineage
+                detail_payload.setdefault("first_blocker", gate if reject_reason_norm else None)
+                detail_payload.setdefault("all_blockers", gate if reject_reason_norm else None)
+                detail_payload.setdefault("passed_gates", ",".join(extra.get("_passed_gates", [])) if extra.get("_passed_gates") else None)
+                detail_payload.setdefault("active_model_family", "runtime_live_stack")
+                active_regime_label = str(signal_row.get("btc_market_regime_label", "calm") or "calm")
+                detail_payload.setdefault("active_regime", active_regime_label)
                 for live_field in (
                     "btc_live_price",
                     "btc_live_index_price",
@@ -3524,6 +3628,7 @@ def main_loop():
                 return payload
 
             def _log_candidate_skip(signal_row: dict, reason: str, gate: str | None = None, **extra):
+                extra.setdefault("_passed_gates", _passed_gates)
                 payload = _record_candidate_decision(
                     signal_row,
                     final_decision="SKIPPED",
@@ -3588,6 +3693,7 @@ def main_loop():
                         candidate_rank,
                     )
                 _candidate_stats["candidates_seen"] += 1
+                _passed_gates: list[str] = []
                 token_id_norm = normalize_token_id(signal_row.get("token_id"))
                 token_id = str(token_id_norm or "")
                 entry_intent = str(signal_row.get("entry_intent", "OPEN_LONG") or "OPEN_LONG").upper()
@@ -3616,6 +3722,7 @@ def main_loop():
                         max_age_seconds=effective_entry_max_market_staleness_sec,
                     )
                     continue
+                _passed_gates.append("freshness")
 
                 if len(current_active_trades) >= _max_pos:
                     _log_candidate_skip(
@@ -3636,6 +3743,7 @@ def main_loop():
                     )
                     continue
                 
+                _passed_gates.append("capacity")
                 if not market_key or not token_id or entry_intent == "CLOSE_LONG":
                     _log_candidate_skip(
                         signal_row,
@@ -3708,6 +3816,8 @@ def main_loop():
                         open_token_count=len(open_token_ids),
                     )
                     continue
+                _passed_gates.append("identity")
+                _passed_gates.append("market_universe")
                 wallet_state_gate_pass = bool(signal_row.get("wallet_state_gate_pass", True))
                 if entry_intent == "OPEN_LONG" and not wallet_state_gate_pass:
                     if should_soften_wallet_state_conflict(signal_row):
@@ -3733,6 +3843,7 @@ def main_loop():
                         )
                         continue
 
+                _passed_gates.append("wallet_state")
                 # FIX: Check dynamic active_trades to prevent Triple-Buy duplicates in the same loop
                 if market_key in active_trade_keys:
                     logging.info("Prevented duplicate entry: Trade already open for %s.", market_key)
@@ -3771,6 +3882,10 @@ def main_loop():
                         freeze_reason=session_kill_switch_reason or "session_limit_hit",
                     )
                     continue
+                _passed_gates.append("dedupe")
+                _passed_gates.append("liquidity")
+                _passed_gates.append("freeze")
+                _passed_gates.append("kill_switch")
 
                 # FIX BUG#1: evaluate rule once here and pass the result into
                 # choose_action so it does NOT call evaluate() a second time.

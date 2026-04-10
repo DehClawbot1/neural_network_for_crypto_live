@@ -46,6 +46,13 @@ class Stage3HybridScorer:
         crowding_penalty = out.get("wallet_same_market_history", 0.0)
         if not isinstance(crowding_penalty, pd.Series):
             crowding_penalty = pd.Series([0.0] * len(out), index=out.index)
+        regime_stability = out.get("btc_market_regime_stability_score", 0.5)
+        if not isinstance(regime_stability, pd.Series):
+            regime_stability = pd.Series([0.5] * len(out), index=out.index)
+        regime_multiplier = out.get("btc_market_regime_confidence_multiplier", 1.0)
+        if not isinstance(regime_multiplier, pd.Series):
+            regime_multiplier = pd.Series([1.0] * len(out), index=out.index)
+        regime_multiplier = regime_multiplier.astype(float).clip(lower=0.55, upper=1.15)
 
         out["p_win"] = out["p_tp_before_sl"].astype(float)
         out["p_loss"] = 1.0 - out["p_win"]
@@ -58,10 +65,11 @@ class Stage3HybridScorer:
             * (0.5 + trade_size_quality.astype(float).clip(lower=0.0))
             * (0.5 + liquidity_filter.astype(float).clip(lower=0.0))
             * btc_regime_fit.astype(float)
+            * (0.80 + regime_stability.astype(float).clip(lower=0.0, upper=1.0) * 0.20)
         )
         out["entry_ev"] = out["supervised_edge"] - self.transaction_cost - spread_penalty.astype(float)
         out["risk_adjusted_ev"] = out["entry_ev"] - out["p_loss"] * out["expected_loss"] * self.risk_penalty - time_penalty.astype(float) * 0.05 - crowding_penalty.astype(float) * 0.01
-        out["hybrid_edge"] = out["risk_adjusted_ev"] * (1.0 + out["execution_quality_score"].clip(lower=0.0))
+        out["hybrid_edge"] = out["risk_adjusted_ev"] * (1.0 + out["execution_quality_score"].clip(lower=0.0)) * regime_multiplier
 
         if "temporal_p_tp_before_sl" in out.columns:
             out["rf_probability"] = out["p_tp_before_sl"].astype(float)
@@ -85,4 +93,3 @@ class Stage3HybridScorer:
             out["ensemble_probability"] = out["rf_probability"]
             out["ensemble_live_candidate"] = 0
         return out
-

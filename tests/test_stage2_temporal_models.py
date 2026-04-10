@@ -23,18 +23,21 @@ class TestStage2TemporalModels:
     def test_stationarize_features(self):
         df = pd.DataFrame(
             {
-                "entry_price": [0.5, 0.6, 0.7],
-                "volume_score": [1000, 2000, 3000],
-                "liquidity_score": [500, 1500, 2500],
+                "btc_live_price": [50000, 51000, 52000],
+                "spread": [0.01, 0.05, 0.20],
+                "trend_score": [0.3, 0.5, 0.7],
             }
         )
-        feature_cols = ["entry_price", "volume_score", "liquidity_score"]
+        feature_cols = ["btc_live_price", "spread", "trend_score"]
 
         stationarized = self.model_manager._stationarize_features(df, feature_cols)
 
-        assert stationarized["entry_price"].iloc[0] == np.log1p(0.5)
-        assert round(float(stationarized["volume_score"].mean()), 5) == 0.0
-        assert round(float(stationarized["liquidity_score"].mean()), 5) == 0.0
+        # btc_live_price is log_scale → log1p applied
+        assert stationarized["btc_live_price"].iloc[0] == np.log1p(50000)
+        # spread is robust_scale → median/IQR normalised (median centred)
+        assert abs(float(stationarized["spread"].median())) < 1e-6
+        # trend_score is clip01 → untouched by stationarize
+        assert stationarized["trend_score"].iloc[0] == 0.3
 
     def test_balance_binary_frame(self):
         df = pd.DataFrame(

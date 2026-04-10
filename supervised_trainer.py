@@ -1,20 +1,42 @@
+import logging
 import os
 from pathlib import Path
 
-import joblib
 import pandas as pd
 from model_feature_catalog import DEFAULT_TABULAR_FEATURE_COLUMNS
 from model_feature_safety import drop_all_nan_features
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.impute import SimpleImputer
-from sklearn.linear_model import LogisticRegression
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
+
+logger = logging.getLogger(__name__)
+
+_MIN_NONZERO_FEATURES = int(os.getenv("MIN_NONZERO_FEATURES", "3") or 3)
+
+
+def _load_sklearn_supervised():
+    """Lazy-import sklearn to avoid import-time failures."""
+    import joblib
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.impute import SimpleImputer
+    from sklearn.linear_model import LogisticRegression, SGDClassifier
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+    return {
+        "joblib": joblib,
+        "RandomForestClassifier": RandomForestClassifier,
+        "SimpleImputer": SimpleImputer,
+        "LogisticRegression": LogisticRegression,
+        "SGDClassifier": SGDClassifier,
+        "Pipeline": Pipeline,
+        "StandardScaler": StandardScaler,
+    }
 
 
 class SupervisedTrainer:
     """
     Train a supervised BTC-direction model from aligned historical data.
+
+    Guardrails:
+    - Rejects degenerate all-zero L1 models (falls back to Elastic Net).
+    - Elastic Net (l1_ratio=0.7) runs beside pure L1 when L1 is too sparse.
     """
 
     FEATURE_COLUMNS = DEFAULT_TABULAR_FEATURE_COLUMNS
@@ -34,51 +56,96 @@ class SupervisedTrainer:
         except Exception:
             return pd.DataFrame()
 
-    def _train_sparse_classifier(self, X: pd.DataFrame, y: pd.Series) -> tuple[Pipeline, dict]:
+    def _train_sparse_classifier(self, X, y):
+        sklearn = _load_sklearn_supervised()
+        Pipeline = sklearn["Pipeline"]
+        SimpleImputer = sklearn["SimpleImputer"]
+        StandardScaler = sklearn["StandardScaler"]
+        LogisticRegression = sklearn["LogisticRegression"]
+
         regularization_c = float(os.getenv("SUPERVISED_L1_C", "0.35") or 0.35)
-        model = Pipeline(
-            steps=[
-                ("imputer", SimpleImputer(strategy="median")),
-                ("scaler", StandardScaler()),
-                (
-                    "clf",
-                    LogisticRegression(
-                        penalty="l1",
-                        solver="liblinear",
-                        class_weight="balanced",
-                        random_state=42,
-                        max_iter=2000,
-                        C=max(1e-4, regularization_c),
-                    ),
-                ),
-            ]
-        )
+        model = Pipeline([
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler()),
+            ("clf", LogisticRegression(
+                penalty="l1", solver="liblinear", class_weight="balanced",
+                random_state=42, max_iter=2000, C=max(1e-4, regularization_c),
+            )),
+        ])
         model.fit(X, y)
         coef = getattr(model.named_steps["clf"], "coef_", None)
         nonzero = int((abs(coef) > 1e-12).sum()) if coef is not None else 0
-        metadata = {
+
+        # guardrail: reject degenerate all-zero model
+        if nonzero < _MIN_NONZERO_FEATURES:
+            logger.warning(
+                "L1 model degenerate (%d nonzero features < %d minimum). "
+                "Falling back to Elastic Net.",
+                nonzero, _MIN_NONZERO_FEATURES,
+            )
+            return self._train_elastic_net_classifier(X, y)
+
+        return model, {
             "model_kind": "logistic_l1",
             "regularization": "l1",
             "nonzero_feature_count": nonzero,
             "fallback_used": False,
         }
-        return model, metadata
 
-    def _train_fallback_classifier(self, X: pd.DataFrame, y: pd.Series) -> tuple[Pipeline, dict]:
-        model = Pipeline(
-            steps=[
-                ("imputer", SimpleImputer(strategy="median")),
-                ("clf", RandomForestClassifier(n_estimators=200, random_state=42, class_weight="balanced")),
-            ]
-        )
+    def _train_elastic_net_classifier(self, X, y):
+        sklearn = _load_sklearn_supervised()
+        Pipeline = sklearn["Pipeline"]
+        SimpleImputer = sklearn["SimpleImputer"]
+        StandardScaler = sklearn["StandardScaler"]
+        SGDClassifier = sklearn["SGDClassifier"]
+
+        l1_ratio = float(os.getenv("SUPERVISED_ELASTIC_L1_RATIO", "0.7") or 0.7)
+        alpha = float(os.getenv("SUPERVISED_ELASTIC_ALPHA", "0.001") or 0.001)
+        model = Pipeline([
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler()),
+            ("clf", SGDClassifier(
+                loss="log_loss", penalty="elasticnet",
+                l1_ratio=max(0.0, min(1.0, l1_ratio)),
+                alpha=max(1e-6, alpha),
+                class_weight="balanced", random_state=42, max_iter=2000,
+            )),
+        ])
         model.fit(X, y)
-        metadata = {
+        coef = getattr(model.named_steps["clf"], "coef_", None)
+        nonzero = int((abs(coef) > 1e-12).sum()) if coef is not None else 0
+
+        if nonzero < _MIN_NONZERO_FEATURES:
+            logger.warning(
+                "Elastic Net also degenerate (%d nonzero). Falling back to RF.",
+                nonzero,
+            )
+            return self._train_fallback_classifier(X, y)
+
+        return model, {
+            "model_kind": "logistic_elastic_net",
+            "regularization": f"elasticnet(l1_ratio={l1_ratio})",
+            "nonzero_feature_count": nonzero,
+            "fallback_used": False,
+        }
+
+    def _train_fallback_classifier(self, X, y):
+        sklearn = _load_sklearn_supervised()
+        Pipeline = sklearn["Pipeline"]
+        SimpleImputer = sklearn["SimpleImputer"]
+        RandomForestClassifier = sklearn["RandomForestClassifier"]
+
+        model = Pipeline([
+            ("imputer", SimpleImputer(strategy="median")),
+            ("clf", RandomForestClassifier(n_estimators=200, random_state=42, class_weight="balanced")),
+        ])
+        model.fit(X, y)
+        return model, {
             "model_kind": "random_forest_fallback",
             "regularization": "none",
             "nonzero_feature_count": None,
             "fallback_used": True,
         }
-        return model, metadata
 
     def train(self):
         df = self._safe_read()
@@ -104,6 +171,7 @@ class SupervisedTrainer:
             model, metadata = self._train_sparse_classifier(X, y)
         except Exception:
             model, metadata = self._train_fallback_classifier(X, y)
-        joblib.dump({"model": model, "features": usable_features, **metadata}, self.model_file)
-        return model, usable_features
 
+        sklearn = _load_sklearn_supervised()
+        sklearn["joblib"].dump({"model": model, "features": usable_features, **metadata}, self.model_file)
+        return model, usable_features

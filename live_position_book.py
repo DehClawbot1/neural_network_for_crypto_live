@@ -107,14 +107,82 @@ class LivePositionBook:
                     "realized_pnl": self._coerce_float(position.get("realizedPnl"), 0.0),
                     "unrealized_pnl": current_value - initial_value,
                     "current_price": current_price,
+                    "first_fill_at": None,
+                    "opened_at": None,
                     "market_title": position.get("title"),
                     "market": position.get("slug") or position.get("title"),
+                    "entry_signal_snapshot_json": "",
+                    "entry_signal_snapshot_feature_count": 0,
+                    "entry_signal_snapshot_version": 1,
                     "last_fill_at": None,
                     "source": "profile_snapshot",
                     "status": "OPEN",
                 }
             )
         return rows
+
+    def _load_open_position_metadata_map(self) -> dict[tuple[str, str, str], dict]:
+        rows = self.db.query_all(
+            """
+            SELECT
+                token_id,
+                condition_id,
+                outcome_side,
+                market,
+                market_title,
+                opened_at,
+                entry_signal_snapshot_json,
+                entry_signal_snapshot_feature_count,
+                entry_signal_snapshot_version
+            FROM positions
+            WHERE UPPER(COALESCE(status, '')) IN ('OPEN', 'ENTERED', 'PARTIAL_EXIT')
+            ORDER BY COALESCE(opened_at, '') DESC
+            """
+        )
+        metadata: dict[tuple[str, str, str], dict] = {}
+        for row in rows:
+            key = (
+                str(row.get("token_id") or "").strip(),
+                str(row.get("condition_id") or "").strip(),
+                str(row.get("outcome_side") or "").strip().lower(),
+            )
+            if not key[0]:
+                continue
+            metadata.setdefault(key, dict(row))
+        return metadata
+
+    def _enrich_rows_from_position_metadata(self, rows: list[dict]) -> list[dict]:
+        metadata_map = self._load_open_position_metadata_map()
+        if not metadata_map:
+            return rows
+
+        enriched = []
+        for row in rows:
+            work = dict(row)
+            key = (
+                str(work.get("token_id") or "").strip(),
+                str(work.get("condition_id") or "").strip(),
+                str(work.get("outcome_side") or "").strip().lower(),
+            )
+            metadata = metadata_map.get(key)
+            if metadata:
+                for field_name in (
+                    "market",
+                    "market_title",
+                    "opened_at",
+                    "entry_signal_snapshot_json",
+                    "entry_signal_snapshot_feature_count",
+                    "entry_signal_snapshot_version",
+                ):
+                    if not work.get(field_name):
+                        work[field_name] = metadata.get(field_name)
+            if not work.get("opened_at"):
+                work["opened_at"] = work.get("first_fill_at") or work.get("last_fill_at")
+            work.setdefault("entry_signal_snapshot_json", "")
+            work.setdefault("entry_signal_snapshot_feature_count", 0)
+            work.setdefault("entry_signal_snapshot_version", 1)
+            enriched.append(work)
+        return enriched
 
     def _merge_profile_snapshot_rows(self, rows: list[dict]) -> list[dict]:
         snapshot_rows = self._load_profile_snapshot_rows()
@@ -603,12 +671,22 @@ class LivePositionBook:
                     "shares": 0.0,
                     "avg_entry_price": 0.0,
                     "realized_pnl": 0.0,
+                    "first_fill_at": filled_at,
                     "last_fill_at": filled_at,
                     "last_buy_at": None,
+                    "opened_at": None,
+                    "market": None,
+                    "market_title": None,
+                    "entry_signal_snapshot_json": "",
+                    "entry_signal_snapshot_feature_count": 0,
+                    "entry_signal_snapshot_version": 1,
                     "source": "fills_reconciled",
                     "status": "OPEN",
                 },
             )
+            existing_first_fill = book.get("first_fill_at")
+            if filled_at and (not existing_first_fill or str(filled_at) < str(existing_first_fill)):
+                book["first_fill_at"] = filled_at
             book["last_fill_at"] = filled_at or book.get("last_fill_at")
 
             if side == "BUY":
@@ -654,6 +732,9 @@ class LivePositionBook:
                     row["avg_entry_price"] = 0.0
                 row["source"] = f"fills_reconciled_external_sync:{str(sync.get('sync_type') or 'unknown').strip().lower()}"
 
+        books_list = self._enrich_rows_from_position_metadata(list(books.values()))
+        books = {str(row.get("position_key") or ""): row for row in books_list}
+
         # Guard: if fills produced no books, do not wipe live_positions.
         # An empty result can come from a transient DB lock or a degenerate fills
         # state — deleting all positions would silently close every open trade.
@@ -662,7 +743,7 @@ class LivePositionBook:
                 "rebuild_from_db: fills query returned 0 position books — "
                 "skipping live_positions wipe to prevent data loss."
             )
-            result = pd.DataFrame(columns=["position_key", "token_id", "condition_id", "outcome_side", "shares", "avg_entry_price", "realized_pnl", "last_fill_at", "source", "status"])
+            result = pd.DataFrame(columns=["position_key", "token_id", "condition_id", "outcome_side", "shares", "avg_entry_price", "realized_pnl", "first_fill_at", "last_fill_at", "opened_at", "market", "market_title", "entry_signal_snapshot_json", "entry_signal_snapshot_feature_count", "entry_signal_snapshot_version", "source", "status"])
             self._last_rebuild_result = result
             return result
 
@@ -680,8 +761,13 @@ class LivePositionBook:
                 cursor.execute(
                     """
                     INSERT OR REPLACE INTO live_positions
-                    (position_key, token_id, condition_id, outcome_side, shares, avg_entry_price, realized_pnl, last_fill_at, source, status, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (
+                        position_key, token_id, condition_id, outcome_side, shares, avg_entry_price, realized_pnl,
+                        first_fill_at, last_fill_at, opened_at, market, market_title,
+                        entry_signal_snapshot_json, entry_signal_snapshot_feature_count, entry_signal_snapshot_version,
+                        source, status, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row["position_key"],
@@ -691,7 +777,14 @@ class LivePositionBook:
                         row["shares"],
                         row["avg_entry_price"],
                         row["realized_pnl"],
+                        row.get("first_fill_at"),
                         row["last_fill_at"],
+                        row.get("opened_at") or row.get("first_fill_at") or row.get("last_fill_at"),
+                        row.get("market"),
+                        row.get("market_title"),
+                        row.get("entry_signal_snapshot_json", ""),
+                        int(row.get("entry_signal_snapshot_feature_count", 0) or 0),
+                        int(row.get("entry_signal_snapshot_version", 1) or 1),
                         row["source"],
                         row["status"],
                         now,
@@ -702,7 +795,7 @@ class LivePositionBook:
             self.db.conn.rollback()
             raise
 
-        result = pd.DataFrame(list(books.values())) if books else pd.DataFrame(columns=["position_key", "token_id", "condition_id", "outcome_side", "shares", "avg_entry_price", "realized_pnl", "last_fill_at", "source", "status"])
+        result = pd.DataFrame(list(books.values())) if books else pd.DataFrame(columns=["position_key", "token_id", "condition_id", "outcome_side", "shares", "avg_entry_price", "realized_pnl", "first_fill_at", "last_fill_at", "opened_at", "market", "market_title", "entry_signal_snapshot_json", "entry_signal_snapshot_feature_count", "entry_signal_snapshot_version", "source", "status"])
         self._last_rebuild_result = result
         return result
 
@@ -1001,14 +1094,19 @@ class LivePositionBook:
                 logger.debug("LivePositionBook rebuild_on_read failed: %s", exc)
         rows = self.db.query_all(
             """
-            SELECT position_key, token_id, condition_id, outcome_side, shares, avg_entry_price, realized_pnl, last_fill_at, source, status, updated_at
+            SELECT
+                position_key, token_id, condition_id, outcome_side, shares, avg_entry_price, realized_pnl,
+                first_fill_at, last_fill_at, opened_at, market, market_title,
+                entry_signal_snapshot_json, entry_signal_snapshot_feature_count, entry_signal_snapshot_version,
+                source, status, updated_at
             FROM live_positions
             WHERE status = 'OPEN' AND shares > 0
-            ORDER BY COALESCE(last_fill_at, '') DESC
+            ORDER BY COALESCE(opened_at, first_fill_at, last_fill_at, '') DESC
             """
         )
         rows = self._verify_open_positions_against_exchange(rows)
         rows = self._merge_profile_snapshot_rows(rows)
+        rows = self._enrich_rows_from_position_metadata(rows)
         return pd.DataFrame(rows)
 
     def get_enriched_open_positions(self, scored_df=None, fallback_df=None):

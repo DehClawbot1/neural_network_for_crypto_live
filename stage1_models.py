@@ -1,36 +1,55 @@
 from pathlib import Path
 import warnings
 
-import joblib
 import pandas as pd
 from model_feature_catalog import DEFAULT_TABULAR_FEATURE_COLUMNS
 from model_feature_safety import drop_all_nan_features
+from feature_treatment_policy import features_for_scope, log_audit
 from return_calibration import fit_return_calibration, transform_return_targets
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
-from sklearn.impute import SimpleImputer
-from sklearn.pipeline import Pipeline
 
-# ── BUG FIX I: Use hardware config for parallelism ──
-try:
-    from hardware_config import get_sklearn_jobs, get_lightgbm_params
-    _N_JOBS = get_sklearn_jobs()
-    _LGB_EXTRA = get_lightgbm_params()
-except ImportError:
-    _N_JOBS = -1
-    _LGB_EXTRA = {}
 
-try:
-    from lightgbm import LGBMClassifier, LGBMRegressor
-except Exception:  # pragma: no cover
-    LGBMClassifier = None
-    LGBMRegressor = None
+def _load_sklearn_stage1():
+    """Lazy-import sklearn and optional tree libraries."""
+    import joblib
+    from sklearn.calibration import CalibratedClassifierCV
+    from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
+    from sklearn.impute import SimpleImputer
+    from sklearn.pipeline import Pipeline
 
-try:
-    from catboost import CatBoostClassifier, CatBoostRegressor
-except Exception:  # pragma: no cover
-    CatBoostClassifier = None
-    CatBoostRegressor = None
+    try:
+        from hardware_config import get_sklearn_jobs, get_lightgbm_params
+        n_jobs = get_sklearn_jobs()
+        lgb_extra = get_lightgbm_params()
+    except ImportError:
+        n_jobs = -1
+        lgb_extra = {}
+
+    try:
+        from lightgbm import LGBMClassifier, LGBMRegressor
+    except Exception:
+        LGBMClassifier = None
+        LGBMRegressor = None
+
+    try:
+        from catboost import CatBoostClassifier, CatBoostRegressor
+    except Exception:
+        CatBoostClassifier = None
+        CatBoostRegressor = None
+
+    return {
+        "joblib": joblib,
+        "CalibratedClassifierCV": CalibratedClassifierCV,
+        "HistGradientBoostingClassifier": HistGradientBoostingClassifier,
+        "HistGradientBoostingRegressor": HistGradientBoostingRegressor,
+        "SimpleImputer": SimpleImputer,
+        "Pipeline": Pipeline,
+        "n_jobs": n_jobs,
+        "lgb_extra": lgb_extra,
+        "LGBMClassifier": LGBMClassifier,
+        "LGBMRegressor": LGBMRegressor,
+        "CatBoostClassifier": CatBoostClassifier,
+        "CatBoostRegressor": CatBoostRegressor,
+    }
 
 
 class Stage1Models:
@@ -62,67 +81,56 @@ class Stage1Models:
 
     def _usable_features(self, df):
         candidates = [c for c in self.FEATURE_COLUMNS if c in df.columns]
+        candidates = features_for_scope("tree", candidates)
         usable, _ = drop_all_nan_features(df, candidates, context="stage1_models")
         return usable
 
     def _build_classifier(self, cv=3):
-        if LGBMClassifier is not None:
+        sk = _load_sklearn_stage1()
+        Pipeline = sk["Pipeline"]
+        SimpleImputer = sk["SimpleImputer"]
+        if sk["LGBMClassifier"] is not None:
             lgb_params = {
-                "n_estimators": 300,
-                "learning_rate": 0.05,
-                "num_leaves": 31,
-                "subsample": 0.9,
-                "colsample_bytree": 0.9,
-                "random_state": 42,
-                "n_jobs": _N_JOBS,
-                "verbose": -1,
+                "n_estimators": 300, "learning_rate": 0.05, "num_leaves": 31,
+                "subsample": 0.9, "colsample_bytree": 0.9, "random_state": 42,
+                "n_jobs": sk["n_jobs"], "verbose": -1,
             }
-            for k, v in _LGB_EXTRA.items():
+            for k, v in sk["lgb_extra"].items():
                 if k != "n_jobs":
                     lgb_params[k] = v
-            base = LGBMClassifier(**lgb_params)
-            model = CalibratedClassifierCV(base, method="sigmoid", cv=cv) if cv else base
-            return Pipeline([
-                ("imputer", SimpleImputer(strategy="median")),
-                ("model", model),
-            ])
-        if CatBoostClassifier is not None:
-            base = CatBoostClassifier(iterations=300, learning_rate=0.05, depth=6, verbose=False, thread_count=_N_JOBS)
-            model = CalibratedClassifierCV(base, method="sigmoid", cv=cv) if cv else base
-            return Pipeline([
-                ("imputer", SimpleImputer(strategy="median")),
-                ("model", model),
-            ])
+            base = sk["LGBMClassifier"](**lgb_params)
+            model = sk["CalibratedClassifierCV"](base, method="sigmoid", cv=cv) if cv else base
+            return Pipeline([("imputer", SimpleImputer(strategy="median")), ("model", model)])
+        if sk["CatBoostClassifier"] is not None:
+            base = sk["CatBoostClassifier"](iterations=300, learning_rate=0.05, depth=6, verbose=False, thread_count=sk["n_jobs"])
+            model = sk["CalibratedClassifierCV"](base, method="sigmoid", cv=cv) if cv else base
+            return Pipeline([("imputer", SimpleImputer(strategy="median")), ("model", model)])
         return Pipeline([
             ("imputer", SimpleImputer(strategy="median")),
-            ("model", HistGradientBoostingClassifier(max_depth=6, learning_rate=0.05, random_state=42)),
+            ("model", sk["HistGradientBoostingClassifier"](max_depth=6, learning_rate=0.05, random_state=42)),
         ])
 
     def _build_regressor(self):
-        if LGBMRegressor is not None:
+        sk = _load_sklearn_stage1()
+        Pipeline = sk["Pipeline"]
+        SimpleImputer = sk["SimpleImputer"]
+        if sk["LGBMRegressor"] is not None:
             lgb_params = {
-                "n_estimators": 300,
-                "learning_rate": 0.05,
-                "num_leaves": 31,
-                "random_state": 42,
-                "n_jobs": _N_JOBS,
-                "verbose": -1,
+                "n_estimators": 300, "learning_rate": 0.05, "num_leaves": 31,
+                "random_state": 42, "n_jobs": sk["n_jobs"], "verbose": -1,
             }
-            for k, v in _LGB_EXTRA.items():
+            for k, v in sk["lgb_extra"].items():
                 if k != "n_jobs":
                     lgb_params[k] = v
+            return Pipeline([("imputer", SimpleImputer(strategy="median")), ("model", sk["LGBMRegressor"](**lgb_params))])
+        if sk["CatBoostRegressor"] is not None:
             return Pipeline([
                 ("imputer", SimpleImputer(strategy="median")),
-                ("model", LGBMRegressor(**lgb_params)),
-            ])
-        if CatBoostRegressor is not None:
-            return Pipeline([
-                ("imputer", SimpleImputer(strategy="median")),
-                ("model", CatBoostRegressor(iterations=300, learning_rate=0.05, depth=6, verbose=False, thread_count=_N_JOBS)),
+                ("model", sk["CatBoostRegressor"](iterations=300, learning_rate=0.05, depth=6, verbose=False, thread_count=sk["n_jobs"])),
             ])
         return Pipeline([
             ("imputer", SimpleImputer(strategy="median")),
-            ("model", HistGradientBoostingRegressor(max_depth=6, learning_rate=0.05, random_state=42)),
+            ("model", sk["HistGradientBoostingRegressor"](max_depth=6, learning_rate=0.05, random_state=42)),
         ])
 
     def _write_feature_importance(self, feature_names, fitted_model):
@@ -143,6 +151,8 @@ class Stage1Models:
         return min(3, int(counts.min()))
 
     def train(self):
+        log_audit()
+
         df = self._safe_read()
         if df.empty:
             return None
@@ -152,6 +162,8 @@ class Stage1Models:
             return None
 
         X = df[usable]
+        sk = _load_sklearn_stage1()
+        joblib = sk["joblib"]
 
         if "tp_before_sl_60m" in df.columns:
             y_cls = df["tp_before_sl_60m"].fillna(0).astype(int)

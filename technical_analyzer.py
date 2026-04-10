@@ -8,8 +8,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from btc_regime_router import classify_btc_regime_row
 from btc_live_price_tracker import BTCLivePriceTracker
 from candle_data_service import CandleDataService
+from csv_utils import safe_csv_append_with_schema
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -273,15 +275,25 @@ class TechnicalAnalyzer:
             "btc_macd_hist_slope",
             "btc_momentum_regime",
             "btc_momentum_confluence",
+            "btc_market_regime_label",
+            "btc_market_regime_score",
+            "btc_market_regime_trend_score",
+            "btc_market_regime_volatility_score",
+            "btc_market_regime_chaos_score",
+            "btc_market_regime_stability_score",
+            "btc_market_regime_is_calm",
+            "btc_market_regime_is_trend",
+            "btc_market_regime_is_volatile",
+            "btc_market_regime_is_chaotic",
+            "btc_market_regime_primary_model",
+            "btc_market_regime_confidence_multiplier",
+            "btc_market_regime_weight_legacy",
+            "btc_market_regime_weight_stage1",
+            "btc_market_regime_weight_stage2",
         ]
         payload = {key: context.get(key) for key in snapshot_keys}
         try:
-            pd.DataFrame([payload]).to_csv(
-                self.snapshot_file,
-                mode="a",
-                header=not self.snapshot_file.exists(),
-                index=False,
-            )
+            safe_csv_append_with_schema(self.snapshot_file, pd.DataFrame([payload]))
         except Exception as exc:
             logger.debug("TechnicalAnalyzer: Snapshot write failed: %s", exc)
 
@@ -486,6 +498,7 @@ class TechnicalAnalyzer:
             if self._cached_context and (now - self._last_fetch_time) < self.cache_ttl:
                 cached = dict(self._cached_context)
                 cached.update(live_context)
+                cached.update(classify_btc_regime_row(cached))
                 return cached
 
         context = {
@@ -511,6 +524,21 @@ class TechnicalAnalyzer:
             "btc_macd_hist_slope": 0.0,
             "btc_momentum_regime": "NEUTRAL",
             "btc_momentum_confluence": 0.0,
+            "btc_market_regime_label": "calm",
+            "btc_market_regime_score": 0.0,
+            "btc_market_regime_trend_score": 0.0,
+            "btc_market_regime_volatility_score": 0.0,
+            "btc_market_regime_chaos_score": 0.0,
+            "btc_market_regime_stability_score": 1.0,
+            "btc_market_regime_is_calm": 1,
+            "btc_market_regime_is_trend": 0,
+            "btc_market_regime_is_volatile": 0,
+            "btc_market_regime_is_chaotic": 0,
+            "btc_market_regime_primary_model": "legacy",
+            "btc_market_regime_confidence_multiplier": 1.0,
+            "btc_market_regime_weight_legacy": 0.45,
+            "btc_market_regime_weight_stage1": 0.35,
+            "btc_market_regime_weight_stage2": 0.20,
         }
         context.update(self._compute_intraday_trend_context())
 
@@ -523,6 +551,7 @@ class TechnicalAnalyzer:
             if daily_df is None or daily_df.empty or len(daily_df) < 200:
                 logging.warning("TechnicalAnalyzer: Not enough daily candles returned to calculate 200 SMA.")
                 context.update(live_context)
+                context.update(classify_btc_regime_row(context))
                 self._write_snapshot(context)
                 with self._ctx_lock:
                     self._cached_context = dict(context)
@@ -540,6 +569,7 @@ class TechnicalAnalyzer:
 
             if pd.isna(sma_200):
                 context.update(live_context)
+                context.update(classify_btc_regime_row(context))
                 self._write_snapshot(context)
                 with self._ctx_lock:
                     self._cached_context = dict(context)
@@ -579,6 +609,7 @@ class TechnicalAnalyzer:
             )
 
             context.update(live_context)
+            context.update(classify_btc_regime_row(context))
             self._write_snapshot(context)
             self._cached_context = dict(context)
             self._last_fetch_time = now
@@ -587,5 +618,6 @@ class TechnicalAnalyzer:
         except Exception as e:
             logging.warning(f"TechnicalAnalyzer: Failed to fetch closed BTC candles: {e}")
             context.update(live_context)
+            context.update(classify_btc_regime_row(context))
             self._write_snapshot(context)
             return context

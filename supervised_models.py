@@ -1,26 +1,55 @@
+import logging
 import os
 from pathlib import Path
 
-import joblib
 import pandas as pd
 from model_feature_catalog import DEFAULT_TABULAR_FEATURE_COLUMNS
 from model_feature_safety import drop_all_nan_features
 from return_calibration import fit_return_calibration, transform_return_targets
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.impute import SimpleImputer
-from sklearn.linear_model import Lasso, LogisticRegression
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
+
+logger = logging.getLogger(__name__)
+
+_MIN_NONZERO_FEATURES = int(os.getenv("MIN_NONZERO_FEATURES", "3") or 3)
+
+
+def _load_sklearn_supervised():
+    """Lazy-import sklearn to avoid import-time failures."""
+    import joblib
+    from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+    from sklearn.impute import SimpleImputer
+    from sklearn.linear_model import ElasticNet, Lasso, LogisticRegression, SGDClassifier
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+    return {
+        "joblib": joblib,
+        "RandomForestClassifier": RandomForestClassifier,
+        "RandomForestRegressor": RandomForestRegressor,
+        "SimpleImputer": SimpleImputer,
+        "LogisticRegression": LogisticRegression,
+        "SGDClassifier": SGDClassifier,
+        "Lasso": Lasso,
+        "ElasticNet": ElasticNet,
+        "Pipeline": Pipeline,
+        "StandardScaler": StandardScaler,
+    }
+
 
 try:
     from hardware_config import get_sklearn_jobs
-
     _N_JOBS = get_sklearn_jobs()
 except ImportError:
     _N_JOBS = -1
 
 
 class SupervisedModels:
+    """
+    Supervised TP/SL classifier + return regressor with sparse regularization.
+
+    Guardrails:
+    - Rejects degenerate all-zero L1/Lasso models.
+    - Elastic Net beside pure L1 to avoid over-pruning correlated features.
+    """
+
     FEATURE_COLUMNS = DEFAULT_TABULAR_FEATURE_COLUMNS
 
     def __init__(self, logs_dir="logs", weights_dir="weights"):
@@ -39,28 +68,27 @@ class SupervisedModels:
         except Exception:
             return pd.DataFrame()
 
-    def _train_sparse_classifier(self, X: pd.DataFrame, y: pd.Series) -> tuple[Pipeline, dict]:
+    # ── classifiers ─────────────────────────────────────────────────
+
+    def _train_sparse_classifier(self, X, y):
+        sklearn = _load_sklearn_supervised()
         regularization_c = float(os.getenv("TP_CLASSIFIER_L1_C", os.getenv("SUPERVISED_L1_C", "0.35")) or 0.35)
-        model = Pipeline(
-            [
-                ("imputer", SimpleImputer(strategy="median")),
-                ("scaler", StandardScaler()),
-                (
-                    "model",
-                    LogisticRegression(
-                        penalty="l1",
-                        solver="liblinear",
-                        class_weight="balanced",
-                        random_state=42,
-                        max_iter=2000,
-                        C=max(1e-4, regularization_c),
-                    ),
-                ),
-            ]
-        )
+        model = sklearn["Pipeline"]([
+            ("imputer", sklearn["SimpleImputer"](strategy="median")),
+            ("scaler", sklearn["StandardScaler"]()),
+            ("model", sklearn["LogisticRegression"](
+                penalty="l1", solver="liblinear", class_weight="balanced",
+                random_state=42, max_iter=2000, C=max(1e-4, regularization_c),
+            )),
+        ])
         model.fit(X, y)
         coef = getattr(model.named_steps["model"], "coef_", None)
         nonzero = int((abs(coef) > 1e-12).sum()) if coef is not None else 0
+
+        if nonzero < _MIN_NONZERO_FEATURES:
+            logger.warning("L1 classifier degenerate (%d nonzero). Trying Elastic Net.", nonzero)
+            return self._train_elastic_net_classifier(X, y)
+
         return model, {
             "model_kind": "logistic_l1",
             "regularization": "l1",
@@ -68,13 +96,43 @@ class SupervisedModels:
             "fallback_used": False,
         }
 
-    def _train_classifier_fallback(self, X: pd.DataFrame, y: pd.Series) -> tuple[Pipeline, dict]:
-        model = Pipeline(
-            [
-                ("imputer", SimpleImputer(strategy="median")),
-                ("model", RandomForestClassifier(n_estimators=250, random_state=42, class_weight="balanced", n_jobs=_N_JOBS)),
-            ]
-        )
+    def _train_elastic_net_classifier(self, X, y):
+        sklearn = _load_sklearn_supervised()
+        l1_ratio = float(os.getenv("TP_CLASSIFIER_ELASTIC_L1_RATIO", "0.7") or 0.7)
+        alpha = float(os.getenv("TP_CLASSIFIER_ELASTIC_ALPHA", "0.001") or 0.001)
+        model = sklearn["Pipeline"]([
+            ("imputer", sklearn["SimpleImputer"](strategy="median")),
+            ("scaler", sklearn["StandardScaler"]()),
+            ("model", sklearn["SGDClassifier"](
+                loss="log_loss", penalty="elasticnet",
+                l1_ratio=max(0.0, min(1.0, l1_ratio)),
+                alpha=max(1e-6, alpha),
+                class_weight="balanced", random_state=42, max_iter=2000,
+            )),
+        ])
+        model.fit(X, y)
+        coef = getattr(model.named_steps["model"], "coef_", None)
+        nonzero = int((abs(coef) > 1e-12).sum()) if coef is not None else 0
+
+        if nonzero < _MIN_NONZERO_FEATURES:
+            logger.warning("Elastic Net classifier also degenerate (%d nonzero). Falling back to RF.", nonzero)
+            return self._train_classifier_fallback(X, y)
+
+        return model, {
+            "model_kind": "logistic_elastic_net",
+            "regularization": f"elasticnet(l1_ratio={l1_ratio})",
+            "nonzero_feature_count": nonzero,
+            "fallback_used": False,
+        }
+
+    def _train_classifier_fallback(self, X, y):
+        sklearn = _load_sklearn_supervised()
+        model = sklearn["Pipeline"]([
+            ("imputer", sklearn["SimpleImputer"](strategy="median")),
+            ("model", sklearn["RandomForestClassifier"](
+                n_estimators=250, random_state=42, class_weight="balanced", n_jobs=_N_JOBS,
+            )),
+        ])
         model.fit(X, y)
         return model, {
             "model_kind": "random_forest_fallback",
@@ -83,18 +141,24 @@ class SupervisedModels:
             "fallback_used": True,
         }
 
-    def _train_lasso_regressor(self, X: pd.DataFrame, y: pd.Series) -> tuple[Pipeline, dict]:
+    # ── regressors ──────────────────────────────────────────────────
+
+    def _train_lasso_regressor(self, X, y):
+        sklearn = _load_sklearn_supervised()
         alpha = float(os.getenv("RETURN_REGRESSOR_LASSO_ALPHA", "0.0015") or 0.0015)
-        model = Pipeline(
-            [
-                ("imputer", SimpleImputer(strategy="median")),
-                ("scaler", StandardScaler()),
-                ("model", Lasso(alpha=max(1e-6, alpha), max_iter=5000, random_state=42)),
-            ]
-        )
+        model = sklearn["Pipeline"]([
+            ("imputer", sklearn["SimpleImputer"](strategy="median")),
+            ("scaler", sklearn["StandardScaler"]()),
+            ("model", sklearn["Lasso"](alpha=max(1e-6, alpha), max_iter=5000, random_state=42)),
+        ])
         model.fit(X, y)
         coef = getattr(model.named_steps["model"], "coef_", None)
         nonzero = int((abs(coef) > 1e-12).sum()) if coef is not None else 0
+
+        if nonzero < _MIN_NONZERO_FEATURES:
+            logger.warning("Lasso degenerate (%d nonzero). Trying Elastic Net regressor.", nonzero)
+            return self._train_elastic_net_regressor(X, y)
+
         return model, {
             "model_kind": "lasso",
             "regularization": "l1",
@@ -102,13 +166,40 @@ class SupervisedModels:
             "fallback_used": False,
         }
 
-    def _train_regressor_fallback(self, X: pd.DataFrame, y: pd.Series) -> tuple[Pipeline, dict]:
-        model = Pipeline(
-            [
-                ("imputer", SimpleImputer(strategy="median")),
-                ("model", RandomForestRegressor(n_estimators=250, random_state=42, n_jobs=_N_JOBS)),
-            ]
-        )
+    def _train_elastic_net_regressor(self, X, y):
+        sklearn = _load_sklearn_supervised()
+        alpha = float(os.getenv("RETURN_REGRESSOR_ELASTIC_ALPHA", "0.001") or 0.001)
+        l1_ratio = float(os.getenv("RETURN_REGRESSOR_ELASTIC_L1_RATIO", "0.7") or 0.7)
+        model = sklearn["Pipeline"]([
+            ("imputer", sklearn["SimpleImputer"](strategy="median")),
+            ("scaler", sklearn["StandardScaler"]()),
+            ("model", sklearn["ElasticNet"](
+                alpha=max(1e-6, alpha),
+                l1_ratio=max(0.0, min(1.0, l1_ratio)),
+                max_iter=5000, random_state=42,
+            )),
+        ])
+        model.fit(X, y)
+        coef = getattr(model.named_steps["model"], "coef_", None)
+        nonzero = int((abs(coef) > 1e-12).sum()) if coef is not None else 0
+
+        if nonzero < _MIN_NONZERO_FEATURES:
+            logger.warning("Elastic Net regressor degenerate (%d nonzero). Falling back to RF.", nonzero)
+            return self._train_regressor_fallback(X, y)
+
+        return model, {
+            "model_kind": "elastic_net",
+            "regularization": f"elasticnet(l1_ratio={l1_ratio})",
+            "nonzero_feature_count": nonzero,
+            "fallback_used": False,
+        }
+
+    def _train_regressor_fallback(self, X, y):
+        sklearn = _load_sklearn_supervised()
+        model = sklearn["Pipeline"]([
+            ("imputer", sklearn["SimpleImputer"](strategy="median")),
+            ("model", sklearn["RandomForestRegressor"](n_estimators=250, random_state=42, n_jobs=_N_JOBS)),
+        ])
         model.fit(X, y)
         return model, {
             "model_kind": "random_forest_fallback",
@@ -116,6 +207,8 @@ class SupervisedModels:
             "nonzero_feature_count": None,
             "fallback_used": True,
         }
+
+    # ── main train ──────────────────────────────────────────────────
 
     def train(self):
         df = self._safe_read()
@@ -142,6 +235,9 @@ class SupervisedModels:
         if not usable:
             return None
         X = X[usable]
+
+        sklearn = _load_sklearn_supervised()
+        joblib = sklearn["joblib"]
 
         if "tp_before_sl_60m" in train_df.columns:
             y_clf = train_df["tp_before_sl_60m"].fillna(0).astype(int)

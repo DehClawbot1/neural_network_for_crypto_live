@@ -35,7 +35,16 @@
       "Read(//c/Users/Utilizador/.openclaw/workspace-trader_agent_n1/neural_network_for_crypto_live/**)",
       "Bash(python -c \"import pandas as pd; df = pd.read_csv\\(''data/BTCUSDT_15m_730d.csv'', nrows=2\\); print\\(df.columns.tolist\\(\\)\\); print\\(df.dtypes\\)\")",
       "Bash(python -c \":*)",
-      "Bash(python download_btc_dataset.py --interval 15m --days 730 --train)"
+      "Bash(python download_btc_dataset.py --interval 15m --days 730 --train)",
+      "Bash(xargs grep:*)",
+      "Bash(python -m py_compile feature_treatment_policy.py)",
+      "Bash(python -m py_compile stage1_models.py)",
+      "Bash(python -m py_compile stage2_temporal_models.py)",
+      "Bash(python -m pytest tests/test_feature_treatment_policy.py tests/test_stage2_temporal_models.py -q)",
+      "Bash(python -m pytest tests/test_partial_external_reconciliation.py tests/test_historical_dataset_builder.py tests/test_contract_target_builder.py tests/test_btc_live_price_tracker.py tests/test_btc_regime_router.py tests/test_feature_builder.py tests/test_stage2_temporal_models.py tests/test_feature_treatment_policy.py -q)",
+      "Bash(ls -lah /c/Users/Utilizador/.openclaw/workspace-trader_agent_n1/neural_network_for_crypto_live/*.py)",
+      "Bash(ls -la /c/Users/Utilizador/.openclaw/workspace-trader_agent_n1/neural_network_for_crypto_live/*.py)",
+      "Bash(ls -1 /c/Users/Utilizador/.openclaw/workspace-trader_agent_n1/neural_network_for_crypto_live/stage*.py)"
     ]
   }
 }

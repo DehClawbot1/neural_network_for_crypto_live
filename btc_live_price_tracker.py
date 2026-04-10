@@ -8,6 +8,8 @@ import pandas as pd
 import requests
 
 from candle_data_service import CandleDataService
+from csv_utils import safe_csv_append_with_schema
+from kalman_feature_smoother import AdaptiveScalarKalmanFilter
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,68 @@ class BTCLivePriceTracker:
         self._cached_context: dict | None = None
         self._last_fetch_time = 0.0
         self._ctx_lock = threading.Lock()
+        self._kalman_filters = {
+            "btc_live_price_kalman": AdaptiveScalarKalmanFilter(
+                process_noise_ratio=0.0007,
+                measurement_noise_ratio=0.0030,
+                min_scale=100.0,
+            ),
+            "btc_live_spot_price_kalman": AdaptiveScalarKalmanFilter(
+                process_noise_ratio=0.0007,
+                measurement_noise_ratio=0.0030,
+                min_scale=100.0,
+            ),
+            "btc_live_index_price_kalman": AdaptiveScalarKalmanFilter(
+                process_noise_ratio=0.0007,
+                measurement_noise_ratio=0.0032,
+                min_scale=100.0,
+            ),
+            "btc_live_mark_price_kalman": AdaptiveScalarKalmanFilter(
+                process_noise_ratio=0.0008,
+                measurement_noise_ratio=0.0034,
+                min_scale=100.0,
+            ),
+            "btc_live_spot_index_basis_bps_kalman": AdaptiveScalarKalmanFilter(
+                process_noise_ratio=0.050,
+                measurement_noise_ratio=0.180,
+                min_scale=1.0,
+            ),
+            "btc_live_mark_index_basis_bps_kalman": AdaptiveScalarKalmanFilter(
+                process_noise_ratio=0.060,
+                measurement_noise_ratio=0.200,
+                min_scale=1.0,
+            ),
+            "btc_live_mark_spot_basis_bps_kalman": AdaptiveScalarKalmanFilter(
+                process_noise_ratio=0.060,
+                measurement_noise_ratio=0.200,
+                min_scale=1.0,
+            ),
+            "btc_live_return_1m_kalman": AdaptiveScalarKalmanFilter(
+                process_noise_ratio=0.120,
+                measurement_noise_ratio=0.300,
+                min_scale=0.001,
+            ),
+            "btc_live_return_5m_kalman": AdaptiveScalarKalmanFilter(
+                process_noise_ratio=0.100,
+                measurement_noise_ratio=0.250,
+                min_scale=0.001,
+            ),
+            "btc_live_return_15m_kalman": AdaptiveScalarKalmanFilter(
+                process_noise_ratio=0.090,
+                measurement_noise_ratio=0.220,
+                min_scale=0.001,
+            ),
+            "btc_live_return_1h_kalman": AdaptiveScalarKalmanFilter(
+                process_noise_ratio=0.080,
+                measurement_noise_ratio=0.200,
+                min_scale=0.001,
+            ),
+            "btc_live_confluence_kalman": AdaptiveScalarKalmanFilter(
+                process_noise_ratio=0.120,
+                measurement_noise_ratio=0.220,
+                min_scale=0.05,
+            ),
+        }
 
     @staticmethod
     def _safe_float(value, default=None):
@@ -175,14 +239,40 @@ class BTCLivePriceTracker:
 
     def _write_snapshot(self, context: dict):
         try:
-            pd.DataFrame([context]).to_csv(
-                self.snapshot_file,
-                mode="a",
-                header=not self.snapshot_file.exists(),
-                index=False,
-            )
+            safe_csv_append_with_schema(self.snapshot_file, pd.DataFrame([context]))
         except Exception as exc:
             logger.debug("BTCLivePriceTracker: Snapshot write failed: %s", exc)
+
+    def _apply_kalman_smoothing(self, context: dict) -> dict:
+        raw_to_smoothed = {
+            "btc_live_price": "btc_live_price_kalman",
+            "btc_live_spot_price": "btc_live_spot_price_kalman",
+            "btc_live_index_price": "btc_live_index_price_kalman",
+            "btc_live_mark_price": "btc_live_mark_price_kalman",
+            "btc_live_spot_index_basis_bps": "btc_live_spot_index_basis_bps_kalman",
+            "btc_live_mark_index_basis_bps": "btc_live_mark_index_basis_bps_kalman",
+            "btc_live_mark_spot_basis_bps": "btc_live_mark_spot_basis_bps_kalman",
+            "btc_live_return_1m": "btc_live_return_1m_kalman",
+            "btc_live_return_5m": "btc_live_return_5m_kalman",
+            "btc_live_return_15m": "btc_live_return_15m_kalman",
+            "btc_live_return_1h": "btc_live_return_1h_kalman",
+            "btc_live_confluence": "btc_live_confluence_kalman",
+        }
+        smoothed = {}
+        for raw_key, smooth_key in raw_to_smoothed.items():
+            filter_obj = self._kalman_filters.get(smooth_key)
+            if filter_obj is None:
+                continue
+            filtered_value = filter_obj.update(context.get(raw_key))
+            if filtered_value is None:
+                smoothed[smooth_key] = context.get(raw_key)
+            elif "basis_bps" in smooth_key:
+                smoothed[smooth_key] = round(float(filtered_value), 4)
+            elif "return" in smooth_key or "confluence" in smooth_key:
+                smoothed[smooth_key] = round(float(filtered_value), 6)
+            else:
+                smoothed[smooth_key] = round(float(filtered_value), 6)
+        return smoothed
 
     def analyze(self) -> dict:
         now = time.time()
@@ -277,6 +367,7 @@ class BTCLivePriceTracker:
             "btc_live_mark_feed_available": bool(raw_mark_price not in (None, 0.0)),
             "btc_live_sources_json": str({k: round(v, 2) for k, v in spot_sources.items() if v not in (None, 0.0)}),
         }
+        context.update(self._apply_kalman_smoothing(context))
         with self._ctx_lock:
             self._cached_context = dict(context)
             self._last_fetch_time = now

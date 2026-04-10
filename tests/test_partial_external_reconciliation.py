@@ -3,7 +3,7 @@ import warnings
 
 from live_position_book import LivePositionBook
 from trade_feedback_learner import TradeFeedbackLearner
-from trade_lifecycle import TradeLifecycle, TradeState
+from trade_lifecycle import TradeLifecycle, TradeState, serialize_signal_snapshot
 from trade_manager import TradeManager
 
 
@@ -36,6 +36,16 @@ def test_trade_manager_reconcile_updates_existing_trade_shares(tmp_path):
     trade.enter(size_usdc=5.0, entry_price=0.50)
     trade.update_market(0.54)
     manager.active_trades["tok-1|cond-1|Yes"] = trade
+    snapshot_json, feature_count = serialize_signal_snapshot(
+        {
+            "timestamp": "2026-04-01T09:59:00+00:00",
+            "trader_wallet": "0xwallet",
+            "signal_label": "STRONG PAPER OPPORTUNITY",
+            "confidence": 0.74,
+            "entry_model_family": "runtime_live_stack",
+            "market_family": "btc_threshold",
+        }
+    )
 
     reconciled = pd.DataFrame(
         [
@@ -50,7 +60,12 @@ def test_trade_manager_reconcile_updates_existing_trade_shares(tmp_path):
                 "shares": 4.0,
                 "realized_pnl": 0.75,
                 "unrealized_pnl": 0.20,
+                "first_fill_at": "2026-04-01T09:59:00+00:00",
                 "last_fill_at": "2026-04-01T10:03:00+00:00",
+                "opened_at": "2026-04-01T09:59:00+00:00",
+                "entry_signal_snapshot_json": snapshot_json,
+                "entry_signal_snapshot_feature_count": feature_count,
+                "entry_signal_snapshot_version": 1,
             }
         ]
     )
@@ -63,6 +78,9 @@ def test_trade_manager_reconcile_updates_existing_trade_shares(tmp_path):
     assert float(synced.realized_pnl) == 0.75
     assert float(synced.unrealized_pnl) == 0.20
     assert float(synced.current_price) == 0.55
+    assert synced.opened_at == "2026-04-01T09:59:00+00:00"
+    assert synced.signal_label == "STRONG PAPER OPPORTUNITY"
+    assert synced.source_wallet == "0xwallet"
 
 
 def test_closed_trade_persistence_is_idempotent(tmp_path):
@@ -227,3 +245,71 @@ def test_get_open_positions_merges_profile_snapshot_for_missing_live_row(tmp_pat
     added = open_df.loc[open_df["token_id"] == "tok-profile"].iloc[0]
     assert float(added["shares"]) == 2.5
     assert str(added["source"]) == "profile_snapshot"
+
+
+def test_get_open_positions_enriches_live_rows_with_position_metadata(tmp_path, monkeypatch):
+    book = LivePositionBook(logs_dir=tmp_path)
+    snapshot_json, feature_count = serialize_signal_snapshot(
+        {
+            "timestamp": "2026-04-01T09:00:00+00:00",
+            "trader_wallet": "0xmeta",
+            "signal_label": "LOW-CONFIDENCE WATCH",
+        }
+    )
+    book.db.execute(
+        """
+        INSERT INTO live_positions
+        (position_key, token_id, condition_id, outcome_side, shares, avg_entry_price, realized_pnl, first_fill_at, last_fill_at, source, status, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "tok-meta|cond-meta|Yes",
+            "tok-meta",
+            "cond-meta",
+            "Yes",
+            2.0,
+            0.41,
+            0.0,
+            "2026-04-01T09:00:00+00:00",
+            "2026-04-01T10:00:00+00:00",
+            "rebuild",
+            "OPEN",
+            "2026-04-01T10:00:00+00:00",
+        ),
+    )
+    book.db.execute(
+        """
+        INSERT INTO positions
+        (position_id, market, market_title, token_id, condition_id, outcome_side, entry_price, current_price, size_usdc, shares, opened_at, status, entry_signal_snapshot_json, entry_signal_snapshot_feature_count, entry_signal_snapshot_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "tok-meta|cond-meta|Yes|20260401090000",
+            "BTC Meta",
+            "BTC Meta",
+            "tok-meta",
+            "cond-meta",
+            "Yes",
+            0.41,
+            0.44,
+            0.82,
+            2.0,
+            "2026-04-01T09:00:00+00:00",
+            "OPEN",
+            snapshot_json,
+            feature_count,
+            1,
+        ),
+    )
+
+    monkeypatch.setenv("LIVE_POSITION_REBUILD_ON_READ", "false")
+    monkeypatch.setattr(book, "_verify_open_positions_against_exchange", lambda rows: rows)
+    monkeypatch.setattr(book, "_load_profile_snapshot_rows", lambda: [])
+
+    open_df = book.get_open_positions()
+
+    assert len(open_df.index) == 1
+    row = open_df.iloc[0]
+    assert row["opened_at"] == "2026-04-01T09:00:00+00:00"
+    assert row["market_title"] == "BTC Meta"
+    assert row["entry_signal_snapshot_json"] == snapshot_json
