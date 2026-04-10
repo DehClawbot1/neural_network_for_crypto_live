@@ -311,6 +311,7 @@ def start_supervisor():
     apply_supervisor_ui_patch(supervisor_module)
     print("[5/5] Starting supervisor...")
     print("[+] Status: RUNNING")
+    print("[+] Press Ctrl+C to stop the bot gracefully.\n")
     print("[+] Expected behavior (LIVE MODE):")
     print("    - fetch BTC-related market / account activity")
     print("    - score opportunities through the signal + inference pipeline")
@@ -369,26 +370,30 @@ def ensure_signature_type():
     print()
 
 def main():
-    print_banner()
+    try:
+        print_banner()
 
-    if not ensure_environment():
-        sys.exit(1)
+        if not ensure_environment():
+            sys.exit(1)
 
-    ensure_signature_type()
+        ensure_signature_type()
 
-    if not ensure_live_client_ready():
-        sys.exit(1)
+        if not ensure_live_client_ready():
+            sys.exit(1)
 
-    if not ensure_optional_rl_model():
-        sys.exit(1)
+        if not ensure_optional_rl_model():
+            sys.exit(1)
 
-    maybe_retrain_before_start()
-    build_research_artifacts()
+        maybe_retrain_before_start()
+        build_research_artifacts()
 
-    if load_brain() is None:
-        print("[!] RL model not available. Starting with supervised-first mode only.\n")
+        if load_brain() is None:
+            print("[!] RL model not available. Starting with supervised-first mode only.\n")
 
-    start_supervisor()
+        start_supervisor()
+    except KeyboardInterrupt:
+        print("\n[+] Ctrl+C received. Shutting down gracefully...")
+        raise SystemExit(130)
 
 
 if __name__ == "__main__":

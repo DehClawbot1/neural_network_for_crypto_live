@@ -1048,6 +1048,32 @@ def _request_shutdown(signum, frame):
     logging.info("Received %s — finishing current cycle then shutting down...", sig_name)
     _shutdown_requested = True
 
+
+def _sleep_until_shutdown_or_timeout(total_seconds, step_seconds=0.25):
+    """
+    Sleep in short chunks so Ctrl+C / SIGINT can stop the supervisor promptly
+    even during backoff or idle waits on Windows.
+    Returns True when shutdown was requested during the wait.
+    """
+    global _shutdown_requested
+    try:
+        remaining = max(0.0, float(total_seconds or 0.0))
+    except Exception:
+        remaining = 0.0
+    if remaining <= 0:
+        return bool(_shutdown_requested)
+
+    step = max(0.05, min(float(step_seconds or 0.25), 1.0))
+    while remaining > 0 and not _shutdown_requested:
+        chunk = min(step, remaining)
+        try:
+            time.sleep(chunk)
+        except KeyboardInterrupt:
+            _request_shutdown(getattr(signal, "SIGINT", 2), None)
+            return True
+        remaining -= chunk
+    return bool(_shutdown_requested)
+
 def compute_leaderboard_consensus(signals_df: pd.DataFrame, market_slug_prefix: str = "btc-updown-") -> dict:
     """
     Analyse leaderboard/scraper signals for BTC up-down markets and
@@ -1243,6 +1269,8 @@ def main_loop():
     # Register graceful shutdown handlers for SIGINT and SIGTERM
     signal.signal(signal.SIGINT, _request_shutdown)
     signal.signal(signal.SIGTERM, _request_shutdown)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _request_shutdown)
     logging.info("Initializing LIVE PolyMarket Supervisor...")
 
     # ---- Trading mode selection (1-4) ----
@@ -3405,6 +3433,8 @@ def main_loop():
             
             # FIX 1A: Process all AI exits FIRST, ignoring max_pos restrictions
             for _, row in scored_df.iterrows():
+                if _shutdown_requested:
+                    break
                 s_row = row.to_dict()
                 source_wallet_exit_signal = bool(s_row.get("source_wallet_exit_signal", False))
                 source_wallet_reduce_signal = bool(s_row.get("source_wallet_reduce_signal", False))
@@ -3440,6 +3470,8 @@ def main_loop():
             # FIX 1B: Normal entry loop
             governor_top_signal_consumed_count = 0
             for candidate_rank, (_, row) in enumerate(scored_df.iterrows(), start=1):
+                if _shutdown_requested:
+                    break
                 signal_row = row.to_dict()
                 if cadence_boost_active and candidate_rank <= entry_aggression_top_k:
                     signal_row = apply_entry_cadence_boost(
@@ -4216,6 +4248,8 @@ def main_loop():
                         if sr_key:
                             scored_lookup[sr_key] = sr_dict
                 for trade in current_open_trades:
+                    if _shutdown_requested:
+                        break
                     trade_key = _make_position_key(
                         token_id=trade.token_id,
                         condition_id=trade.condition_id,
@@ -4488,6 +4522,8 @@ def main_loop():
                 # CLEANED LIVE EXIT & MONEY MANAGER BLOCK
             if trading_mode == "live" and order_manager is not None:
                 for ct in closed_trades:
+                    if _shutdown_requested:
+                        break
                     if str(getattr(ct, "close_reason", "") or "").strip().lower() == "external_manual_close":
                         logging.info(
                             "Skipping SELL for externally-closed trade token=%s reason=%s",
@@ -4586,6 +4622,8 @@ def main_loop():
 
             # SINGLE MoneyManager Update
             for ct in closed_trades:
+                if _shutdown_requested:
+                    break
                 # Only record if it wasn't rolled back into OPEN state
                 if getattr(ct, 'state', None) == TradeState.CLOSED:
                     if ct.realized_pnl >= 0:
@@ -4710,9 +4748,11 @@ def main_loop():
                 sleep_reason.capitalize(),
                 sleep_seconds,
             )
-            time.sleep(sleep_seconds)
+            if _sleep_until_shutdown_or_timeout(sleep_seconds):
+                break
 
         except KeyboardInterrupt:
+            _request_shutdown(getattr(signal, "SIGINT", 2), None)
             logging.info("Supervisor halted manually by user.")
             break
         except Exception as e:
@@ -4723,7 +4763,8 @@ def main_loop():
                 e,
                 error_backoff_seconds,
             )
-            time.sleep(max(1.0, error_backoff_seconds))
+            if _sleep_until_shutdown_or_timeout(max(1.0, error_backoff_seconds)):
+                break
 
     if _shutdown_requested:
         logging.info("Supervisor shutting down gracefully after signal.")
