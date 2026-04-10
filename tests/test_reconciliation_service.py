@@ -73,7 +73,7 @@ def test_reconcile_reports_status_and_size_mismatch_for_open_orders(tmp_path):
     assert str(mismatch["remote_status"]) == "OPEN"
 
 
-def test_sync_and_rebuild_uses_trade_side_for_manual_exit_without_order_row(tmp_path):
+def test_sync_and_rebuild_uses_trade_side_for_manual_exit_without_order_row(tmp_path, monkeypatch):
     client = MagicMock()
     client.get_open_orders.return_value = []
     client.get_trades.return_value = [
@@ -121,6 +121,7 @@ def test_sync_and_rebuild_uses_trade_side_for_manual_exit_without_order_row(tmp_
     summary = service.sync_orders_and_fills()
     assert summary["fills"] == 2
 
+    monkeypatch.setattr(LivePositionBook, "_load_profile_snapshot_rows", lambda self: [])
     book = LivePositionBook(logs_dir=tmp_path)
     rebuilt = book.rebuild_from_db()
     open_df = book.get_open_positions()
@@ -320,3 +321,88 @@ def test_backfill_live_orders_csv_updates_existing_row_status(tmp_path):
     assert second_result["added"] == 0
     assert orders_df.iloc[0]["status"] == "FILLED"
     assert orders_df.iloc[0]["idempotency_key"] == "keep-me"
+
+
+def test_archive_and_prune_unmatched_remote_fills_archives_untracked_rows(tmp_path, monkeypatch):
+    now_iso = pd.Timestamp.now(tz="UTC").isoformat()
+    service = ReconciliationService(execution_client=MagicMock(), logs_dir=tmp_path)
+
+    db_fill_rows = [
+        ("fill-prune-1", "remote-order-1", "tok-prune-1", "cond-prune-1", "Yes", "BUY", 0.45, 3.0, now_iso),
+        ("fill-prune-2", "remote-order-2", "tok-prune-2", "cond-prune-2", "No", "SELL", 0.55, 2.0, now_iso),
+        ("fill-keep-live", "remote-order-3", "tok-live", "cond-live", "Yes", "BUY", 0.65, 5.0, now_iso),
+    ]
+    for row in db_fill_rows:
+        service.db.execute(
+            "INSERT OR REPLACE INTO fills (fill_id, order_id, token_id, condition_id, outcome_side, side, price, size, filled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            row,
+        )
+
+    pd.DataFrame(
+        [
+            {
+                "timestamp": now_iso,
+                "trade_id": "fill-prune-1",
+                "order_id": "remote-order-1",
+                "token_id": "tok-prune-1",
+                "condition_id": "cond-prune-1",
+                "outcome_side": "Yes",
+                "side": "BUY",
+                "price": 0.45,
+                "size": 3.0,
+                "filled_at": now_iso,
+                "fill_id": "fill-prune-1",
+                "fill_source": "exchange_sync",
+            },
+            {
+                "timestamp": now_iso,
+                "trade_id": "fill-prune-2",
+                "order_id": "remote-order-2",
+                "token_id": "tok-prune-2",
+                "condition_id": "cond-prune-2",
+                "outcome_side": "No",
+                "side": "SELL",
+                "price": 0.55,
+                "size": 2.0,
+                "filled_at": now_iso,
+                "fill_id": "fill-prune-2",
+                "fill_source": "db_backfill",
+            },
+            {
+                "timestamp": now_iso,
+                "trade_id": "fill-keep-live",
+                "order_id": "remote-order-3",
+                "token_id": "tok-live",
+                "condition_id": "cond-live",
+                "outcome_side": "Yes",
+                "side": "BUY",
+                "price": 0.65,
+                "size": 5.0,
+                "filled_at": now_iso,
+                "fill_id": "fill-keep-live",
+                "fill_source": "exchange_sync",
+            },
+        ]
+    ).to_csv(tmp_path / "live_fills.csv", index=False)
+
+    monkeypatch.setattr(
+        service,
+        "_load_meaningful_profile_position_keys",
+        lambda: {("tok-live", "cond-live", "yes")},
+    )
+
+    result = service.archive_and_prune_unmatched_remote_fills()
+
+    assert result["archived_rows"] == 2
+    assert result["deleted_db_rows"] == 2
+    assert result["deleted_live_fill_rows"] == 2
+    assert (tmp_path / "archives").exists()
+    assert pd.read_csv(result["archive_csv"]).shape[0] == 2
+
+    remaining_db_fill_ids = {
+        row["fill_id"] for row in service.db.query_all("SELECT fill_id FROM fills ORDER BY fill_id")
+    }
+    remaining_csv_fill_ids = set(pd.read_csv(tmp_path / "live_fills.csv")["fill_id"].astype(str).tolist())
+
+    assert remaining_db_fill_ids == {"fill-keep-live"}
+    assert remaining_csv_fill_ids == {"fill-keep-live"}

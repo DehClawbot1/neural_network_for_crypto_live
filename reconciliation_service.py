@@ -5,6 +5,7 @@ import sqlite3
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+import json
 
 import pandas as pd
 
@@ -164,6 +165,40 @@ class ReconciliationService:
             if value and value.lower() not in {"nan", "none"}:
                 ids.add(value)
         return ids
+
+    def _load_meaningful_profile_position_keys(self):
+        funder = str(os.getenv("POLYMARKET_FUNDER") or os.getenv("POLYMARKET_PUBLIC_ADDRESS") or "").strip()
+        if not funder:
+            return set()
+        try:
+            from polymarket_profile_client import PolymarketProfileClient
+            client = PolymarketProfileClient(timeout=20)
+            positions = client.get_positions(user=funder, limit=100, offset=0, size_threshold=0, sort_by="CURRENT") or []
+        except Exception:
+            return set()
+
+        min_notional = float(os.getenv("MIN_RECONCILED_POSITION_NOTIONAL_USDC", "0.01") or 0.01)
+        keys = set()
+        for position in positions:
+            if not isinstance(position, dict):
+                continue
+            token_id = str(position.get("asset") or "").strip()
+            condition_id = str(position.get("conditionId") or "").strip()
+            outcome_side = str(position.get("outcome") or "").strip()
+            try:
+                shares = float(position.get("size") or 0.0)
+            except Exception:
+                shares = 0.0
+            try:
+                price = float(position.get("curPrice") or position.get("avgPrice") or 0.0)
+            except Exception:
+                price = 0.0
+            if not token_id or not condition_id or not outcome_side:
+                continue
+            if shares * max(price, 0.0) < min_notional:
+                continue
+            keys.add((token_id, condition_id, outcome_side.lower()))
+        return keys
 
     def _load_recent_remote_trade_history(self, cutoff, known_order_ids=None, tracked_tokens=None):
         known_order_ids = known_order_ids or set()
@@ -725,3 +760,113 @@ class ReconciliationService:
         }
 
         return report, remote_orders_df, remote_trades_df
+
+    def archive_and_prune_unmatched_remote_fills(self, archive_dir=None):
+        query = """
+            SELECT f.fill_id, f.order_id, f.token_id, f.condition_id, f.outcome_side, f.side, f.price, f.size, f.filled_at
+            FROM fills f
+            WHERE f.order_id IS NOT NULL
+              AND TRIM(f.order_id) != ''
+              AND f.order_id != 'external_manual'
+              AND f.order_id NOT LIKE 'dust_clear_%'
+              AND f.fill_id NOT LIKE 'ext_sync_%'
+              AND f.fill_id NOT LIKE 'fill_dust_clear_%'
+              AND f.order_id NOT IN (SELECT order_id FROM orders)
+            ORDER BY COALESCE(f.filled_at, ''), f.fill_id
+        """
+        db_rows = self.db.query_all(query)
+        if not db_rows:
+            return {
+                "archived_rows": 0,
+                "deleted_db_rows": 0,
+                "deleted_live_fill_rows": 0,
+                "archive_csv": None,
+                "archive_jsonl": None,
+            }
+
+        db_df = pd.DataFrame(db_rows)
+        live_fills_path = self.logs_dir / "live_fills.csv"
+        live_fills_df = self._safe_read_csv("live_fills.csv")
+        if live_fills_df.empty or "fill_id" not in live_fills_df.columns:
+            enriched = db_df.copy()
+            enriched["fill_source"] = None
+        else:
+            fill_meta_cols = [c for c in ["fill_id", "fill_source", "timestamp", "filled_at"] if c in live_fills_df.columns]
+            fill_meta = live_fills_df[fill_meta_cols].copy()
+            rename_map = {}
+            if "timestamp" in fill_meta.columns:
+                rename_map["timestamp"] = "live_fill_timestamp"
+            if "filled_at" in fill_meta.columns:
+                rename_map["filled_at"] = "live_fill_filled_at"
+            fill_meta = fill_meta.rename(columns=rename_map)
+            enriched = db_df.merge(fill_meta, on="fill_id", how="left")
+
+        allowed_sources = {"exchange_sync", "db_backfill"}
+        source_series = enriched.get("fill_source")
+        if source_series is None:
+            source_mask = pd.Series(False, index=enriched.index)
+        else:
+            source_mask = source_series.fillna("").astype(str).str.strip().str.lower().isin(allowed_sources)
+
+        meaningful_keys = self._load_meaningful_profile_position_keys()
+        if meaningful_keys:
+            key_mask = enriched.apply(
+                lambda row: (
+                    str(row.get("token_id") or "").strip(),
+                    str(row.get("condition_id") or "").strip(),
+                    str(row.get("outcome_side") or "").strip().lower(),
+                ) in meaningful_keys,
+                axis=1,
+            )
+        else:
+            key_mask = pd.Series(False, index=enriched.index)
+
+        prune_df = enriched[source_mask & ~key_mask].copy()
+        if prune_df.empty:
+            return {
+                "archived_rows": 0,
+                "deleted_db_rows": 0,
+                "deleted_live_fill_rows": 0,
+                "archive_csv": None,
+                "archive_jsonl": None,
+            }
+
+        archive_root = Path(archive_dir or (self.logs_dir / "archives"))
+        archive_root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        archive_csv = archive_root / f"unmatched_remote_fills_archive_{stamp}.csv"
+        archive_jsonl = archive_root / f"unmatched_remote_fills_archive_{stamp}.jsonl"
+
+        prune_df.to_csv(archive_csv, index=False)
+        with archive_jsonl.open("w", encoding="utf-8") as handle:
+            for row in prune_df.to_dict("records"):
+                handle.write(json.dumps(row, ensure_ascii=True) + "\n")
+
+        fill_ids = [str(fill_id) for fill_id in prune_df["fill_id"].dropna().astype(str).tolist() if str(fill_id).strip()]
+        deleted_db_rows = 0
+        if fill_ids:
+            placeholders = ",".join("?" for _ in fill_ids)
+            cursor = self.db.conn.cursor()
+            try:
+                cursor.execute("BEGIN IMMEDIATE")
+                cursor.execute(f"DELETE FROM fills WHERE fill_id IN ({placeholders})", tuple(fill_ids))
+                deleted_db_rows = int(cursor.rowcount or 0)
+                self.db.conn.commit()
+            except Exception:
+                self.db.conn.rollback()
+                raise
+
+        deleted_live_fill_rows = 0
+        if not live_fills_df.empty and "fill_id" in live_fills_df.columns and fill_ids:
+            before = len(live_fills_df.index)
+            keep_df = live_fills_df[~live_fills_df["fill_id"].astype(str).isin(fill_ids)].copy()
+            deleted_live_fill_rows = before - len(keep_df.index)
+            keep_df.to_csv(live_fills_path, index=False)
+
+        return {
+            "archived_rows": int(len(prune_df.index)),
+            "deleted_db_rows": int(deleted_db_rows),
+            "deleted_live_fill_rows": int(deleted_live_fill_rows),
+            "archive_csv": str(archive_csv),
+            "archive_jsonl": str(archive_jsonl),
+        }
