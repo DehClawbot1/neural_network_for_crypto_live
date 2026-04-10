@@ -159,3 +159,20 @@ def test_build_event_signal_prefers_current_reference_ts_over_old_last_close(tmp
 
     assert bool(signal["wallet_state_gate_pass"]) is True
     assert signal["wallet_state_gate_reason"] == ""
+
+
+def test_load_watchlist_uses_env_fallback_when_csv_is_empty(tmp_path, monkeypatch):
+    watchlist_path = tmp_path / "weather_wallet_watchlist.csv"
+    watchlist_path.write_text("wallet,label,enabled,min_wallet_score,region_scope\n", encoding="utf-8")
+    monkeypatch.setenv(
+        "WEATHER_APPROVED_WALLETS",
+        "0xabc123|1pixel|true|0.72|nyc\n0xdef456|london-pro|true|0.65|london",
+    )
+
+    strategy = WeatherTemperatureStrategy(logs_dir=str(tmp_path), watchlist_path=str(watchlist_path))
+    watchlist = strategy.load_watchlist()
+
+    assert len(watchlist.index) == 2
+    assert set(watchlist["wallet"].astype(str)) == {"0xabc123", "0xdef456"}
+    assert round(float(watchlist.loc[watchlist["wallet"] == "0xabc123", "min_wallet_score"].iloc[0]), 2) == 0.72
+    assert str(watchlist.loc[watchlist["wallet"] == "0xdef456", "region_scope"].iloc[0]) == "london"

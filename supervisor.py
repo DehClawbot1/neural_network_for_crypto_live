@@ -1449,6 +1449,53 @@ def main_loop():
     lifecycle_auditor = TradeLifecycleAuditor(logs_dir="logs")
     benchmark_strategy = BenchmarkStrategy(logs_dir="logs")
     btc_trade_feedback = BTCTradeFeedback(logs_dir="logs")
+    latest_open_positions_snapshot_for_shutdown = pd.DataFrame()
+    weather_watchlist_warned = False
+
+    def _flush_runtime_state(reason="shutdown"):
+        nonlocal latest_open_positions_snapshot_for_shutdown
+        persisted_open_positions = 0
+        try:
+            if trading_mode == "live":
+                snapshot_df = (
+                    latest_open_positions_snapshot_for_shutdown.copy()
+                    if latest_open_positions_snapshot_for_shutdown is not None
+                    and hasattr(latest_open_positions_snapshot_for_shutdown, "empty")
+                    and not latest_open_positions_snapshot_for_shutdown.empty
+                    else pd.DataFrame()
+                )
+                if snapshot_df.empty:
+                    try:
+                        snapshot_df = live_position_book.get_open_positions()
+                    except Exception as exc:
+                        logging.warning("Shutdown snapshot reload failed: %s", exc)
+                        snapshot_df = pd.DataFrame()
+                if snapshot_df is not None and not snapshot_df.empty:
+                    trade_manager.persist_open_positions(reconciled_positions_df=snapshot_df)
+                    persisted_open_positions = len(snapshot_df.index)
+                else:
+                    trade_manager.persist_open_positions()
+                    persisted_open_positions = len(trade_manager.get_open_positions())
+            else:
+                trade_manager.persist_open_positions()
+                persisted_open_positions = len(trade_manager.get_open_positions())
+        except Exception as exc:
+            logging.warning("Shutdown persistence failed for open positions: %s", exc)
+
+        try:
+            sync_ops_state_to_db("logs")
+        except Exception as exc:
+            logging.warning("Shutdown ops state sync failed: %s", exc)
+
+        try:
+            autonomous_monitor.write_heartbeat(
+                "supervisor",
+                status="ok",
+                message="shutdown_state_persisted",
+                extra={"reason": reason, "open_positions": persisted_open_positions},
+            )
+        except Exception as exc:
+            logging.warning("Shutdown heartbeat write failed: %s", exc)
     def _get_active_model_version():
         registry_path = Path("weights/model_registry.csv")
         if not registry_path.exists():
@@ -2295,14 +2342,39 @@ def main_loop():
 
             if os.getenv("ENABLE_WEATHER_TEMPERATURE_STRATEGY", "true").strip().lower() in {"1", "true", "yes", "on"}:
                 try:
+                    weather_watchlist_df = weather_temperature_strategy.load_watchlist()
+                    if weather_watchlist_df.empty:
+                        if not weather_watchlist_warned:
+                            logging.warning(
+                                "Weather temperature strategy is enabled but no approved weather wallets are configured. "
+                                "Populate %s or set WEATHER_APPROVED_WALLETS to enable live weather signals.",
+                                weather_temperature_strategy.watchlist_path,
+                            )
+                            weather_watchlist_warned = True
+                        autonomous_monitor.write_heartbeat(
+                            "weather_strategy",
+                            status="warn",
+                            message="weather_watchlist_empty",
+                            extra={"watchlist_path": str(weather_temperature_strategy.watchlist_path)},
+                        )
                     weather_signals_df = weather_temperature_strategy.build_cycle_signals(markets_df)
                     if weather_signals_df is not None and not weather_signals_df.empty:
+                        weather_watchlist_warned = False
                         if signals_df is None or signals_df.empty:
                             signals_df = weather_signals_df
                         else:
                             signals_df = pd.concat([signals_df, weather_signals_df], ignore_index=True)
                         signals_df = _dedupe_signals_df(signals_df)
                         logging.info("Added %d weather temperature wallet-state signals.", len(weather_signals_df))
+                        autonomous_monitor.write_heartbeat(
+                            "weather_strategy",
+                            status="ok",
+                            message="weather_signals_built",
+                            extra={
+                                "watchlist_wallets": int(len(weather_watchlist_df.index)) if weather_watchlist_df is not None else 0,
+                                "signal_rows": int(len(weather_signals_df.index)),
+                            },
+                        )
                 except Exception as weather_signal_exc:
                     logging.warning("Weather temperature strategy signal build failed: %s", weather_signal_exc)
 
@@ -4742,6 +4814,11 @@ def main_loop():
                 autonomous_monitor.write_heartbeat("trade_manager", status="ok", message="trades_updated", extra={"open_positions": len(open_positions_for_status)})
 
             autonomous_monitor.write_status(trader_signals_df, trades_df, alerts_df, open_positions_df_for_status)
+            latest_open_positions_snapshot_for_shutdown = (
+                open_positions_df_for_status.copy()
+                if open_positions_df_for_status is not None and hasattr(open_positions_df_for_status, "copy")
+                else pd.DataFrame()
+            )
             if trading_mode == "live":
                 trade_manager.persist_open_positions(reconciled_positions_df=open_positions_df_for_status)
             else:
@@ -4801,6 +4878,7 @@ def main_loop():
             if _sleep_until_shutdown_or_timeout(max(1.0, error_backoff_seconds)):
                 break
 
+    _flush_runtime_state(reason="shutdown_signal" if _shutdown_requested else "loop_exit")
     if _shutdown_requested:
         logging.info("Supervisor shutting down gracefully after signal.")
 

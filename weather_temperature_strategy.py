@@ -85,14 +85,61 @@ class WeatherTemperatureStrategy:
         self.max_concurrent_positions = max(1, int(os.getenv("WEATHER_MAX_CONCURRENT_POSITIONS", "6") or 6))
         self.cluster_cap = max(1, int(os.getenv("WEATHER_CITY_DATE_CLUSTER_CAP", "1") or 1))
 
+    def _watchlist_rows_from_env(self) -> pd.DataFrame:
+        raw = str(
+            os.getenv("WEATHER_APPROVED_WALLETS")
+            or os.getenv("WEATHER_APPROVED_WALLET")
+            or ""
+        ).strip()
+        if not raw:
+            return pd.DataFrame(columns=["wallet", "label", "enabled", "min_wallet_score", "region_scope"])
+
+        rows = []
+        separators_normalized = raw.replace("\r", "\n").replace(";", "\n")
+        for line in separators_normalized.split("\n"):
+            entry = str(line or "").strip()
+            if not entry:
+                continue
+            parts = [part.strip() for part in entry.split("|")]
+            wallet = _normalize_wallet(parts[0] if parts else "")
+            if not wallet:
+                continue
+            label = parts[1] if len(parts) > 1 else ""
+            enabled_raw = parts[2] if len(parts) > 2 else "true"
+            min_score_raw = parts[3] if len(parts) > 3 else self.min_wallet_score
+            region_scope = parts[4] if len(parts) > 4 else ""
+            enabled = str(enabled_raw).strip().lower() in {"1", "true", "yes", "on", ""}
+            rows.append(
+                {
+                    "wallet": wallet,
+                    "label": label,
+                    "enabled": enabled,
+                    "min_wallet_score": _safe_float(min_score_raw, self.min_wallet_score),
+                    "region_scope": region_scope,
+                }
+            )
+
+        if not rows:
+            return pd.DataFrame(columns=["wallet", "label", "enabled", "min_wallet_score", "region_scope"])
+        return pd.DataFrame(rows)
+
     def load_watchlist(self) -> pd.DataFrame:
+        columns = ["wallet", "label", "enabled", "min_wallet_score", "region_scope"]
         if not self.watchlist_path.exists():
-            return pd.DataFrame(columns=["wallet", "label", "enabled", "min_wallet_score", "region_scope"])
-        try:
-            watchlist = pd.read_csv(self.watchlist_path, engine="python", on_bad_lines="skip")
-        except Exception as exc:
-            logger.warning("Failed to read weather wallet watchlist %s: %s", self.watchlist_path, exc)
-            return pd.DataFrame(columns=["wallet", "label", "enabled", "min_wallet_score", "region_scope"])
+            watchlist = pd.DataFrame(columns=columns)
+        else:
+            try:
+                watchlist = pd.read_csv(self.watchlist_path, engine="python", on_bad_lines="skip")
+            except Exception as exc:
+                logger.warning("Failed to read weather wallet watchlist %s: %s", self.watchlist_path, exc)
+                watchlist = pd.DataFrame(columns=columns)
+
+        env_watchlist = self._watchlist_rows_from_env()
+        if not env_watchlist.empty:
+            if watchlist.empty:
+                watchlist = env_watchlist.copy()
+            else:
+                watchlist = pd.concat([watchlist, env_watchlist], ignore_index=True, sort=False)
 
         for field, default in (
             ("wallet", ""),
