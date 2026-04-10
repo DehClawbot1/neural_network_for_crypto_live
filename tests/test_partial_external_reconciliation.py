@@ -155,3 +155,75 @@ def test_archive_and_prune_redundant_external_sync_fills(tmp_path):
     assert "ext_sync_1" not in remaining["fill_id"].tolist()
     assert "ext_sync_2" in remaining["fill_id"].tolist()
     assert "ext_sync_3" in remaining["fill_id"].tolist()
+
+
+def test_get_open_positions_merges_profile_snapshot_for_missing_live_row(tmp_path, monkeypatch):
+    book = LivePositionBook(logs_dir=tmp_path)
+    book.db.execute(
+        "INSERT INTO live_positions (position_key, token_id, condition_id, outcome_side, shares, avg_entry_price, realized_pnl, last_fill_at, source, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "tok-local|cond-local|Yes",
+            "tok-local",
+            "cond-local",
+            "Yes",
+            3.0,
+            0.45,
+            0.0,
+            "2026-04-01T10:00:00+00:00",
+            "rebuild",
+            "OPEN",
+            "2026-04-01T10:00:00+00:00",
+        ),
+    )
+
+    monkeypatch.setattr(book, "_verify_open_positions_against_exchange", lambda rows: rows)
+    monkeypatch.setattr(
+        book,
+        "_load_profile_snapshot_rows",
+        lambda: [
+            {
+                "position_key": "tok-local|cond-local|Yes",
+                "token_id": "tok-local",
+                "condition_id": "cond-local",
+                "outcome_side": "Yes",
+                "shares": 4.0,
+                "avg_entry_price": 0.46,
+                "realized_pnl": 0.1,
+                "unrealized_pnl": 0.2,
+                "current_price": 0.51,
+                "market_title": "Local upgraded",
+                "market": "local-upgraded",
+                "last_fill_at": None,
+                "source": "profile_snapshot",
+                "status": "OPEN",
+            },
+            {
+                "position_key": "tok-profile|cond-profile|No",
+                "token_id": "tok-profile",
+                "condition_id": "cond-profile",
+                "outcome_side": "No",
+                "shares": 2.5,
+                "avg_entry_price": 0.61,
+                "realized_pnl": 0.0,
+                "unrealized_pnl": 0.15,
+                "current_price": 0.67,
+                "market_title": "Profile only",
+                "market": "profile-only",
+                "last_fill_at": None,
+                "source": "profile_snapshot",
+                "status": "OPEN",
+            },
+        ],
+    )
+
+    open_df = book.get_open_positions()
+
+    assert len(open_df.index) == 2
+
+    upgraded = open_df.loc[open_df["token_id"] == "tok-local"].iloc[0]
+    assert float(upgraded["shares"]) == 4.0
+    assert str(upgraded["source"]) == "rebuild+profile_snapshot"
+
+    added = open_df.loc[open_df["token_id"] == "tok-profile"].iloc[0]
+    assert float(added["shares"]) == 2.5
+    assert str(added["source"]) == "profile_snapshot"

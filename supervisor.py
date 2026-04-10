@@ -18,6 +18,7 @@ from pathlib import Path
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from btc_threshold_guard import find_conflicting_btc_price_threshold_position
+from weather_temperature_guard import find_conflicting_weather_temperature_position
 
 try:
     from sb3_contrib import RecurrentPPO
@@ -90,6 +91,8 @@ from benchmark_strategy import BenchmarkStrategy
 from trade_quality import build_quality_context, resolve_entry_signal_label
 from trading_mode_preset import select_trading_mode, apply_preset, PRESETS
 from btc_trade_feedback import BTCTradeFeedback
+from weather_temperature_strategy import WeatherTemperatureStrategy
+from weather_temperature_markets import fetch_weather_temperature_markets
 try:
     from inference_runtime_guard import (
         reset_cycle as _reset_inference_runtime_guard,
@@ -119,6 +122,71 @@ CANDIDATE_DECISIONS_FILE = "logs/candidate_decisions.csv"
 CANDIDATE_CYCLE_STATS_FILE = "logs/candidate_cycle_stats.csv"
 ALWAYS_ON_STATE_FILE = Path("logs/always_on_slug_state.json")
 UPDOWN_SLUG_RE = re.compile(r"^btc-updown-(?P<minutes>\d+)m-(?P<epoch>\d{9,})$")
+SOURCE_WALLET_LOG_COLUMNS = [
+    "wallet_state_gate_pass",
+    "wallet_state_gate_reason",
+    "wallet_agreement_score",
+    "wallet_conflict_with_stronger",
+    "wallet_stronger_conflict_score",
+    "wallet_support_strength",
+    "source_wallet_direction_confidence",
+    "source_wallet_position_event",
+    "source_wallet_net_position_increased",
+    "source_wallet_current_net_exposure",
+    "source_wallet_average_entry",
+    "source_wallet_last_add",
+    "source_wallet_last_reduce",
+    "source_wallet_last_close",
+    "source_wallet_current_direction",
+    "source_wallet_reduce_fraction",
+    "source_wallet_state_freshness_seconds",
+    "source_wallet_freshness_score",
+    "source_wallet_fresh",
+    "source_wallet_exit_signal",
+    "source_wallet_reduce_signal",
+    "source_wallet_reversal_signal",
+]
+WEATHER_LOG_COLUMNS = [
+    "market_family",
+    "wallet_temp_hit_rate_90d",
+    "wallet_temp_realized_pnl_90d",
+    "wallet_region_score",
+    "wallet_temp_range_skill",
+    "wallet_temp_threshold_skill",
+    "weather_parseable",
+    "weather_parse_error",
+    "weather_location",
+    "weather_country",
+    "weather_event_date_local",
+    "weather_resolution_timezone",
+    "weather_question_type",
+    "weather_temp_unit",
+    "weather_lower_c",
+    "weather_upper_c",
+    "weather_interval_width_c",
+    "weather_cluster_key",
+    "forecast_ready",
+    "forecast_stale",
+    "forecast_missing_reason",
+    "forecast_source",
+    "forecast_max_temp_c",
+    "forecast_p_hit_interval",
+    "forecast_margin_to_lower_c",
+    "forecast_margin_to_upper_c",
+    "forecast_uncertainty_c",
+    "forecast_last_update_ts",
+    "forecast_drift_c",
+    "weather_fair_probability_yes",
+    "weather_fair_probability_side",
+    "weather_market_probability",
+    "weather_forecast_edge",
+    "weather_forecast_confirms_direction",
+    "weather_forecast_margin_score",
+    "weather_forecast_stability_score",
+    "weather_entry_allowed_by_forecast",
+    "analytics_only",
+    "analytics_only_reason",
+]
 RAW_CANDIDATE_LOG_COLUMNS = [
     "timestamp",
     "trader_wallet",
@@ -172,7 +240,7 @@ RAW_CANDIDATE_LOG_COLUMNS = [
     "open_positions_loser_count",
     "raw_size",
     "market_url",
-]
+] + SOURCE_WALLET_LOG_COLUMNS + WEATHER_LOG_COLUMNS
 RANKED_SIGNAL_LOG_COLUMNS = [
     "timestamp",
     "market",
@@ -228,7 +296,7 @@ RANKED_SIGNAL_LOG_COLUMNS = [
     "risk_adjusted_ev",
     "entry_ev",
     "execution_quality_score",
-]
+] + SOURCE_WALLET_LOG_COLUMNS + WEATHER_LOG_COLUMNS
 
 
 class StatefulRecurrentBrain:
@@ -505,6 +573,8 @@ def log_ranked_signal(signal_row):
         "entry_ev": signal_row.get("entry_ev"),
         "execution_quality_score": signal_row.get("execution_quality_score"),
     }
+    for extra_key in SOURCE_WALLET_LOG_COLUMNS + WEATHER_LOG_COLUMNS:
+        record[extra_key] = signal_row.get(extra_key)
     record = {key: record.get(key) for key in RANKED_SIGNAL_LOG_COLUMNS}
     append_csv_record(SIGNALS_FILE, record)
 
@@ -650,6 +720,7 @@ def choose_action(
     decision_meta["vetoed_action"] = None
 
     action_val = 0
+    market_family = str(signal_row.get("market_family", "") or "").strip().lower()
     force_candidate = (
         _is_truthy(signal_row.get("force_candidate"))
         or str(signal_row.get("signal_source", "")).strip().lower() == "always_on_market"
@@ -685,6 +756,12 @@ def choose_action(
     else:
         rule_eval = entry_rule.evaluate(signal_row) if hasattr(entry_rule, "evaluate") else None
         rule_allows_entry = bool(rule_eval["allow"]) if isinstance(rule_eval, dict) else entry_rule.should_enter(signal_row)
+
+    if market_family.startswith("weather_temperature"):
+        decision_meta["weather_rule_only"] = True
+        if str(signal_row.get("entry_intent", "OPEN_LONG") or "OPEN_LONG").upper() == "CLOSE_LONG":
+            return 1
+        return 1 if rule_allows_entry else 0
 
     if action_val in (1, 2) and not rule_allows_entry:
         decision_meta["rule_vetoed_rl_action"] = True
@@ -1101,13 +1178,24 @@ def split_entry_pipeline_signals(signals_df: pd.DataFrame) -> tuple[pd.DataFrame
         return series.map(_coerce).astype(bool)
 
     if signals_df is None or signals_df.empty:
-        return signals_df, {"dropped_rows": 0, "dropped_global_btc_scan": 0, "dropped_stale_wallet_entries": 0}
+        return signals_df, {"dropped_rows": 0, "dropped_global_btc_scan": 0, "dropped_stale_wallet_entries": 0, "dropped_analytics_only": 0}
     if "signal_source" not in signals_df.columns:
-        return signals_df.copy(), {"dropped_rows": 0, "dropped_global_btc_scan": 0, "dropped_stale_wallet_entries": 0}
+        signals_df = signals_df.copy()
+        analytics_only = _boolify_series(_column_as_series(signals_df, "analytics_only", False), default_value=False)
+        if not analytics_only.any():
+            return signals_df, {"dropped_rows": 0, "dropped_global_btc_scan": 0, "dropped_stale_wallet_entries": 0, "dropped_analytics_only": 0}
+        filtered = signals_df.loc[~analytics_only].reset_index(drop=True)
+        return filtered, {
+            "dropped_rows": int(analytics_only.sum()),
+            "dropped_global_btc_scan": 0,
+            "dropped_stale_wallet_entries": 0,
+            "dropped_analytics_only": int(analytics_only.sum()),
+        }
 
     work = signals_df.copy()
     signal_source = _stringify_series(_column_as_series(work, "signal_source", ""), default_value="", lower=True)
     analytics_only_mask = signal_source.eq("global_btc_scan")
+    generic_analytics_only_mask = _boolify_series(_column_as_series(work, "analytics_only", False), default_value=False)
 
     if "entry_intent" in work.columns:
         entry_intent = _stringify_series(_column_as_series(work, "entry_intent", ""), default_value="", upper=True)
@@ -1119,13 +1207,14 @@ def split_entry_pipeline_signals(signals_df: pd.DataFrame) -> tuple[pd.DataFrame
         source_wallet_fresh = pd.Series([True] * len(work), index=work.index)
     stale_wallet_entry_mask = entry_intent.eq("OPEN_LONG") & ~source_wallet_fresh
 
-    drop_mask = analytics_only_mask | stale_wallet_entry_mask
+    drop_mask = analytics_only_mask | stale_wallet_entry_mask | generic_analytics_only_mask
     dropped_rows = int(drop_mask.sum())
     filtered = work.loc[~drop_mask].reset_index(drop=True)
     return filtered, {
         "dropped_rows": dropped_rows,
         "dropped_global_btc_scan": int(analytics_only_mask.sum()),
         "dropped_stale_wallet_entries": int(stale_wallet_entry_mask.sum()),
+        "dropped_analytics_only": int(generic_analytics_only_mask.sum()),
     }
 
 
@@ -1224,6 +1313,7 @@ def main_loop():
     sentiment_analyzer = SentimentAnalyzer()
     macro_analyzer = MacroAnalyzer()
     onchain_analyzer = OnChainAnalyzer()
+    weather_temperature_strategy = WeatherTemperatureStrategy(logs_dir="logs")
     entry_min_score = _env_float("ENTRY_MIN_SCORE", 0.04)
     entry_max_spread = _env_float("ENTRY_MAX_SPREAD", 0.35)
     entry_min_liquidity = _env_float("ENTRY_MIN_LIQUIDITY", 0.5)
@@ -2085,6 +2175,20 @@ def main_loop():
                         logging.info("Added %d %s rotating markets to universe.", len(_updown_df), _updown_prefix)
                 except Exception as _updown_exc:
                     logging.warning("Failed to fetch %s rotating markets: %s", _updown_prefix, _updown_exc)
+            if os.getenv("ENABLE_WEATHER_TEMPERATURE_STRATEGY", "true").strip().lower() in {"1", "true", "yes", "on"}:
+                try:
+                    weather_markets_df = fetch_weather_temperature_markets(limit=500, closed=False, max_offset=0)
+                    if weather_markets_df is not None and not weather_markets_df.empty:
+                        if markets_df is None or markets_df.empty:
+                            markets_df = weather_markets_df
+                        else:
+                            markets_df = pd.concat([markets_df, weather_markets_df], ignore_index=True)
+                            dedupe_field = "market_id" if "market_id" in markets_df.columns else "condition_id"
+                            if dedupe_field in markets_df.columns:
+                                markets_df = markets_df.drop_duplicates(subset=[dedupe_field], keep="last")
+                        logging.info("Added %d weather temperature markets to universe.", len(weather_markets_df))
+                except Exception as weather_markets_exc:
+                    logging.warning("Failed to fetch weather temperature markets: %s", weather_markets_exc)
             autonomous_monitor.write_heartbeat("market_monitor", status="ok", message="markets_fetched", extra={"rows": len(markets_df) if markets_df is not None else 0})
             if markets_df is not None and not markets_df.empty: markets_df = markets_df.loc[:, ~markets_df.columns.duplicated()]
             save_market_snapshot(markets_df)
@@ -2125,6 +2229,19 @@ def main_loop():
                         signals_df = order_flow_signals_df
 
                 signals_df = _dedupe_signals_df(signals_df)
+
+            if os.getenv("ENABLE_WEATHER_TEMPERATURE_STRATEGY", "true").strip().lower() in {"1", "true", "yes", "on"}:
+                try:
+                    weather_signals_df = weather_temperature_strategy.build_cycle_signals(markets_df)
+                    if weather_signals_df is not None and not weather_signals_df.empty:
+                        if signals_df is None or signals_df.empty:
+                            signals_df = weather_signals_df
+                        else:
+                            signals_df = pd.concat([signals_df, weather_signals_df], ignore_index=True)
+                        signals_df = _dedupe_signals_df(signals_df)
+                        logging.info("Added %d weather temperature wallet-state signals.", len(weather_signals_df))
+                except Exception as weather_signal_exc:
+                    logging.warning("Weather temperature strategy signal build failed: %s", weather_signal_exc)
 
             # Inject always-on signal with BTC forecast driving the YES/NO side
             # and leaderboard consensus used as extra confirmation info
@@ -2232,141 +2349,204 @@ def main_loop():
             )
 
             if entry_signals_df is not None and not entry_signals_df.empty:
-                entry_signals_df = entry_signals_df.loc[:, ~entry_signals_df.columns.duplicated()]
-            features_df = feature_builder.build_features(entry_signals_df, markets_df)
-            if features_df is not None: features_df = features_df.loc[:, ~features_df.columns.duplicated()].copy()
-            if features_df is not None and not features_df.empty: features_df = features_df.loc[:, ~features_df.columns.duplicated()]
-            log_raw_candidates(features_df)
-            # LIVE-TRADE FIX: strict_inference_mode defaults to false so missing/stale
-            # model artifacts no longer freeze live entries. The bot will still log
-            # missing artifacts as warnings but will NOT halt trading.
-            strict_inference_mode = os.getenv("STRICT_INFERENCE_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
-            if trading_mode == "live" and strict_inference_mode:
-                missing_model_artifacts = []
-                for stage_name, inference_obj in (
-                    ("model_inference", model_inference),
-                    ("stage1_inference", stage1_inference),
-                    ("stage2_temporal_inference", stage2_inference),
-                ):
-                    checker = getattr(inference_obj, "missing_artifacts", None)
-                    if not callable(checker):
-                        continue
-                    try:
-                        for item in checker():
-                            missing_model_artifacts.append(
-                                {
-                                    "stage": stage_name,
-                                    "component": str(item.get("component") or "unknown"),
-                                    "path": str(item.get("path") or ""),
-                                }
-                            )
-                    except Exception as exc:
-                        logging.warning("Strict inference artifact check failed for %s: %s", stage_name, exc)
-                if missing_model_artifacts:
+                entry_signals_df = entry_signals_df.loc[:, ~entry_signals_df.columns.duplicated()].copy()
+                if "market_family" not in entry_signals_df.columns:
+                    entry_signals_df["market_family"] = ""
+                missing_market_family = entry_signals_df["market_family"].astype(str).str.strip().eq("")
+                if missing_market_family.any():
+                    entry_signals_df.loc[missing_market_family, "market_family"] = entry_signals_df.loc[missing_market_family].apply(
+                        lambda row: build_quality_context(row.to_dict()).get("market_family", "other"),
+                        axis=1,
+                    )
+
+            def _annotate_scored_candidates(frame, *, default_model_family: str, default_model_version: str):
+                if frame is None or frame.empty:
+                    return pd.DataFrame()
+                out = frame.loc[:, ~frame.columns.duplicated()].copy()
+                if "entry_model_family" not in out.columns:
+                    out["entry_model_family"] = default_model_family
+                else:
+                    out["entry_model_family"] = out["entry_model_family"].replace("", pd.NA).fillna(default_model_family)
+                if "entry_model_version" not in out.columns:
+                    out["entry_model_version"] = default_model_version
+                else:
+                    out["entry_model_version"] = out["entry_model_version"].replace("", pd.NA).fillna(default_model_version)
+                if "performance_governor_level" not in out.columns:
+                    out["performance_governor_level"] = 0
+                else:
+                    out["performance_governor_level"] = pd.to_numeric(out["performance_governor_level"], errors="coerce").fillna(0).astype(int)
+                out["market_family"] = out.apply(lambda row: build_quality_context(row.to_dict()).get("market_family", row.get("market_family", "other")), axis=1)
+                out["horizon_bucket"] = out.apply(lambda row: build_quality_context(row.to_dict()).get("horizon_bucket", row.get("horizon_bucket", "unknown")), axis=1)
+                out["liquidity_bucket"] = out.apply(lambda row: build_quality_context(row.to_dict()).get("liquidity_bucket", row.get("liquidity_bucket", "unknown")), axis=1)
+                out["volatility_bucket"] = out.apply(lambda row: build_quality_context(row.to_dict()).get("volatility_bucket", row.get("volatility_bucket", "unknown")), axis=1)
+                out["technical_regime_bucket"] = out.apply(lambda row: build_quality_context(row.to_dict()).get("technical_regime_bucket", row.get("technical_regime_bucket", "neutral")), axis=1)
+                return out.loc[:, ~out.columns.duplicated()].copy()
+
+            features_df = pd.DataFrame()
+            inferred_df = pd.DataFrame()
+            btc_scored_df = pd.DataFrame()
+            weather_scored_df = pd.DataFrame()
+            btc_entry_signals_df = pd.DataFrame()
+            weather_entry_signals_df = pd.DataFrame()
+
+            if entry_signals_df is not None and not entry_signals_df.empty:
+                weather_entry_mask = entry_signals_df["market_family"].astype(str).str.startswith("weather_temperature")
+                weather_entry_signals_df = entry_signals_df[weather_entry_mask].copy()
+                btc_entry_signals_df = entry_signals_df[~weather_entry_mask].copy()
+
+            if btc_entry_signals_df is not None and not btc_entry_signals_df.empty:
+                features_df = feature_builder.build_features(btc_entry_signals_df, markets_df)
+                if features_df is not None:
+                    features_df = features_df.loc[:, ~features_df.columns.duplicated()].copy()
+                if features_df is not None and not features_df.empty:
+                    features_df = features_df.loc[:, ~features_df.columns.duplicated()]
+                log_raw_candidates(features_df)
+                # LIVE-TRADE FIX: strict_inference_mode defaults to false so missing/stale
+                # model artifacts no longer freeze live entries. The bot will still log
+                # missing artifacts as warnings but will NOT halt trading.
+                strict_inference_mode = os.getenv("STRICT_INFERENCE_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
+                if trading_mode == "live" and strict_inference_mode:
+                    missing_model_artifacts = []
+                    for stage_name, inference_obj in (
+                        ("model_inference", model_inference),
+                        ("stage1_inference", stage1_inference),
+                        ("stage2_temporal_inference", stage2_inference),
+                    ):
+                        checker = getattr(inference_obj, "missing_artifacts", None)
+                        if not callable(checker):
+                            continue
+                        try:
+                            for item in checker():
+                                missing_model_artifacts.append(
+                                    {
+                                        "stage": stage_name,
+                                        "component": str(item.get("component") or "unknown"),
+                                        "path": str(item.get("path") or ""),
+                                    }
+                                )
+                        except Exception as exc:
+                            logging.warning("Strict inference artifact check failed for %s: %s", stage_name, exc)
+                    if missing_model_artifacts:
+                        pre_cycle_entry_freeze = True
+                        pre_cycle_freeze_reason = "inference_model_missing"
+                        pre_cycle_freeze_detail = {
+                            "missing_artifact_count": len(missing_model_artifacts),
+                            "missing_artifacts": missing_model_artifacts,
+                        }
+                        logging.error(
+                            "STRICT INFERENCE MODE: Missing inference model artifacts detected. Freezing live entries this cycle: %s",
+                            pre_cycle_freeze_detail,
+                        )
+                        autonomous_monitor.write_heartbeat(
+                            "inference",
+                            status="error",
+                            message="strict_inference_missing_models",
+                            extra=pre_cycle_freeze_detail,
+                        )
+                elif trading_mode == "live":
+                    # Warn about missing artifacts but don't freeze entries
+                    for stage_name, inference_obj in (
+                        ("model_inference", model_inference),
+                        ("stage1_inference", stage1_inference),
+                        ("stage2_temporal_inference", stage2_inference),
+                    ):
+                        checker = getattr(inference_obj, "missing_artifacts", None)
+                        if callable(checker):
+                            try:
+                                missing = list(checker())
+                                if missing:
+                                    logging.warning(
+                                        "[%s] Missing model artifacts (non-blocking): %s",
+                                        stage_name,
+                                        [str(m.get("path") or m.get("component")) for m in missing],
+                                    )
+                            except Exception:
+                                pass
+                inferred_df = model_inference.run(features_df)
+                inferred_df = stage1_inference.run(inferred_df)
+                inferred_df = stage2_inference.run(inferred_df)
+                if trading_mode == "live" and strict_inference_mode and _inference_guard_has_errors():
+                    inference_errors = _inference_guard_get_errors(limit=20)
                     pre_cycle_entry_freeze = True
-                    pre_cycle_freeze_reason = "inference_model_missing"
-                    pre_cycle_freeze_detail = {
-                        "missing_artifact_count": len(missing_model_artifacts),
-                        "missing_artifacts": missing_model_artifacts,
+                    runtime_error_detail = {
+                        "error_count": len(inference_errors),
+                        "errors": [
+                            {
+                                "stage": e.get("stage"),
+                                "error_type": e.get("error_type"),
+                                "message": e.get("message"),
+                                "context": e.get("context"),
+                            }
+                            for e in inference_errors
+                        ],
                     }
+                    if pre_cycle_freeze_reason == "inference_model_missing":
+                        merged_detail = dict(pre_cycle_freeze_detail or {})
+                        merged_detail["runtime_error_count"] = runtime_error_detail["error_count"]
+                        merged_detail["runtime_errors"] = runtime_error_detail["errors"]
+                        pre_cycle_freeze_reason = "inference_model_missing_and_runtime_exception"
+                        pre_cycle_freeze_detail = merged_detail
+                    else:
+                        pre_cycle_freeze_reason = "inference_runtime_exception"
+                        pre_cycle_freeze_detail = runtime_error_detail
                     logging.error(
-                        "STRICT INFERENCE MODE: Missing inference model artifacts detected. Freezing live entries this cycle: %s",
+                        "STRICT INFERENCE MODE: Runtime inference exceptions detected. Freezing live entries this cycle: %s",
                         pre_cycle_freeze_detail,
                     )
                     autonomous_monitor.write_heartbeat(
                         "inference",
                         status="error",
-                        message="strict_inference_missing_models",
+                        message="strict_inference_freeze",
                         extra=pre_cycle_freeze_detail,
                     )
-            elif trading_mode == "live" and not strict_inference_mode:
-                # Warn about missing artifacts but don't freeze entries
-                for stage_name, inference_obj in (
-                    ("model_inference", model_inference),
-                    ("stage1_inference", stage1_inference),
-                    ("stage2_temporal_inference", stage2_inference),
-                ):
-                    checker = getattr(inference_obj, "missing_artifacts", None)
-                    if callable(checker):
-                        try:
-                            missing = list(checker())
-                            if missing:
-                                logging.warning(
-                                    "[%s] Missing model artifacts (non-blocking): %s",
-                                    stage_name,
-                                    [str(m.get("path") or m.get("component")) for m in missing],
-                                )
-                        except Exception:
-                            pass
-            inferred_df = model_inference.run(features_df)
-            inferred_df = stage1_inference.run(inferred_df)
-            inferred_df = stage2_inference.run(inferred_df)
-            if trading_mode == "live" and strict_inference_mode and _inference_guard_has_errors():
-                inference_errors = _inference_guard_get_errors(limit=20)
-                pre_cycle_entry_freeze = True
-                runtime_error_detail = {
-                    "error_count": len(inference_errors),
-                    "errors": [
-                        {
-                            "stage": e.get("stage"),
-                            "error_type": e.get("error_type"),
-                            "message": e.get("message"),
-                            "context": e.get("context"),
-                        }
-                        for e in inference_errors
-                    ],
-                }
-                if pre_cycle_freeze_reason == "inference_model_missing":
-                    merged_detail = dict(pre_cycle_freeze_detail or {})
-                    merged_detail["runtime_error_count"] = runtime_error_detail["error_count"]
-                    merged_detail["runtime_errors"] = runtime_error_detail["errors"]
-                    pre_cycle_freeze_reason = "inference_model_missing_and_runtime_exception"
-                    pre_cycle_freeze_detail = merged_detail
-                else:
-                    pre_cycle_freeze_reason = "inference_runtime_exception"
-                    pre_cycle_freeze_detail = runtime_error_detail
-                logging.error(
-                    "STRICT INFERENCE MODE: Runtime inference exceptions detected. Freezing live entries this cycle: %s",
-                    pre_cycle_freeze_detail,
+                if "temporal_p_tp_before_sl" in inferred_df.columns:
+                    w_stage1 = float(np.clip(getattr(TradingConfig, "STAGE1_BLEND_WEIGHT", 0.65), 0.0, 1.0))
+                    w_stage2 = 1.0 - w_stage1
+                    inferred_df["p_tp_before_sl"] = (
+                        inferred_df["p_tp_before_sl"].astype(float).fillna(0.0) * w_stage1
+                        + inferred_df["temporal_p_tp_before_sl"].astype(float).fillna(0.0) * w_stage2
+                    ).clip(0.0, 1.0)
+                if "expected_return" in inferred_df.columns:
+                    inferred_df["expected_return"] = clip_expected_return_series(inferred_df["expected_return"])
+                if "temporal_expected_return" in inferred_df.columns:
+                    inferred_df["expected_return"] = clip_expected_return_series(
+                        inferred_df[["expected_return", "temporal_expected_return"]].mean(axis=1)
+                    )
+                    inferred_df["edge_score"] = inferred_df["p_tp_before_sl"].astype(float) * inferred_df["expected_return"].astype(float)
+                inferred_df = hybrid_scorer.run(inferred_df)
+                if "hybrid_edge" in inferred_df.columns:
+                    inferred_df["edge_score"] = inferred_df["hybrid_edge"]
+                log_raw_candidates(inferred_df)
+                if inferred_df is not None and not inferred_df.empty:
+                    inferred_df = inferred_df.loc[:, ~inferred_df.columns.duplicated()]
+                btc_scored_df = signal_engine.score_features(inferred_df)
+                btc_scored_df = feedback_learner.apply_to_scored_df(btc_scored_df, signal_engine)
+                btc_scored_df = _annotate_scored_candidates(
+                    btc_scored_df,
+                    default_model_family="runtime_live_stack",
+                    default_model_version=_get_active_model_version(),
                 )
-                autonomous_monitor.write_heartbeat(
-                    "inference",
-                    status="error",
-                    message="strict_inference_freeze",
-                    extra=pre_cycle_freeze_detail,
+
+            if weather_entry_signals_df is not None and not weather_entry_signals_df.empty:
+                log_raw_candidates(weather_entry_signals_df)
+                weather_scored_df = weather_temperature_strategy.score_candidates(weather_entry_signals_df, markets_df)
+                weather_scored_df = _annotate_scored_candidates(
+                    weather_scored_df,
+                    default_model_family="weather_temperature_hybrid",
+                    default_model_version="weather_v1",
                 )
-            if "temporal_p_tp_before_sl" in inferred_df.columns:
-                w_stage1 = float(np.clip(getattr(TradingConfig, "STAGE1_BLEND_WEIGHT", 0.65), 0.0, 1.0))
-                w_stage2 = 1.0 - w_stage1
-                inferred_df["p_tp_before_sl"] = (
-                    inferred_df["p_tp_before_sl"].astype(float).fillna(0.0) * w_stage1
-                    + inferred_df["temporal_p_tp_before_sl"].astype(float).fillna(0.0) * w_stage2
-                ).clip(0.0, 1.0)
-            if "expected_return" in inferred_df.columns:
-                inferred_df["expected_return"] = clip_expected_return_series(inferred_df["expected_return"])
-            if "temporal_expected_return" in inferred_df.columns:
-                inferred_df["expected_return"] = clip_expected_return_series(
-                    inferred_df[["expected_return", "temporal_expected_return"]].mean(axis=1)
-                )
-                inferred_df["edge_score"] = inferred_df["p_tp_before_sl"].astype(float) * inferred_df["expected_return"].astype(float)
-            inferred_df = hybrid_scorer.run(inferred_df)
-            if "hybrid_edge" in inferred_df.columns:
-                inferred_df["edge_score"] = inferred_df["hybrid_edge"]
-            log_raw_candidates(inferred_df)
-            if inferred_df is not None and not inferred_df.empty: inferred_df = inferred_df.loc[:, ~inferred_df.columns.duplicated()]
-            scored_df = signal_engine.score_features(inferred_df)
-            scored_df = feedback_learner.apply_to_scored_df(scored_df, signal_engine)
-            if scored_df is not None: scored_df = scored_df.loc[:, ~scored_df.columns.duplicated()].copy()
-            if scored_df is not None and not scored_df.empty: scored_df = scored_df.loc[:, ~scored_df.columns.duplicated()]
-            if scored_df is not None and not scored_df.empty:
-                scored_df["entry_model_family"] = "runtime_live_stack"
-                scored_df["entry_model_version"] = _get_active_model_version()
-                scored_df["performance_governor_level"] = 0
-                scored_df["market_family"] = scored_df.apply(lambda row: build_quality_context(row.to_dict()).get("market_family", "other"), axis=1)
-                scored_df["horizon_bucket"] = scored_df.apply(lambda row: build_quality_context(row.to_dict()).get("horizon_bucket", "unknown"), axis=1)
-                scored_df["liquidity_bucket"] = scored_df.apply(lambda row: build_quality_context(row.to_dict()).get("liquidity_bucket", "unknown"), axis=1)
-                scored_df["volatility_bucket"] = scored_df.apply(lambda row: build_quality_context(row.to_dict()).get("volatility_bucket", "unknown"), axis=1)
-                scored_df["technical_regime_bucket"] = scored_df.apply(lambda row: build_quality_context(row.to_dict()).get("technical_regime_bucket", "neutral"), axis=1)
+                log_raw_candidates(weather_scored_df)
+
+            scored_frames = [
+                frame.loc[:, ~frame.columns.duplicated()].copy()
+                for frame in (btc_scored_df, weather_scored_df)
+                if frame is not None and not frame.empty
+            ]
+            if scored_frames:
+                scored_df = pd.concat(scored_frames, ignore_index=True, sort=False)
+                scored_df = scored_df.loc[:, ~scored_df.columns.duplicated()].copy()
+            else:
+                scored_df = pd.DataFrame()
 
             if shadow_purgatory is not None:
                 try:
@@ -2438,9 +2618,10 @@ def main_loop():
             current_active_trades = []
             active_trade_keys = set()
             current_open_exposure = 0.0
+            current_weather_active_trade_count = 0
 
             def _refresh_local_active_trade_state():
-                nonlocal current_active_trades, active_trade_keys, current_open_exposure
+                nonlocal current_active_trades, active_trade_keys, current_open_exposure, current_weather_active_trade_count
                 current_active_trades = [
                     trade
                     for trade in trade_manager.active_trades.values()
@@ -2458,6 +2639,11 @@ def main_loop():
                 current_open_exposure = sum(
                     float(getattr(trade, "size_usdc", 0) or 0)
                     for trade in current_active_trades
+                )
+                current_weather_active_trade_count = sum(
+                    1
+                    for trade in current_active_trades
+                    if str(getattr(trade, "market_family", "") or "").strip().lower().startswith("weather_temperature")
                 )
 
             _refresh_local_active_trade_state()
@@ -3111,6 +3297,11 @@ def main_loop():
                 ):
                     if live_field not in detail_payload:
                         detail_payload[live_field] = signal_row.get(live_field)
+                for key, value in signal_row.items():
+                    key_text = str(key or "")
+                    if key_text.startswith(("weather_", "forecast_")) or key_text in SOURCE_WALLET_LOG_COLUMNS:
+                        if key_text not in detail_payload:
+                            detail_payload[key_text] = value
                 details_json = json.dumps(detail_payload, default=str, separators=(",", ":"))
                 try:
                     db.execute(
@@ -3262,6 +3453,7 @@ def main_loop():
                 token_id = str(token_id_norm or "")
                 entry_intent = str(signal_row.get("entry_intent", "OPEN_LONG") or "OPEN_LONG").upper()
                 market_key = _trade_key_from_signal(signal_row)
+                market_family = str(signal_row.get("market_family", "") or "").strip().lower()
 
                 market_age_sec = _signal_age_seconds(signal_row)
                 if market_age_sec is None and entry_require_market_timestamp:
@@ -3293,6 +3485,15 @@ def main_loop():
                         gate="capacity",
                         active_positions=len(current_active_trades),
                         max_positions=_max_pos,
+                    )
+                    continue
+                if market_family.startswith("weather_temperature") and current_weather_active_trade_count >= int(getattr(weather_temperature_strategy, "max_concurrent_positions", 6) or 6):
+                    _log_candidate_skip(
+                        signal_row,
+                        "weather_max_concurrent_positions_reached",
+                        gate="capacity",
+                        active_weather_positions=current_weather_active_trade_count,
+                        max_weather_positions=int(getattr(weather_temperature_strategy, "max_concurrent_positions", 6) or 6),
                     )
                     continue
                 
@@ -3550,6 +3751,27 @@ def main_loop():
                             expiry_key=threshold_conflict["expiry_key"],
                         )
                         continue
+                    if market_family.startswith("weather_temperature"):
+                        weather_conflict = find_conflicting_weather_temperature_position(
+                            signal_row.to_dict() if hasattr(signal_row, "to_dict") else dict(signal_row),
+                            current_active_trades,
+                            cluster_cap=int(getattr(weather_temperature_strategy, "cluster_cap", 1) or 1),
+                        )
+                        if weather_conflict:
+                            conflicting_trade = weather_conflict.get("trade")
+                            conflicting_payload = getattr(conflicting_trade, "__dict__", {}) if conflicting_trade is not None else {}
+                            _log_candidate_skip(
+                                signal_row,
+                                str(weather_conflict.get("reason") or "weather_temperature_conflict"),
+                                gate="portfolio_consistency",
+                                conflict_cluster_key=weather_conflict.get("cluster_key"),
+                                conflict_cluster_size=weather_conflict.get("cluster_size"),
+                                conflict_cluster_cap=weather_conflict.get("cluster_cap"),
+                                conflicting_market=conflicting_payload.get("market") or conflicting_payload.get("market_title"),
+                                conflicting_condition_id=conflicting_payload.get("condition_id"),
+                                conflicting_outcome_side=conflicting_payload.get("outcome_side"),
+                            )
+                            continue
                     governor_min_conf = float(governor_state.get("min_confidence", 0.0) or 0.0)
                     if governor_min_conf > 0 and confidence < governor_min_conf:
                         _log_candidate_skip(
@@ -4224,6 +4446,27 @@ def main_loop():
                             trade_manager.active_trades.pop(_make_position_key(token_id=trade.token_id, condition_id=trade.condition_id, outcome_side=trade.outcome_side, market=trade.market), None) # Remove from active trades
 
             # Process any pending exits (e.g., from CLOSE_LONG signals or internal rules)
+            try:
+                weather_exit_events = weather_temperature_strategy.apply_active_exit_rules(trade_manager, markets_df)
+                if weather_exit_events:
+                    logging.info(
+                        "Weather active-exit rules closed %d trade(s) before generic exit processing.",
+                        len(weather_exit_events),
+                    )
+                    autonomous_monitor.write_heartbeat(
+                        "weather_strategy",
+                        status="ok",
+                        message="weather_active_exit_rules_triggered",
+                        extra={"closed_count": len(weather_exit_events)},
+                    )
+            except Exception as exc:
+                logging.warning("Weather active exit rules failed: %s", exc)
+                autonomous_monitor.write_heartbeat(
+                    "weather_strategy",
+                    status="warn",
+                    message="weather_active_exit_rules_failed",
+                    extra={"error": str(exc)},
+                )
             predictive_exit_targets = _build_predictive_exit_targets(
                 scored_df,
                 [

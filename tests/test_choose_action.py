@@ -101,3 +101,24 @@ def test_choose_action_no_rl_fallback_uses_precomputed_rule_result():
 
     assert action == 2
     assert entry_rule.should_enter_calls == 0
+
+
+def test_choose_action_weather_market_bypasses_rl_and_uses_rules_only():
+    choose_action = _load_choose_action()
+    entry_rule = _RuleShouldNotBeCalled()
+
+    action = choose_action(
+        {
+            "market_family": "weather_temperature_threshold",
+            "entry_intent": "OPEN_LONG",
+            "confidence": 0.99,
+            "edge_score": 0.99,
+        },
+        entry_rule,
+        entry_brain=_HoldBrain(),
+        precomputed_rule_eval={"allow": True},
+        precomputed_rule_allows=True,
+    )
+
+    assert action == 1
+    assert entry_rule.should_enter_calls == 0

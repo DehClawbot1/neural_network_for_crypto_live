@@ -1,0 +1,44 @@
+{
+  "signals_generated": 1,
+  "open_candidates": 1,
+  "forecast_ready_candidates": 1,
+  "rule_allow_first_open_candidate": true,
+  "first_open_candidate_confidence": 0.8608,
+  "first_open_candidate_reason": "weather_fair=0.74, market_prob=0.41, edge=0.3300, wallet_q=0.90, dir_conf=0.76, stability=0.96, liq=0.50, spread=0.030",
+  "first_open_candidate_wallet_gate_pass": true,
+  "first_open_candidate_wallet_gate_reason": "",
+  "first_open_candidate_edge": 0.33,
+  "rule_eval": {
+    "allow": true,
+    "score": 0.8608,
+    "score_threshold": 0.45,
+    "score_ok": true,
+    "spread": 0.02999999999999997,
+    "spread_threshold": 0.12,
+    "spread_ok": true,
+    "spread_penalty": 0.0,
+    "liquidity_value": 0.5,
+    "liquidity_threshold": 0.08,
+    "liquidity_metric": "liquidity_score",
+    "liquidity_ok": true,
+    "liquidity_penalty": 0.0,
+    "macro_veto": false,
+    "weather_parseable": true,
+    "forecast_ready": true,
+    "forecast_stale": false,
+    "forecast_edge": 0.33,
+    "min_forecast_edge": 0.08,
+    "wallet_state_gate_pass": true,
+    "analytics_only": false,
+    "weather_cluster_conflict": false,
+    "portfolio_pressure_penalty": 0.0
+  },
+  "exit_events": [
+    {
+      "trade_key": "weather-token-yes|weather-cond-1|YES",
+      "reason": "weather_forecast_stale",
+      "market": "Will the highest temperature in NYC be 64\u00b0F or higher on April 10?"
+    }
+  ],
+  "smoke_trade_close_reason": "weather_forecast_stale"
+}

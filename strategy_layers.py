@@ -49,9 +49,78 @@ class EntryRuleLayer:
             return "SHORT"
         return "NEUTRAL"
 
+    def _evaluate_weather(self, row: dict) -> dict:
+        score = PredictionLayer.select_signal_score(row)
+        score_relax = max(0.0, _finite_float(row.get("entry_score_relax", 0.0), default=0.0) or 0.0)
+        dynamic_min_score = max(0.02, min(0.95, max(self.min_score, _finite_float(row.get("weather_min_score"), default=self.min_score) or self.min_score) - score_relax))
+        spread = _finite_float(row.get("spread"), default=0.0) or 0.0
+        spread_threshold = max(0.01, _finite_float(row.get("weather_max_spread"), default=self.max_spread) or self.max_spread)
+        spread_ok = spread <= spread_threshold
+        spread_penalty = 0.0 if spread_ok else min(0.12, max(0.0, spread - spread_threshold))
+
+        liquidity_score = _finite_float(row.get("liquidity_score"), default=0.0) or 0.0
+        liquidity_threshold = max(0.0, _finite_float(row.get("weather_min_liquidity_score"), default=self.min_liquidity_score) or self.min_liquidity_score)
+        liquidity_metric = "liquidity_score"
+        liquidity_ok = liquidity_score >= liquidity_threshold
+        liquidity_penalty = 0.0 if liquidity_ok else min(0.10, liquidity_threshold - liquidity_score)
+
+        wallet_gate_pass = bool(row.get("wallet_state_gate_pass", True))
+        weather_parseable = bool(row.get("weather_parseable", False))
+        forecast_ready = bool(row.get("forecast_ready", False))
+        forecast_stale = bool(row.get("forecast_stale", True))
+        forecast_confirms_direction = bool(row.get("weather_forecast_confirms_direction", False))
+        analytics_only = bool(row.get("analytics_only", False))
+        forecast_edge = _finite_float(row.get("weather_forecast_edge"), default=0.0) or 0.0
+        min_forecast_edge = _finite_float(row.get("weather_min_forecast_edge"), default=0.08) or 0.08
+        weather_cluster_conflict = bool(row.get("weather_threshold_conflict", False))
+
+        macro_veto = (
+            analytics_only
+            or (not weather_parseable)
+            or (not wallet_gate_pass)
+            or (not forecast_ready)
+            or forecast_stale
+            or (not forecast_confirms_direction)
+            or weather_cluster_conflict
+        )
+        score_threshold = min(
+            0.98,
+            dynamic_min_score + spread_penalty + liquidity_penalty + (0.03 if forecast_edge < min_forecast_edge else 0.0),
+        )
+        score_ok = score >= score_threshold and forecast_edge >= min_forecast_edge
+        allow = score_ok and not macro_veto
+        return {
+            "allow": allow,
+            "score": score,
+            "score_threshold": score_threshold,
+            "score_ok": score_ok,
+            "spread": spread,
+            "spread_threshold": spread_threshold,
+            "spread_ok": spread_ok,
+            "spread_penalty": spread_penalty,
+            "liquidity_value": liquidity_score,
+            "liquidity_threshold": liquidity_threshold,
+            "liquidity_metric": liquidity_metric,
+            "liquidity_ok": liquidity_ok,
+            "liquidity_penalty": liquidity_penalty,
+            "macro_veto": macro_veto,
+            "weather_parseable": weather_parseable,
+            "forecast_ready": forecast_ready,
+            "forecast_stale": forecast_stale,
+            "forecast_edge": forecast_edge,
+            "min_forecast_edge": min_forecast_edge,
+            "wallet_state_gate_pass": wallet_gate_pass,
+            "analytics_only": analytics_only,
+            "weather_cluster_conflict": weather_cluster_conflict,
+            "portfolio_pressure_penalty": 0.0,
+        }
+
     def evaluate(self, row: dict) -> dict:
         import logging
-        
+        market_family = str(row.get("market_family", "") or "").strip().lower()
+        if market_family.startswith("weather_temperature"):
+            return self._evaluate_weather(row)
+
         score = PredictionLayer.select_signal_score(row)
         score_relax = max(0.0, _finite_float(row.get("entry_score_relax", 0.0), default=0.0) or 0.0)
         spread_relax = max(0.0, _finite_float(row.get("entry_spread_relax", 0.0), default=0.0) or 0.0)

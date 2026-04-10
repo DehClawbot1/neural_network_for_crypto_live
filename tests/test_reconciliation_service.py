@@ -1,6 +1,7 @@
 import pandas as pd
 import pytest
 from unittest.mock import MagicMock
+import os
 
 from reconciliation_service import ReconciliationService
 from live_position_book import LivePositionBook
@@ -101,6 +102,22 @@ def test_sync_and_rebuild_uses_trade_side_for_manual_exit_without_order_row(tmp_
     ]
 
     service = ReconciliationService(execution_client=client, logs_dir=tmp_path)
+    service.db.execute(
+        "INSERT OR REPLACE INTO live_positions (position_key, token_id, condition_id, outcome_side, shares, avg_entry_price, realized_pnl, last_fill_at, source, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "tok-1|cond-1|Yes",
+            "tok-1",
+            "cond-1",
+            "Yes",
+            5.0,
+            0.4,
+            0.0,
+            pd.Timestamp.now(tz="UTC").isoformat(),
+            "test_seed",
+            "OPEN",
+            pd.Timestamp.now(tz="UTC").isoformat(),
+        ),
+    )
     summary = service.sync_orders_and_fills()
     assert summary["fills"] == 2
 
@@ -134,7 +151,15 @@ def test_sync_orders_and_fills_mirrors_remote_fills_to_csv(tmp_path):
     ]
 
     service = ReconciliationService(execution_client=client, logs_dir=tmp_path)
-    summary = service.sync_orders_and_fills()
+    old = os.environ.get("SYNC_ALL_RECENT_REMOTE_TRADES")
+    os.environ["SYNC_ALL_RECENT_REMOTE_TRADES"] = "true"
+    try:
+        summary = service.sync_orders_and_fills()
+    finally:
+        if old is None:
+            os.environ.pop("SYNC_ALL_RECENT_REMOTE_TRADES", None)
+        else:
+            os.environ["SYNC_ALL_RECENT_REMOTE_TRADES"] = old
 
     fills_df = pd.read_csv(tmp_path / "live_fills.csv")
     assert summary["fills"] == 1
@@ -144,6 +169,37 @@ def test_sync_orders_and_fills_mirrors_remote_fills_to_csv(tmp_path):
     assert fills_df.iloc[0]["trade_id"] == "trade-1"
     assert fills_df.iloc[0]["condition_id"] == "cond-1"
     assert fills_df.iloc[0]["fill_source"] == "exchange_sync"
+
+
+def test_sync_orders_and_fills_skips_untracked_remote_trade_by_default(tmp_path):
+    client = MagicMock()
+    client.get_open_orders.return_value = []
+    client.get_trades.return_value = [
+        {
+            "id": "trade-1",
+            "order_id": "remote-order-1",
+            "token_id": "tok-remote",
+            "condition_id": "cond-remote",
+            "outcome_side": "Yes",
+            "side": "BUY",
+            "price": 0.45,
+            "size": 3,
+            "filled_at": pd.Timestamp.now(tz="UTC").isoformat(),
+        }
+    ]
+
+    service = ReconciliationService(execution_client=client, logs_dir=tmp_path)
+    old = os.environ.pop("SYNC_ALL_RECENT_REMOTE_TRADES", None)
+    try:
+        summary = service.sync_orders_and_fills()
+    finally:
+        if old is not None:
+            os.environ["SYNC_ALL_RECENT_REMOTE_TRADES"] = old
+
+    assert summary["fills"] == 0
+    assert not (tmp_path / "live_fills.csv").exists()
+    db_rows = service.db.query_all("SELECT * FROM fills")
+    assert db_rows == []
 
 
 def test_sync_orders_and_fills_mirrors_remote_orders_to_csv(tmp_path):

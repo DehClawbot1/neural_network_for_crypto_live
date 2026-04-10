@@ -117,3 +117,20 @@ def test_split_entry_pipeline_signals_avoids_fillna_downcast_futurewarning():
 
     assert set(filtered["market_slug"]) == {"m2"}
     assert stats["dropped_rows"] == 1
+
+
+def test_split_entry_pipeline_signals_drops_generic_analytics_only_rows():
+    split_entry_pipeline_signals = _load_split_entry_pipeline_signals()
+    signals_df = pd.DataFrame(
+        [
+            {"signal_source": "weather_temperature_wallet", "market_slug": "w1", "entry_intent": "OPEN_LONG", "analytics_only": True},
+            {"signal_source": "weather_temperature_wallet", "market_slug": "w2", "entry_intent": "OPEN_LONG", "analytics_only": False},
+            {"signal_source": "weather_temperature_wallet", "market_slug": "w3", "entry_intent": "CLOSE_LONG", "analytics_only": False},
+        ]
+    )
+
+    filtered, stats = split_entry_pipeline_signals(signals_df)
+
+    assert set(filtered["market_slug"]) == {"w2", "w3"}
+    assert stats["dropped_rows"] == 1
+    assert stats["dropped_analytics_only"] == 1

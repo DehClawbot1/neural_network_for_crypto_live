@@ -251,6 +251,12 @@ def infer_market_family(market_slug=None, market=None) -> str:
     slug = str(market_slug or "").strip().lower()
     title = str(market or "").strip().lower()
     combined = f"{slug} {title}"
+    if "highest temperature" in combined:
+        if " between " in combined:
+            return "weather_temperature_range"
+        if " or higher" in combined or re.search(r"\b\d+(?:\.\d+)?\s*°?\s*[fc]\b", combined):
+            return "weather_temperature_threshold"
+        return "weather_temperature_other"
     if "btc-updown" in combined or "bitcoin up or down" in combined:
         return "btc_directional_intraday"
     if "will the price of bitcoin be above" in combined or "bitcoin-above" in combined:
@@ -406,11 +412,13 @@ def learning_eligible(source: Mapping | None) -> bool:
 def build_quality_context(source: Mapping | None) -> dict:
     source = source or {}
     family = classify_exit_reason_family(source.get("close_reason"))
+    explicit_market_family = str(source.get("market_family", "") or "").strip()
+    explicit_horizon_bucket = str(source.get("horizon_bucket", "") or "").strip()
     reconciliation_close_flag = is_reconciliation_close(source)
     context = {
         "signal_label": infer_signal_label(source),
-        "market_family": infer_market_family(source.get("market_slug"), source.get("market", source.get("market_title"))),
-        "horizon_bucket": infer_horizon_bucket(source.get("market_slug"), source.get("market", source.get("market_title"))),
+        "market_family": explicit_market_family or infer_market_family(source.get("market_slug"), source.get("market", source.get("market_title"))),
+        "horizon_bucket": explicit_horizon_bucket or infer_horizon_bucket(source.get("market_slug"), source.get("market", source.get("market_title"))),
         "liquidity_bucket": infer_liquidity_bucket(source),
         "volatility_bucket": infer_volatility_bucket(source),
         "technical_regime_bucket": infer_technical_regime_bucket(source),

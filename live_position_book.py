@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 import uuid
+from typing import Any
 
 import pandas as pd
 
@@ -30,6 +31,162 @@ class LivePositionBook:
         # when the supervisor calls rebuild multiple times per cycle.
         self._rebuild_cooldown_seconds: float = 5.0
         self._last_rebuild_ts: float = 0.0
+
+    def _coerce_float(self, value: Any, default: float = 0.0) -> float:
+        try:
+            if value in (None, ""):
+                return float(default)
+            return float(value)
+        except Exception:
+            return float(default)
+
+    def _load_profile_snapshot_rows(self) -> list[dict]:
+        enabled = str(os.getenv("LIVE_POSITION_PROFILE_FALLBACK_ENABLED", "true")).strip().lower()
+        if enabled not in {"1", "true", "yes", "on"}:
+            return []
+
+        funder = str(os.getenv("POLYMARKET_FUNDER") or os.getenv("POLYMARKET_PUBLIC_ADDRESS") or "").strip()
+        if not funder:
+            try:
+                from dotenv import load_dotenv
+                load_dotenv(".env")
+                funder = str(os.getenv("POLYMARKET_FUNDER") or os.getenv("POLYMARKET_PUBLIC_ADDRESS") or "").strip()
+            except Exception:
+                funder = ""
+        if not funder:
+            return []
+
+        try:
+            from polymarket_profile_client import PolymarketProfileClient
+        except Exception as exc:
+            logger.debug("Profile snapshot fallback unavailable: %s", exc)
+            return []
+
+        try:
+            profile_client = PolymarketProfileClient(timeout=20)
+            positions = profile_client.get_positions(
+                user=funder,
+                limit=100,
+                offset=0,
+                size_threshold=0,
+                sort_by="CURRENT",
+            ) or []
+        except Exception as exc:
+            logger.debug("Profile snapshot position fetch failed: %s", exc)
+            return []
+
+        rows: list[dict] = []
+        min_notional = self._coerce_float(os.getenv("MIN_RECONCILED_POSITION_NOTIONAL_USDC"), 0.01)
+        for position in positions:
+            if not isinstance(position, dict):
+                continue
+            shares = self._coerce_float(position.get("size"), 0.0)
+            if shares <= 1e-9:
+                continue
+            token_id = str(position.get("asset") or "").strip()
+            condition_id = str(position.get("conditionId") or "").strip()
+            outcome_side = str(position.get("outcome") or "").strip()
+            if not token_id or not condition_id or not outcome_side:
+                continue
+            avg_entry_price = self._coerce_float(position.get("avgPrice"), 0.0)
+            current_price = self._coerce_float(position.get("curPrice"), avg_entry_price)
+            current_value = self._coerce_float(position.get("currentValue"), shares * current_price)
+            initial_value = self._coerce_float(position.get("initialValue"), shares * avg_entry_price)
+            effective_notional = max(shares * max(current_price, 0.0), shares * max(avg_entry_price, 0.0))
+            if effective_notional < min_notional:
+                continue
+            position_key = f"{token_id}|{condition_id}|{outcome_side}"
+            rows.append(
+                {
+                    "position_key": position_key,
+                    "token_id": token_id,
+                    "condition_id": condition_id,
+                    "outcome_side": outcome_side,
+                    "shares": shares,
+                    "avg_entry_price": avg_entry_price,
+                    "realized_pnl": self._coerce_float(position.get("realizedPnl"), 0.0),
+                    "unrealized_pnl": current_value - initial_value,
+                    "current_price": current_price,
+                    "market_title": position.get("title"),
+                    "market": position.get("slug") or position.get("title"),
+                    "last_fill_at": None,
+                    "source": "profile_snapshot",
+                    "status": "OPEN",
+                }
+            )
+        return rows
+
+    def _merge_profile_snapshot_rows(self, rows: list[dict]) -> list[dict]:
+        snapshot_rows = self._load_profile_snapshot_rows()
+        if not snapshot_rows:
+            return rows
+
+        merged: dict[tuple[str, str, str], dict] = {}
+        for row in rows:
+            token_id = str(row.get("token_id") or "").strip()
+            condition_id = str(row.get("condition_id") or "").strip()
+            outcome_side = str(row.get("outcome_side") or "").strip()
+            merged[(token_id, condition_id, outcome_side.lower())] = dict(row)
+
+        added = 0
+        upgraded = 0
+        enriched = 0
+        for snapshot in snapshot_rows:
+            key = (
+                str(snapshot.get("token_id") or "").strip(),
+                str(snapshot.get("condition_id") or "").strip(),
+                str(snapshot.get("outcome_side") or "").strip().lower(),
+            )
+            existing = merged.get(key)
+            if existing is None:
+                merged[key] = dict(snapshot)
+                added += 1
+                continue
+
+            existing_shares = self._coerce_float(existing.get("shares"), 0.0)
+            snapshot_shares = self._coerce_float(snapshot.get("shares"), 0.0)
+            should_upgrade_shares = snapshot_shares > existing_shares + 1e-6
+            missing_metadata = (
+                not str(existing.get("market_title") or "").strip()
+                or not str(existing.get("market") or "").strip()
+                or self._coerce_float(existing.get("current_price"), 0.0) <= 0.0
+            )
+            if should_upgrade_shares or missing_metadata:
+                updated = dict(existing)
+                if should_upgrade_shares:
+                    updated["shares"] = snapshot_shares
+                if self._coerce_float(snapshot.get("avg_entry_price"), 0.0) > 0 and (
+                    should_upgrade_shares or self._coerce_float(existing.get("avg_entry_price"), 0.0) <= 0.0
+                ):
+                    updated["avg_entry_price"] = snapshot.get("avg_entry_price")
+                if self._coerce_float(snapshot.get("current_price"), 0.0) > 0:
+                    updated["current_price"] = snapshot.get("current_price")
+                if snapshot.get("market_title"):
+                    updated["market_title"] = snapshot.get("market_title")
+                if snapshot.get("market"):
+                    updated["market"] = snapshot.get("market")
+                if self._coerce_float(snapshot.get("unrealized_pnl"), 0.0) != 0.0:
+                    updated["unrealized_pnl"] = snapshot.get("unrealized_pnl")
+                if self._coerce_float(snapshot.get("realized_pnl"), 0.0) != 0.0:
+                    updated["realized_pnl"] = snapshot.get("realized_pnl")
+                if "profile_snapshot" not in str(updated.get("source") or ""):
+                    updated["source"] = f"{str(updated.get('source') or 'rebuild').strip()}+profile_snapshot"
+                updated["status"] = "OPEN"
+                merged[key] = updated
+                if should_upgrade_shares:
+                    upgraded += 1
+                else:
+                    enriched += 1
+
+        if added or upgraded or enriched:
+            logger.info(
+                "Profile snapshot recovered %d missing live positions, upgraded %d undercounted rows, and enriched %d metadata-only rows.",
+                added,
+                upgraded,
+                enriched,
+            )
+
+        return list(merged.values())
 
     def _insert_external_sync_sell_fill(self, cursor, *, token_id, condition_id, outcome_side, price, shares, now):
         shares = float(shares or 0.0)
@@ -851,6 +1008,7 @@ class LivePositionBook:
             """
         )
         rows = self._verify_open_positions_against_exchange(rows)
+        rows = self._merge_profile_snapshot_rows(rows)
         return pd.DataFrame(rows)
 
     def get_enriched_open_positions(self, scored_df=None, fallback_df=None):

@@ -1,9 +1,10 @@
 # Neural Network For Crypto (Live Trading)
 
-This repository runs a BTC-focused Polymarket trading system with:
+This repository runs a BTC-first Polymarket trading system with:
 - live execution and paper/shadow trading flows,
 - strict exchange reconciliation and runtime-state repair,
 - model-based signal scoring with technical, wallet-copy, on-chain, and BTC market-context features,
+- an approved-wallet weather-temperature strategy with forecast confirmation,
 - guarded retraining and promotion workflows,
 - benchmark and ablation tooling for research.
 
@@ -48,6 +49,10 @@ Core live runtime files:
 - [reconciliation_service.py](reconciliation_service.py): exchange sync and runtime drift detection
 - [performance_governor.py](performance_governor.py): rolling live performance controls
 - [market_monitor.py](market_monitor.py): BTC market discovery including rotating btc-updown markets (5m/15m/4h) via Gamma Events API
+- [weather_temperature_strategy.py](weather_temperature_strategy.py): approved-wallet weather-temperature state engine, scoring, and active exits
+- [weather_temperature_markets.py](weather_temperature_markets.py): Polymarket weather-temperature market adapter and parser
+- [weather_temperature_guard.py](weather_temperature_guard.py): weather interval-conflict and city/date cluster-cap guard
+- [weather_temperature_forecast.py](weather_temperature_forecast.py): Open-Meteo forecast adapter for temperature-market confirmation
 
 ### 2. Market Intelligence Layer
 Context and feature generation files:
@@ -75,6 +80,7 @@ Training and evaluation files:
 - [historical_dataset_builder.py](historical_dataset_builder.py): historical research dataset construction
 - [contract_target_builder.py](contract_target_builder.py): training target generation
 - [model_feature_catalog.py](model_feature_catalog.py): shared feature-family definitions
+- [weather_temperature_trainer.py](weather_temperature_trainer.py): separate weather-temperature training artifact builder
 - [feature_ablation.py](feature_ablation.py): feature-family ablation harness
 - [benchmark_strategy.py](benchmark_strategy.py): simpler benchmark strategy
 - [real_pipeline.py](real_pipeline.py): end-to-end research pipeline runner

@@ -554,7 +554,7 @@ class TradeManager:
         avg_to_now_price_change = current_price - entry_price if entry_price or current_price else 0.0
         avg_to_now_price_change_pct = (avg_to_now_price_change / entry_price) if entry_price > 0 else 0.0
         unrealized_pnl_pct = (unrealized_pnl / negotiated_value_usdc) if negotiated_value_usdc > 0 else 0.0
-        return {
+        row = {
             "position_id": self._canonical_position_id(
                 token_id=trade.token_id,
                 condition_id=trade.condition_id,
@@ -638,6 +638,10 @@ class TradeManager:
             "is_reconciliation_close": str(getattr(trade, "close_reason", "") or "").strip().lower() == "external_manual_close",
             "lifecycle_source": "trade_manager_memory",
         }
+        for key, value in getattr(trade, "__dict__", {}).items():
+            if str(key).startswith(("weather_", "forecast_")) and key not in row:
+                row[key] = value
+        return row
 
     def _sync_trade_from_rebuilt(self, existing_trade: TradeLifecycle, rebuilt_trade: TradeLifecycle):
         existing_trade.market = rebuilt_trade.market or existing_trade.market
@@ -654,6 +658,9 @@ class TradeManager:
         existing_trade.unrealized_pnl = float(rebuilt_trade.unrealized_pnl or 0.0)
         existing_trade.opened_at = rebuilt_trade.opened_at or existing_trade.opened_at
         existing_trade.state = TradeState.OPEN
+        for key, value in getattr(rebuilt_trade, "__dict__", {}).items():
+            if str(key).startswith(("weather_", "forecast_")):
+                setattr(existing_trade, key, value)
 
     def _closed_trade_fingerprint(self, trade: TradeLifecycle) -> str:
         return "|".join(
@@ -1244,6 +1251,9 @@ class TradeManager:
             trade.size_usdc = trade.shares * trade.entry_price
             trade.realized_pnl = float(row.get("realized_pnl", 0.0) or 0.0)
             trade.unrealized_pnl = float(row.get("unrealized_pnl", 0.0) or 0.0)
+            for key, value in row.items():
+                if str(key).startswith(("weather_", "forecast_")):
+                    setattr(trade, key, value)
             trade.opened_at = row.get("last_fill_at") or datetime.now().isoformat()
             trade.state = TradeState.OPEN
             rebuilt_trades[trade_key] = trade

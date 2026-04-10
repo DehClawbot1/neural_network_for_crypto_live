@@ -132,6 +132,9 @@ class TradeLifecycle:
         self.entry_context_complete = bool(
             normalized_signal_row.get("entry_context_complete", quality_context.get("entry_context_complete", False))
         )
+        for key, value in normalized_signal_row.items():
+            if str(key).startswith(("weather_", "forecast_")):
+                setattr(self, key, value)
 
     def enter(self, size_usdc: float, entry_price: float):
         self.size_usdc = float(size_usdc)

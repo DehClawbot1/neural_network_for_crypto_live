@@ -70,6 +70,43 @@ BTC_LIVE_INDEX_FEATURES = [
     "btc_live_confluence",
 ]
 
+WEATHER_WALLET_COPY_FEATURES = [
+    "wallet_temp_hit_rate_90d",
+    "wallet_temp_realized_pnl_90d",
+    "wallet_region_score",
+    "wallet_temp_range_skill",
+    "wallet_temp_threshold_skill",
+    "wallet_quality_score",
+    "wallet_state_confidence",
+    "wallet_state_freshness_score",
+    "wallet_size_change_score",
+    "wallet_agreement_score",
+]
+
+WEATHER_MARKET_STRUCTURE_FEATURES = [
+    "current_price",
+    "spread",
+    "time_left",
+    "liquidity_score",
+    "volume_score",
+    "market_structure_score",
+    "execution_quality_score",
+]
+
+WEATHER_FORECAST_EDGE_FEATURES = [
+    "forecast_p_hit_interval",
+    "forecast_margin_to_lower_c",
+    "forecast_margin_to_upper_c",
+    "forecast_uncertainty_c",
+    "forecast_drift_c",
+    "weather_fair_probability_yes",
+    "weather_fair_probability_side",
+    "weather_market_probability",
+    "weather_forecast_edge",
+    "weather_forecast_margin_score",
+    "weather_forecast_stability_score",
+]
+
 TRAINING_FEATURE_FAMILIES = OrderedDict(
     [
         ("wallet_copy", WALLET_FEATURES),
@@ -78,6 +115,9 @@ TRAINING_FEATURE_FAMILIES = OrderedDict(
         ("btc_spot_regime", BTC_SPOT_REGIME_FEATURES),
         ("btc_momentum_quality", BTC_MOMENTUM_QUALITY_FEATURES),
         ("btc_live_index", BTC_LIVE_INDEX_FEATURES),
+        ("weather_wallet_copy", WEATHER_WALLET_COPY_FEATURES),
+        ("weather_market_structure", WEATHER_MARKET_STRUCTURE_FEATURES),
+        ("weather_forecast_edge", WEATHER_FORECAST_EDGE_FEATURES),
     ]
 )
 

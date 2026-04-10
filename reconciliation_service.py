@@ -521,7 +521,10 @@ class ReconciliationService:
 
         try:
             trades_payload = self.execution_client.get_trades()
-            sync_all_recent = str(os.getenv("SYNC_ALL_RECENT_REMOTE_TRADES", "true")).strip().lower() in {"1", "true", "yes", "on"}
+            # Default to scoped trade sync only. Broad import of all recent remote
+            # trades can mirror unrelated/manual activity into local fills without
+            # corresponding local orders, which corrupts position reconstruction.
+            sync_all_recent = str(os.getenv("SYNC_ALL_RECENT_REMOTE_TRADES", "false")).strip().lower() in {"1", "true", "yes", "on"}
             lookback_hours = max(1, int(os.getenv("SYNC_RECENT_TRADES_LOOKBACK_HOURS", "72") or 72))
             cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=lookback_hours)
             fill_rows_to_mirror = []
@@ -531,9 +534,8 @@ class ReconciliationService:
                     continue
                 ts = self._parse_timestamp(trade.get("filled_at"))
                 is_recent = bool(ts is not None and not pd.isna(ts) and ts >= cutoff)
-                # Exchange trades are the source of truth for position reconstruction.
-                # Keep all recent trades by default, while still keeping old unrelated
-                # history out of local state.
+                # Exchange trades are useful for reconciling known local orders and
+                # already-tracked open tokens. Broad recent trade import is opt-in.
                 if sync_all_recent:
                     if not is_recent and trade.get("order_id") not in known_order_ids and trade.get("token_id") not in tracked_tokens:
                         continue
