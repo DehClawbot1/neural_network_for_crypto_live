@@ -1,9 +1,11 @@
 import os
+import re
 from pathlib import Path
 
 import pandas as pd
 from brain_paths import filter_frame_for_brain, resolve_brain_context
 from entry_snapshot_enrichment import enrich_frame_with_entry_snapshots
+from historical_dataset_builder import HistoricalDatasetBuilder
 
 
 def _safe_merge_asof(left, right, on, **kwargs):
@@ -49,6 +51,7 @@ class ContractTargetBuilder:
         self.clob_history_file = self.shared_logs_dir / "clob_price_history.csv"
         self.btc_live_file = self.shared_logs_dir / "btc_live_snapshot.csv"
         self.technical_regime_file = self.shared_logs_dir / "technical_regime_snapshot.csv"
+        self.historical_dataset_file = self.logs_dir / "historical_dataset.csv"
         self.output_file = self.logs_dir / "contract_targets.csv"
 
     def _safe_read(self, path):

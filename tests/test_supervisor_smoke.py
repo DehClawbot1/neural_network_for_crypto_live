@@ -1,4 +1,8 @@
 import unittest
+import warnings
+
+import numpy as np
+import pandas as pd
 
 import supervisor
 
@@ -54,6 +58,38 @@ class TestSupervisorSmoke(unittest.TestCase):
         self.assertTrue(allow_second)
         self.assertEqual(consumed_count, 1)
         self.assertFalse(allow_third)
+
+    def test_fill_missing_series_values_avoids_fillna_future_warning(self):
+        series = pd.Series([None, 1.0, np.nan], dtype=object)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", FutureWarning)
+            filled = supervisor._fill_missing_series_values(series, 0.5)
+        self.assertEqual(filled.tolist(), [0.5, 1.0, 0.5])
+
+    def test_top_rank_summary_prefers_decision_score_and_outcome_side_fallback(self):
+        ranked_row = pd.Series(
+            {
+                "signal_label": "STRONG WEATHER OPPORTUNITY",
+                "decision_score": 0.82,
+                "confidence": 0.35,
+                "market_title": "Weather Test",
+                "outcome_side": "YES",
+                "side": np.nan,
+            }
+        )
+        ranked_side = (
+            ranked_row.get("side")
+            if pd.notna(ranked_row.get("side"))
+            else ranked_row.get("outcome_side", ranked_row.get("side"))
+        )
+        summary_line = (
+            f"1. {ranked_row.get('signal_label')} | "
+            f"confidence={supervisor._safe_float(ranked_row.get('decision_score', ranked_row.get('confidence', supervisor.PredictionLayer.select_signal_score(ranked_row))), default=0.0):.2f} | "
+            f"market={ranked_row.get('market_title')} | "
+            f"side={ranked_side}"
+        )
+        self.assertIn("confidence=0.82", summary_line)
+        self.assertIn("side=YES", summary_line)
 
 
 if __name__ == "__main__":

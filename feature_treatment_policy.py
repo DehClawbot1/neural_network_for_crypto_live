@@ -274,8 +274,18 @@ FEATURE_TREATMENT.update(_bulk([
     "wallet_state_freshness_score",
     "wallet_size_change_score",
     "wallet_agreement_score",
+    "source_wallet_size_delta_ratio",
 ], "clip01"))
 FEATURE_TREATMENT["wallet_temp_realized_pnl_90d"] = FeatureTreatment("standardize")
+FEATURE_TREATMENT.update(_bulk([
+    "wallet_watchlist_approved",
+    "wallet_state_gate_pass",
+    "weather_parseable",
+    "forecast_ready",
+    "forecast_stale",
+    "weather_forecast_confirms_direction",
+    "weather_threshold_conflict",
+], "boolean"))
 
 # ---- weather_market_structure ----
 # current_price, spread, time_left, liquidity_score, volume_score,

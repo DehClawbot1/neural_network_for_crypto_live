@@ -9,6 +9,8 @@ from log_loader import load_execution_history
 
 BASE_DIR = Path(__file__).resolve().parent
 LOGS_DIR = BASE_DIR / "logs"
+BTC_LOGS_DIR = LOGS_DIR / "btc"
+WEATHER_LOGS_DIR = LOGS_DIR / "weather_temperature"
 
 app = FastAPI(title="Neural Network for Crypto API", version="1.0.0")
 
@@ -18,6 +20,23 @@ app.include_router(polymarket_router)
 
 def read_csv(name: str) -> pd.DataFrame:
     path = LOGS_DIR / name
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _brain_logs_dir(market_family: str | None) -> Path:
+    family = str(market_family or "btc").strip().lower()
+    if family.startswith("weather_temperature"):
+        return WEATHER_LOGS_DIR
+    return BTC_LOGS_DIR
+
+
+def read_brain_csv(name: str, market_family: str | None = None) -> pd.DataFrame:
+    path = _brain_logs_dir(market_family) / name
     if not path.exists():
         return pd.DataFrame()
     try:
@@ -41,6 +60,8 @@ def root():
             "/analytics",
             "/backtest",
             "/dataset",
+            "/dataset?market_family=btc",
+            "/dataset?market_family=weather_temperature",
             "/polymarket/capabilities",
             "/polymarket/status",
             "/polymarket/health",
@@ -59,7 +80,8 @@ def health():
         "system_health": (LOGS_DIR / "system_health.csv").exists(),
         "analytics": (LOGS_DIR / "trader_analytics.csv").exists(),
         "backtest": (LOGS_DIR / "backtest_summary.csv").exists(),
-        "dataset": (LOGS_DIR / "historical_dataset.csv").exists(),
+        "dataset_btc": (BTC_LOGS_DIR / "historical_dataset.csv").exists(),
+        "dataset_weather_temperature": (WEATHER_LOGS_DIR / "historical_dataset.csv").exists(),
     }
     return {"status": "ok", "logs_dir": str(LOGS_DIR), "files": files}
 
@@ -123,8 +145,8 @@ def backtest():
 
 
 @app.get("/dataset")
-def dataset(limit: int = 100):
-    df = read_csv("historical_dataset.csv")
+def dataset(limit: int = 100, market_family: str = "btc"):
+    df = read_brain_csv("historical_dataset.csv", market_family=market_family)
     if df.empty:
         return JSONResponse([])
     return JSONResponse(df.tail(limit).to_dict(orient="records"))

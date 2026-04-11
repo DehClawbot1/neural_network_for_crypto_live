@@ -13,6 +13,7 @@ from brain_log_routing import overwrite_csv_with_brain_mirrors
 from brain_paths import WEATHER_FAMILY
 from leaderboard_service import PolymarketLeaderboardService
 from polymarket_profile_client import PolymarketProfileClient
+from strategy_layers import PredictionLayer
 from weather_temperature_forecast import WeatherForecastService
 from weather_temperature_guard import weather_city_date_cluster_key
 from weather_temperature_markets import (
@@ -854,14 +855,14 @@ class WeatherTemperatureStrategy:
             )
 
             if entry_intent == "CLOSE_LONG":
-                confidence = max(0.70, (direction_conf * 0.6) + 0.30)
+                model_confidence = max(0.70, (direction_conf * 0.6) + 0.30)
                 signal_label = "WEATHER_SOURCE_EXIT"
-                reason = f"weather_exit event={raw.get('source_wallet_position_event')} confidence={confidence:.2f}"
+                reason = f"weather_exit event={raw.get('source_wallet_position_event')} confidence={model_confidence:.2f}"
                 action_code = 2
                 p_tp = 0.50
             else:
                 p_tp = fair_side
-                confidence = _clip01(
+                model_confidence = _clip01(
                     (wallet_quality * 0.22)
                     + (direction_conf * 0.16)
                     + (agreement_score * 0.10)
@@ -872,9 +873,8 @@ class WeatherTemperatureStrategy:
                     + (spread_score * 0.04)
                 )
                 if edge <= 0 or not bool(raw.get("forecast_ready", False)):
-                    confidence = min(confidence, 0.44)
-                if weather_entry_gate_fail:
-                    confidence = min(confidence, 0.35)
+                    model_confidence = min(model_confidence, 0.44)
+                confidence = model_confidence
                 if confidence < 0.45:
                     action_code = 0
                 elif confidence < 0.60:
@@ -906,6 +906,8 @@ class WeatherTemperatureStrategy:
                 ),
                 "trader_win_rate": _clip01(raw.get("wallet_temp_hit_rate_90d", wallet_quality)),
                 "normalized_trade_size": size_score,
+                "outcome_side": side,
+                "side": side,
                 "current_price": market_prob,
                 "entry_price": market_prob,
                 "price": market_prob,
@@ -921,6 +923,7 @@ class WeatherTemperatureStrategy:
                 "market_structure_score": _clip01((liquidity_score * 0.35) + (volume_score * 0.20) + (margin_score * 0.25) + (spread_score * 0.20)),
                 "volatility_risk": _clip01(uncertainty_c / 5.0),
                 "time_decay_score": _clip01(1.0 - time_left),
+                "model_confidence": round(float(model_confidence), 4),
                 "confidence": round(float(confidence), 4),
                 "signal_label": signal_label,
                 "action_code": int(action_code),
@@ -943,6 +946,26 @@ class WeatherTemperatureStrategy:
                 "weather_entry_gate_fail": bool(weather_entry_gate_fail),
                 "weather_entry_allowed_by_forecast": bool(edge >= self.min_forecast_edge and raw.get("forecast_ready", False)),
             }
+            decision_score = PredictionLayer.select_signal_score(row_out)
+            row_out["decision_score"] = round(float(decision_score), 4)
+            row_out["confidence"] = round(float(max(row_out["model_confidence"], decision_score)), 4)
+            ranking_score = row_out["confidence"]
+            if entry_intent != "CLOSE_LONG":
+                if ranking_score < 0.45:
+                    action_code = 0
+                elif ranking_score < 0.60:
+                    action_code = 1
+                elif ranking_score < 0.78:
+                    action_code = 2
+                else:
+                    action_code = 3
+                row_out["action_code"] = int(action_code)
+                row_out["signal_label"] = {
+                    0: "IGNORE",
+                    1: "LOW-CONFIDENCE WATCH",
+                    2: "STRONG WEATHER OPPORTUNITY",
+                    3: "HIGHEST-RANKED WEATHER SIGNAL",
+                }[action_code]
             rows.append(row_out)
         scored_df = pd.DataFrame(rows)
         if not scored_df.empty:

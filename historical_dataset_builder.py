@@ -44,6 +44,15 @@ class HistoricalDatasetBuilder:
         except Exception:
             return pd.DataFrame()
 
+    def _safe_read_local(self, filename):
+        path = self.logs_dir / filename
+        if not path.exists():
+            return pd.DataFrame()
+        try:
+            return pd.read_csv(path, engine="python", on_bad_lines="skip")
+        except Exception:
+            return pd.DataFrame()
+
     def _safe_merge_asof(self, left, right, on, by=None):
         if left.empty or right.empty or on not in left.columns or on not in right.columns:
             return left
@@ -121,6 +130,212 @@ class HistoricalDatasetBuilder:
             out = out.rename(columns={"market": "market_title"})
         return self._dedupe_columns(out)
 
+    def _apply_numeric_feature_priors(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+        out = df.copy()
+        market_family_series = (
+            out.get("market_family", pd.Series("", index=out.index))
+            .astype(str)
+            .str.lower()
+        )
+        weather_mask = market_family_series.str.startswith("weather_temperature")
+        btc_mask = ~weather_mask
+
+        current_price_series = pd.to_numeric(
+            out.get("current_price", out.get("entry_price", out.get("btc_price", 0.0))),
+            errors="coerce",
+        )
+        btc_price_series = pd.to_numeric(
+            out.get("btc_price", out.get("current_price", out.get("entry_price", 0.0))),
+            errors="coerce",
+        )
+
+        series_priors = {
+            "wallet_trade_count_30d": 0.0,
+            "wallet_alpha_30d": 0.0,
+            "wallet_avg_forward_return_15m": 0.0,
+            "wallet_signal_precision_tp": 0.5,
+            "wallet_recent_streak": 0.0,
+            "btc_fee_pressure_score": 0.5,
+            "btc_mempool_congestion_score": 0.5,
+            "btc_network_activity_score": 0.5,
+            "btc_network_stress_score": 0.5,
+            "btc_atr_pct_15m": 0.0,
+            "btc_realized_vol_1h": 0.0,
+            "btc_realized_vol_4h": 0.0,
+            "btc_volatility_regime_score": 0.5,
+            "btc_trend_persistence": 0.5,
+            "btc_rsi_14": 50.0,
+            "btc_rsi_distance_mid": 0.0,
+            "btc_rsi_divergence_score": 0.0,
+            "btc_macd": 0.0,
+            "btc_macd_signal": 0.0,
+            "btc_macd_hist": 0.0,
+            "btc_macd_hist_slope": 0.0,
+            "btc_momentum_confluence": 0.0,
+            "btc_live_source_quality_score": 0.5,
+            "btc_live_source_divergence_bps": 0.0,
+            "btc_live_mark_index_basis_bps": 0.0,
+            "btc_live_mark_index_basis_bps_kalman": 0.0,
+            "btc_live_return_1m": 0.0,
+            "btc_live_return_5m": 0.0,
+            "btc_live_return_15m": 0.0,
+            "btc_live_return_1h": 0.0,
+            "btc_live_return_1m_kalman": 0.0,
+            "btc_live_return_5m_kalman": 0.0,
+            "btc_live_return_15m_kalman": 0.0,
+            "btc_live_return_1h_kalman": 0.0,
+            "btc_live_confluence": 0.0,
+            "btc_live_confluence_kalman": 0.0,
+            "btc_market_regime_score": 0.5,
+            "btc_market_regime_trend_score": 0.5,
+            "btc_market_regime_volatility_score": 0.5,
+            "btc_market_regime_chaos_score": 0.5,
+            "btc_market_regime_stability_score": 0.5,
+            "btc_market_regime_confidence_multiplier": 1.0,
+            "btc_market_regime_weight_legacy": 1.0 / 3.0,
+            "btc_market_regime_weight_stage1": 1.0 / 3.0,
+            "btc_market_regime_weight_stage2": 1.0 / 3.0,
+            "open_positions_count": 0.0,
+            "open_positions_negotiated_value_total": 0.0,
+            "open_positions_max_payout_total": 0.0,
+            "open_positions_current_value_total": 0.0,
+            "open_positions_unrealized_pnl_total": 0.0,
+            "open_positions_unrealized_pnl_pct_total": 0.0,
+            "open_positions_avg_to_now_price_change_pct_mean": 0.0,
+            "open_positions_avg_to_now_price_change_pct_min": 0.0,
+            "open_positions_avg_to_now_price_change_pct_max": 0.0,
+            "open_positions_winner_count": 0.0,
+            "open_positions_loser_count": 0.0,
+            "wallet_temp_hit_rate_90d": 0.5,
+            "wallet_temp_realized_pnl_90d": 0.0,
+            "wallet_region_score": 0.5,
+            "wallet_temp_range_skill": 0.5,
+            "wallet_temp_threshold_skill": 0.5,
+            "wallet_quality_score": 0.5,
+            "wallet_state_confidence": 0.5,
+            "wallet_state_freshness_score": 0.5,
+            "wallet_size_change_score": 0.0,
+            "wallet_agreement_score": 0.5,
+            "source_wallet_size_delta_ratio": 0.0,
+            "liquidity_score": 0.0,
+            "volume_score": 0.0,
+            "market_structure_score": 0.5,
+            "execution_quality_score": 0.0,
+            "forecast_p_hit_interval": 0.5,
+            "forecast_margin_to_lower_c": 0.0,
+            "forecast_margin_to_upper_c": 0.0,
+            "forecast_uncertainty_c": 0.0,
+            "forecast_drift_c": 0.0,
+            "weather_fair_probability_yes": 0.5,
+            "weather_fair_probability_side": 0.5,
+            "weather_market_probability": 0.5,
+            "weather_forecast_edge": 0.0,
+            "weather_forecast_margin_score": 0.5,
+            "weather_forecast_stability_score": 0.5,
+        }
+
+        price_series_priors = {
+            "btc_live_price": btc_price_series,
+            "btc_live_spot_price": btc_price_series,
+            "btc_live_index_price": btc_price_series,
+            "btc_live_mark_price": btc_price_series,
+            "btc_live_price_kalman": btc_price_series,
+            "btc_live_spot_price_kalman": btc_price_series,
+            "btc_live_index_price_kalman": btc_price_series,
+            "btc_live_mark_price_kalman": btc_price_series,
+            "current_price": current_price_series,
+            "entry_price": current_price_series,
+        }
+
+        boolean_priors = {
+            "btc_market_regime_is_calm": 0.0,
+            "btc_market_regime_is_trend": 0.0,
+            "btc_market_regime_is_volatile": 0.0,
+            "btc_market_regime_is_chaotic": 0.0,
+            "btc_live_index_ready": 0.0,
+            "btc_live_index_feed_available": 0.0,
+            "btc_live_mark_feed_available": 0.0,
+        }
+
+        updated_columns = {}
+        new_columns = {}
+
+        for column, prior in series_priors.items():
+            if column not in out.columns:
+                new_columns[column] = pd.Series(prior, index=out.index)
+            else:
+                updated_columns[column] = pd.to_numeric(out[column], errors="coerce").fillna(prior)
+
+        for column, prior_series in price_series_priors.items():
+            if column not in out.columns:
+                new_columns[column] = pd.Series(prior_series, index=out.index)
+            else:
+                updated_columns[column] = pd.to_numeric(out[column], errors="coerce").fillna(prior_series)
+
+        for column, prior in boolean_priors.items():
+            if column not in out.columns:
+                new_columns[column] = pd.Series(prior, index=out.index)
+            else:
+                updated_columns[column] = pd.to_numeric(out[column], errors="coerce").fillna(prior)
+
+        if "spread" in out.columns:
+            updated_columns["spread"] = pd.to_numeric(out["spread"], errors="coerce").fillna(0.0)
+        else:
+            new_columns["spread"] = pd.Series(0.0, index=out.index)
+
+        if updated_columns:
+            out = out.assign(**updated_columns)
+        if new_columns:
+            out = pd.concat([out, pd.DataFrame(new_columns, index=out.index)], axis=1)
+
+        # Weather family specific neutral priors should not inherit BTC price proxies.
+        weather_price_columns = [
+            "current_price",
+            "entry_price",
+        ]
+        weather_boolean_columns = [
+            "wallet_watchlist_approved",
+            "wallet_state_gate_pass",
+            "weather_parseable",
+            "forecast_ready",
+            "forecast_stale",
+            "weather_forecast_confirms_direction",
+            "weather_threshold_conflict",
+        ]
+        for column in weather_price_columns:
+            if column in out.columns:
+                out.loc[weather_mask, column] = pd.to_numeric(out.loc[weather_mask, column], errors="coerce").fillna(0.5)
+        weather_bool_updates = {}
+        weather_bool_new = {}
+        for column in weather_boolean_columns:
+            if column not in out.columns:
+                weather_bool_new[column] = pd.Series(0.0, index=out.index)
+            else:
+                weather_bool_updates[column] = pd.to_numeric(out[column], errors="coerce").fillna(0.0)
+        if weather_bool_updates:
+            out = out.assign(**weather_bool_updates)
+        if weather_bool_new:
+            out = pd.concat([out, pd.DataFrame(weather_bool_new, index=out.index)], axis=1)
+
+        # BTC-only live/index fields should stay neutral on weather rows.
+        btc_only_price_columns = [
+            "btc_live_price",
+            "btc_live_spot_price",
+            "btc_live_index_price",
+            "btc_live_mark_price",
+            "btc_live_price_kalman",
+            "btc_live_spot_price_kalman",
+            "btc_live_index_price_kalman",
+            "btc_live_mark_price_kalman",
+        ]
+        for column in btc_only_price_columns:
+            if column in out.columns:
+                out.loc[weather_mask, column] = pd.to_numeric(out.loc[weather_mask, column], errors="coerce").fillna(0.0)
+
+        return out
+
     def build(self):
         signals_df = self._safe_read("signals.csv")
         trades_df = self._safe_read("execution_log.csv")
@@ -134,6 +349,7 @@ class HistoricalDatasetBuilder:
         btc_live_df = self._safe_read("btc_live_snapshot.csv")
         technical_regime_df = self._safe_read("technical_regime_snapshot.csv")
         portfolio_curve_df = self._safe_read("portfolio_equity_curve.csv")
+        weather_wallet_snapshot_df = self._safe_read_local("weather_wallet_state_snapshot.csv")
 
         dataset = enrich_frame_with_entry_snapshots(signals_df, logs_dir=self.logs_dir)
         if dataset.empty:
@@ -497,7 +713,44 @@ class HistoricalDatasetBuilder:
             dataset["end_date"] = pd.to_datetime(dataset["end_date"], utc=True, errors="coerce")
             dataset["time_to_close_minutes"] = (dataset["end_date"] - dataset["timestamp"]).dt.total_seconds().div(60)
 
+        if not weather_wallet_snapshot_df.empty and "market_family" in dataset.columns:
+            weather_wallet_snapshot_df = weather_wallet_snapshot_df.copy()
+            if "market_family" in weather_wallet_snapshot_df.columns:
+                weather_wallet_snapshot_df = weather_wallet_snapshot_df[
+                    weather_wallet_snapshot_df["market_family"].astype(str).str.startswith("weather_temperature")
+                ].copy()
+            if not weather_wallet_snapshot_df.empty:
+                if "timestamp" in weather_wallet_snapshot_df.columns:
+                    weather_wallet_snapshot_df["timestamp"] = self._parse_logged_timestamp_series(weather_wallet_snapshot_df["timestamp"])
+                weather_merge_candidates = [
+                    "token_id",
+                    "condition_id",
+                    "outcome_side",
+                    "market_title",
+                    "trader_wallet",
+                ]
+                weather_merge_keys = [
+                    column
+                    for column in weather_merge_candidates
+                    if column in dataset.columns and column in weather_wallet_snapshot_df.columns
+                ]
+                if weather_merge_keys:
+                    sort_col = "timestamp" if "timestamp" in weather_wallet_snapshot_df.columns else weather_merge_keys[0]
+                    latest_weather = weather_wallet_snapshot_df.sort_values(sort_col).drop_duplicates(
+                        subset=weather_merge_keys,
+                        keep="last",
+                    )
+                    dataset = dataset.merge(
+                        latest_weather,
+                        on=weather_merge_keys,
+                        how="left",
+                        suffixes=("", "_weather_snapshot"),
+                    )
+                    dataset = self._coalesce_suffix_columns(dataset)
+                    dataset = self._dedupe_columns(dataset)
+
         dataset = self._coalesce_suffix_columns(dataset)
+        dataset = self._apply_numeric_feature_priors(dataset)
 
         if self.brain_context is not None and not dataset.empty:
             dataset = filter_frame_for_brain(dataset, self.brain_context)

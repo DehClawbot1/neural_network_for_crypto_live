@@ -4,10 +4,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.impute import SimpleImputer
-from sklearn.metrics import accuracy_score, mean_squared_error
-from sklearn.pipeline import Pipeline
 
 from model_feature_catalog import DEFAULT_TABULAR_FEATURE_COLUMNS, TRAINING_FEATURE_FAMILIES
 from model_feature_safety import drop_all_nan_features
@@ -16,7 +12,8 @@ from model_feature_safety import drop_all_nan_features
 class FeatureAblationReporter:
     def __init__(self, logs_dir="logs"):
         self.logs_dir = Path(logs_dir)
-        self.dataset_file = self.logs_dir / "contract_targets.csv"
+        self.dataset_file = self.logs_dir / "historical_dataset.csv"
+        self.contract_targets_file = self.logs_dir / "contract_targets.csv"
         self.output_file = self.logs_dir / "feature_ablation_report.csv"
 
     def _safe_read(self, path: Path):
@@ -28,6 +25,10 @@ class FeatureAblationReporter:
             return pd.DataFrame()
 
     def _build_classifier(self):
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.impute import SimpleImputer
+        from sklearn.pipeline import Pipeline
+
         return Pipeline(
             steps=[
                 ("imputer", SimpleImputer(strategy="median")),
@@ -36,12 +37,61 @@ class FeatureAblationReporter:
         )
 
     def _build_regressor(self):
+        from sklearn.ensemble import RandomForestRegressor
+        from sklearn.impute import SimpleImputer
+        from sklearn.pipeline import Pipeline
+
         return Pipeline(
             steps=[
                 ("imputer", SimpleImputer(strategy="median")),
                 ("reg", RandomForestRegressor(n_estimators=200, random_state=42)),
             ]
         )
+
+    def _load_dataset(self) -> pd.DataFrame:
+        history_df = self._safe_read(self.dataset_file)
+        target_df = self._safe_read(self.contract_targets_file)
+        if history_df.empty:
+            return target_df
+        if target_df.empty:
+            return history_df
+
+        df = history_df.copy()
+        if "timestamp" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+        target_df = target_df.copy()
+        if "timestamp" in target_df.columns:
+            target_df["timestamp"] = pd.to_datetime(target_df["timestamp"], utc=True, errors="coerce")
+
+        merge_candidates = [
+            "timestamp",
+            "token_id",
+            "condition_id",
+            "outcome_side",
+            "trader_wallet",
+            "market_title",
+        ]
+        merge_keys = [column for column in merge_candidates if column in df.columns and column in target_df.columns]
+        label_columns = [
+            column
+            for column in ["forward_return_15m", "tp_before_sl_60m", "target_up", "mfe_60m", "mae_60m", "entry_price"]
+            if column in target_df.columns
+        ]
+        if not merge_keys or not label_columns:
+            return df
+
+        target_view = target_df[merge_keys + label_columns].drop_duplicates(subset=merge_keys, keep="last")
+        merged = df.merge(target_view, on=merge_keys, how="left", suffixes=("", "_target"))
+        for column in label_columns:
+            target_column = f"{column}_target"
+            if target_column not in merged.columns:
+                continue
+            if column in merged.columns:
+                merged[column] = merged[column].where(merged[column].notna(), merged[target_column])
+                merged = merged.drop(columns=[target_column])
+            else:
+                merged = merged.rename(columns={target_column: column})
+        return merged
 
     def _evaluate_feature_set(self, train_df: pd.DataFrame, test_df: pd.DataFrame, candidates: list[str]) -> dict | None:
         usable, dropped_all_nan = drop_all_nan_features(train_df, candidates, context="feature_ablation")
@@ -53,6 +103,7 @@ class FeatureAblationReporter:
             "usable_features_json": str(usable),
             "dropped_all_nan_json": str(dropped_all_nan),
         }
+        from sklearn.metrics import accuracy_score, mean_squared_error
 
         if "target_up" in train_df.columns and "target_up" in test_df.columns:
             clf = self._build_classifier()
@@ -70,7 +121,7 @@ class FeatureAblationReporter:
         return result
 
     def write(self):
-        df = self._safe_read(self.dataset_file)
+        df = self._load_dataset()
         if df.empty:
             return pd.DataFrame()
 

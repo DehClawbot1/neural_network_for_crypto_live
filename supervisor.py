@@ -565,6 +565,14 @@ def _frame_numeric_series(frame: pd.DataFrame, column_name: str, default_value=0
     return series.fillna(float(default_value))
 
 
+def _fill_missing_series_values(series: pd.Series, fill_value) -> pd.Series:
+    filled = series.copy()
+    missing_mask = filled.isna()
+    if missing_mask.any():
+        filled.loc[missing_mask] = fill_value
+    return filled
+
+
 def _parse_timestamp_utc(value):
     if value in (None, "", "nan", "None"):
         return None
@@ -2600,7 +2608,7 @@ def main_loop():
                     for _ctx_key, _ctx_value in _safe_ctx.items():
                         if _ctx_key in signals_df.columns:
                             _existing = _frame_column_as_series(signals_df, _ctx_key, np.nan)
-                            _ctx_assignments[_ctx_key] = _existing.fillna(_ctx_value)
+                            _ctx_assignments[_ctx_key] = _fill_missing_series_values(_existing, _ctx_value)
                         else:
                             _ctx_assignments[_ctx_key] = pd.Series([_ctx_value] * len(signals_df), index=signals_df.index)
                     _ctx_frame = pd.DataFrame(_ctx_assignments, index=signals_df.index)
@@ -3004,11 +3012,16 @@ def main_loop():
             logging.info("Top %s paper-trading opportunities this cycle:", top_n)
             print("\n=== TOP PAPER-TRADING OPPORTUNITIES ===")
             for rank, (_, ranked_row) in enumerate(scored_df.head(top_n).iterrows(), start=1):
+                ranked_side = (
+                    ranked_row.get("side")
+                    if pd.notna(ranked_row.get("side"))
+                    else ranked_row.get("outcome_side", ranked_row.get("side"))
+                )
                 summary_line = (
                     f"{rank}. {ranked_row.get('signal_label')} | "
-                    f"confidence={_safe_float(ranked_row.get('confidence', PredictionLayer.select_signal_score(ranked_row)), default=0.0):.2f} | "
+                    f"confidence={_safe_float(ranked_row.get('decision_score', ranked_row.get('confidence', PredictionLayer.select_signal_score(ranked_row))), default=0.0):.2f} | "
                     f"market={ranked_row.get('market_title')} | "
-                    f"side={ranked_row.get('side')}"
+                    f"side={ranked_side}"
                 )
                 logging.info(" - %s", summary_line)
                 print(summary_line)

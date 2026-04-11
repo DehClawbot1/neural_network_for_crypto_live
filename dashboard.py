@@ -1631,7 +1631,9 @@ def render_models(msd, sup, tsd, s2d, wfd, rpd, bsd, rgd, feedback_reports_df=No
     last_train_src = "model_status.csv" if retrain_status.get("last_retrained_at") else ("model_registry.csv" if registry_row.get("promoted_at") else "weights")
 
     missing = []
-    if not (LOGS / "contract_targets.csv").exists():
+    btc_contract_targets = LOGS / "btc" / "contract_targets.csv"
+    weather_contract_targets = LOGS / "weather_temperature" / "contract_targets.csv"
+    if not btc_contract_targets.exists() and not weather_contract_targets.exists():
         missing.append("contract targets")
     if not (LOGS / "clob_price_history.csv").exists():
         missing.append("CLOB history")
@@ -1910,7 +1912,10 @@ def render_quality(sdf, tdf, mdf, wdf, adf, msd, pdf, cdf, rpd, hdf):
     c1, c2, c3 = st.columns(3)
     c1.metric("Training Ready", "Yes" if not cdf.empty and not msd.empty else "No")
     c2.metric("Replay Ready", "Yes" if not rpd.empty else "No")
-    c3.metric("Targets", "Yes" if (LOGS / "contract_targets.csv").exists() else "No")
+    c3.metric(
+        "Targets",
+        "Yes" if btc_contract_targets.exists() or weather_contract_targets.exists() else "No",
+    )
 
 
 def render_raw(sdf, tdf, edf, mdf, wdf, adf, msd, pdf, cdf):

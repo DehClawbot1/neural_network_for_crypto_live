@@ -115,6 +115,55 @@ def test_score_candidates_generates_weather_specific_scored_frame(tmp_path):
     assert row["confidence"] > 0.0
 
 
+def test_score_candidates_uses_profitability_first_score_for_weather_ranking(tmp_path):
+    strategy = WeatherTemperatureStrategy(logs_dir=str(tmp_path))
+    signals_df = pd.DataFrame(
+        [
+            {
+                "timestamp": "2026-03-09T12:00:00+00:00",
+                "market_title": "Will the highest temperature in Chongqing be 20°C on April 12?",
+                "market_slug": "cq-20c",
+                "condition_id": "cond-cq",
+                "token_id": "tok-cq",
+                "entry_intent": "OPEN_LONG",
+                "outcome_side": "YES",
+                "market_family": "weather_temperature_threshold",
+                "weather_question_type": "threshold",
+                "weather_parseable": True,
+                "forecast_ready": True,
+                "forecast_stale": False,
+                "forecast_p_hit_interval": 1.0,
+                "forecast_margin_to_lower_c": 3.0,
+                "forecast_margin_to_upper_c": None,
+                "forecast_uncertainty_c": 1.0,
+                "forecast_drift_c": 0.0,
+                "weather_market_probability": 0.01,
+                "wallet_quality_score": 0.60,
+                "source_wallet_direction_confidence": 0.59,
+                "wallet_agreement_score": 0.60,
+                "source_wallet_size_delta_ratio": 0.05,
+                "wallet_state_gate_pass": True,
+                "liquidity": 0.0,
+                "volume": 0.0,
+                "liquidity_score": 0.0,
+                "best_bid": 0.01,
+                "best_ask": 0.01,
+                "current_price": 0.01,
+                "end_date": "2026-04-12T23:59:00+00:00",
+            }
+        ]
+    )
+
+    scored = strategy.score_candidates(signals_df)
+
+    assert len(scored) == 1
+    row = scored.iloc[0]
+    assert row["side"] == "YES"
+    assert row["decision_score"] > 0.35
+    assert row["confidence"] >= row["decision_score"]
+    assert row["signal_label"] != "IGNORE"
+
+
 def test_apply_active_exit_rules_closes_weather_trade_when_forecast_turns_stale(tmp_path):
     strategy = WeatherTemperatureStrategy(logs_dir=str(tmp_path))
     strategy.forecast_service.fetch_market_forecast = lambda row: {
