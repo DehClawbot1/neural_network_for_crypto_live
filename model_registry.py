@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from brain_paths import resolve_brain_context
 
 
 logger = logging.getLogger(__name__)
@@ -72,8 +73,15 @@ def _safe_float(value, default=None):
 class ModelRegistry:
     """Append-only model registry backed by a CSV file."""
 
-    def __init__(self, logs_dir: str = "logs"):
-        self.logs_dir = Path(logs_dir)
+    def __init__(self, logs_dir: str = "logs", *, brain_context=None, brain_id=None, market_family=None, shared_logs_dir="logs", shared_weights_dir="weights"):
+        if brain_context is None and (brain_id or market_family):
+            brain_context = resolve_brain_context(
+                market_family,
+                brain_id=brain_id,
+                shared_logs_dir=shared_logs_dir,
+                shared_weights_dir=shared_weights_dir,
+            )
+        self.logs_dir = Path(brain_context.logs_dir if brain_context is not None else logs_dir)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.registry_file = self.logs_dir / "model_registry_comparison.csv"
         self.regime_file = self.logs_dir / "regime_model_comparison.csv"

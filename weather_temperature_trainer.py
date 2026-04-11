@@ -5,6 +5,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+from brain_paths import filter_frame_for_brain, resolve_brain_context
 
 from model_feature_catalog import (
     WEATHER_FORECAST_EDGE_FEATURES,
@@ -79,9 +80,17 @@ class WeatherTemperatureTrainer:
         + WEATHER_FORECAST_EDGE_FEATURES
     )
 
-    def __init__(self, logs_dir="logs", weights_dir="weights"):
-        self.logs_dir = Path(logs_dir)
-        self.weights_dir = Path(weights_dir)
+    def __init__(self, logs_dir="logs", weights_dir="weights", *, brain_context=None, brain_id=None, market_family=None, shared_logs_dir="logs", shared_weights_dir="weights"):
+        if brain_context is None and (brain_id or market_family):
+            brain_context = resolve_brain_context(
+                market_family,
+                brain_id=brain_id,
+                shared_logs_dir=shared_logs_dir,
+                shared_weights_dir=shared_weights_dir,
+            )
+        self.brain_context = brain_context
+        self.logs_dir = Path(brain_context.logs_dir if brain_context is not None else logs_dir)
+        self.weights_dir = Path(brain_context.weights_dir if brain_context is not None else weights_dir)
         self.weights_dir.mkdir(parents=True, exist_ok=True)
         self.dataset_file = self.logs_dir / "contract_targets.csv"
         self.model_file = self.weights_dir / "weather_temperature_model.joblib"
@@ -98,6 +107,10 @@ class WeatherTemperatureTrainer:
         df = self._safe_read()
         if df.empty or "target_up" not in df.columns:
             return None, None
+        if self.brain_context is not None:
+            df = filter_frame_for_brain(df, self.brain_context)
+            if df.empty or "target_up" not in df.columns:
+                return None, None
 
         family_series = df.get("market_family", pd.Series("", index=df.index)).astype(str).str.lower()
         df = df[family_series.str.startswith("weather_temperature")].copy()
@@ -147,6 +160,7 @@ class WeatherTemperatureTrainer:
                 "feature_set": "weather_temperature_hybrid",
                 "scaling": "median_fill_only",
                 "regularization": "centroid_distance",
+                "market_family": "weather_temperature",
             },
             self.model_file,
         )

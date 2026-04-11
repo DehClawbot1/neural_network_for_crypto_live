@@ -2,6 +2,7 @@ from pathlib import Path
 import warnings
 
 import pandas as pd
+from brain_paths import filter_frame_for_brain, normalize_market_family, resolve_brain_context
 from model_feature_catalog import DEFAULT_TABULAR_FEATURE_COLUMNS
 from model_feature_safety import drop_all_nan_features
 from feature_treatment_policy import features_for_scope, log_audit
@@ -73,9 +74,22 @@ class Stage1Models:
 
     FEATURE_COLUMNS = DEFAULT_TABULAR_FEATURE_COLUMNS
 
-    def __init__(self, logs_dir="logs", weights_dir="weights"):
-        self.logs_dir = Path(logs_dir)
-        self.weights_dir = Path(weights_dir)
+    def __init__(self, logs_dir="logs", weights_dir="weights", *, brain_context=None, brain_id=None, market_family=None, shared_logs_dir="logs", shared_weights_dir="weights"):
+        if brain_context is None and (brain_id or market_family):
+            brain_context = resolve_brain_context(
+                market_family,
+                brain_id=brain_id,
+                shared_logs_dir=shared_logs_dir,
+                shared_weights_dir=shared_weights_dir,
+            )
+        self.brain_context = brain_context
+        self.market_family = (
+            brain_context.market_family
+            if brain_context is not None
+            else (normalize_market_family(market_family) or "btc")
+        )
+        self.logs_dir = Path(brain_context.logs_dir if brain_context is not None else logs_dir)
+        self.weights_dir = Path(brain_context.weights_dir if brain_context is not None else weights_dir)
         self.weights_dir.mkdir(parents=True, exist_ok=True)
         self.dataset_file = self.logs_dir / "contract_targets.csv"
         self.classifier_file = self.weights_dir / "stage1_tp_classifier.joblib"
@@ -167,6 +181,10 @@ class Stage1Models:
         df = self._safe_read()
         if df.empty:
             return None
+        if self.brain_context is not None:
+            df = filter_frame_for_brain(df, self.brain_context)
+            if df.empty:
+                return None
 
         usable = self._usable_features(df)
         if not usable:
@@ -195,6 +213,7 @@ class Stage1Models:
                     "feature_set": "tree_tabular",
                     "scaling": "none",
                     "regularization": "tree_ensemble",
+                    "market_family": self.market_family,
                 },
                 self.classifier_file,
             )
@@ -214,6 +233,7 @@ class Stage1Models:
                     "feature_set": "tree_tabular",
                     "scaling": "none",
                     "regularization": "tree_ensemble",
+                    "market_family": self.market_family,
                 },
                 self.regressor_file,
             )

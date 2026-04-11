@@ -23,10 +23,11 @@ class DatasetAligner:
     Align historical project snapshots with BTC future-return targets.
     """
 
-    def __init__(self, logs_dir="logs"):
+    def __init__(self, logs_dir="logs", *, shared_logs_dir=None):
         self.logs_dir = Path(logs_dir)
+        self.shared_logs_dir = Path(shared_logs_dir or logs_dir)
         self.dataset_file = self.logs_dir / "historical_dataset.csv"
-        self.targets_file = self.logs_dir / "btc_targets.csv"
+        self.targets_file = self.shared_logs_dir / "btc_targets.csv"
         self.output_file = self.logs_dir / "aligned_dataset.csv"
 
     def _safe_read(self, path):

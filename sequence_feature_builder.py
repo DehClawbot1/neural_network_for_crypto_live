@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 
 import pandas as pd
+from brain_paths import filter_frame_for_brain, resolve_brain_context
 from model_feature_catalog import SEQUENCE_BASE_COLUMNS
 
 
@@ -11,8 +12,16 @@ class SequenceFeatureBuilder:
     Stage 2 starts with explicit lag features before deeper sequence models.
     """
 
-    def __init__(self, logs_dir="logs"):
-        self.logs_dir = Path(logs_dir)
+    def __init__(self, logs_dir="logs", *, brain_context=None, brain_id=None, market_family=None, shared_logs_dir="logs", shared_weights_dir="weights"):
+        if brain_context is None and (brain_id or market_family):
+            brain_context = resolve_brain_context(
+                market_family,
+                brain_id=brain_id,
+                shared_logs_dir=shared_logs_dir,
+                shared_weights_dir=shared_weights_dir,
+            )
+        self.brain_context = brain_context
+        self.logs_dir = Path(brain_context.logs_dir if brain_context is not None else logs_dir)
         self.contract_targets_file = self.logs_dir / "contract_targets.csv"
         self.output_file = self.logs_dir / "sequence_dataset.csv"
 
@@ -28,6 +37,10 @@ class SequenceFeatureBuilder:
         df = self._safe_read(self.contract_targets_file)
         if df.empty or "token_id" not in df.columns:
             return pd.DataFrame()
+        if self.brain_context is not None:
+            df = filter_frame_for_brain(df, self.brain_context)
+            if df.empty:
+                return pd.DataFrame()
 
         if "timestamp" in df.columns:
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
@@ -67,6 +80,8 @@ class SequenceFeatureBuilder:
 
         combined = pd.concat(parts, ignore_index=True)
         result = combined.dropna(subset=lag_cols).reset_index(drop=True)
+        if self.brain_context is not None and not result.empty:
+            result = filter_frame_for_brain(result, self.brain_context)
         logging.info("SequenceFeatureBuilder: Generated %s sequence rows using %s base features.", len(result), len(base_cols))
         return result
 

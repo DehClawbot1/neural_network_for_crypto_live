@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 import pandas as pd
+from brain_paths import filter_frame_for_brain, resolve_brain_context
 from entry_snapshot_enrichment import enrich_frame_with_entry_snapshots
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -18,13 +19,23 @@ class HistoricalDatasetBuilder:
     - normalize timestamps before merge_asof
     """
 
-    def __init__(self, logs_dir="logs"):
-        self.logs_dir = Path(logs_dir)
+    def __init__(self, logs_dir="logs", *, shared_logs_dir=None, brain_context=None, brain_id=None, market_family=None):
+        if brain_context is None and (brain_id or market_family):
+            brain_context = resolve_brain_context(
+                market_family,
+                brain_id=brain_id,
+                shared_logs_dir=shared_logs_dir or logs_dir,
+            )
+        self.brain_context = brain_context
+        self.logs_dir = Path(brain_context.logs_dir if brain_context is not None else logs_dir)
+        self.shared_logs_dir = Path(
+            brain_context.shared_logs_dir if brain_context is not None else (shared_logs_dir or logs_dir)
+        )
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.output_file = self.logs_dir / "historical_dataset.csv"
 
     def _safe_read(self, filename):
-        path = self.logs_dir / filename
+        path = self.shared_logs_dir / filename
         if not path.exists():
             return pd.DataFrame()
         try:
@@ -90,6 +101,10 @@ class HistoricalDatasetBuilder:
         dataset = enrich_frame_with_entry_snapshots(signals_df, logs_dir=self.logs_dir)
         if dataset.empty:
             return pd.DataFrame()
+        if self.brain_context is not None:
+            dataset = filter_frame_for_brain(dataset, self.brain_context)
+            if dataset.empty:
+                return pd.DataFrame()
         rename_map = {
             "market": "market_title",
             "wallet_copied": "trader_wallet",
@@ -325,6 +340,8 @@ class HistoricalDatasetBuilder:
             dataset["end_date"] = pd.to_datetime(dataset["end_date"], utc=True, errors="coerce")
             dataset["time_to_close_minutes"] = (dataset["end_date"] - dataset["timestamp"]).dt.total_seconds().div(60)
 
+        if self.brain_context is not None and not dataset.empty:
+            dataset = filter_frame_for_brain(dataset, self.brain_context)
         return dataset
 
     def write(self):

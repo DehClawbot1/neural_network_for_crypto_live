@@ -4,6 +4,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import warnings
+from brain_paths import filter_frame_for_brain, normalize_market_family, resolve_brain_context
 from model_feature_safety import drop_all_nan_features
 from feature_treatment_policy import features_by_kind, features_for_scope, log_audit
 from return_calibration import fit_return_calibration, transform_return_targets
@@ -39,9 +40,22 @@ class Stage2TemporalModels:
     This is a practical intermediate step before heavier deep sequence models.
     """
 
-    def __init__(self, logs_dir="logs", weights_dir="weights"):
-        self.logs_dir = Path(logs_dir)
-        self.weights_dir = Path(weights_dir)
+    def __init__(self, logs_dir="logs", weights_dir="weights", *, brain_context=None, brain_id=None, market_family=None, shared_logs_dir="logs", shared_weights_dir="weights"):
+        if brain_context is None and (brain_id or market_family):
+            brain_context = resolve_brain_context(
+                market_family,
+                brain_id=brain_id,
+                shared_logs_dir=shared_logs_dir,
+                shared_weights_dir=shared_weights_dir,
+            )
+        self.brain_context = brain_context
+        self.market_family = (
+            brain_context.market_family
+            if brain_context is not None
+            else (normalize_market_family(market_family) or "btc")
+        )
+        self.logs_dir = Path(brain_context.logs_dir if brain_context is not None else logs_dir)
+        self.weights_dir = Path(brain_context.weights_dir if brain_context is not None else weights_dir)
         self.weights_dir.mkdir(parents=True, exist_ok=True)
         self.dataset_file = self.logs_dir / "sequence_dataset.csv"
         self.classifier_file = self.weights_dir / "stage2_temporal_classifier.joblib"
@@ -131,6 +145,10 @@ class Stage2TemporalModels:
         df = self._safe_read()
         if df.empty:
             return pd.DataFrame()
+        if self.brain_context is not None:
+            df = filter_frame_for_brain(df, self.brain_context)
+            if df.empty:
+                return pd.DataFrame()
 
         if "timestamp" in df.columns:
             df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
@@ -241,6 +259,7 @@ class Stage2TemporalModels:
                         "feature_set": "temporal_sequence",
                         "scaling": "standard",
                         "regularization": "mlp_alpha",
+                        "market_family": self.market_family,
                     },
                     self.classifier_file,
                 )
@@ -292,6 +311,7 @@ class Stage2TemporalModels:
                         "feature_set": "temporal_sequence",
                         "scaling": "standard",
                         "regularization": "mlp_alpha",
+                        "market_family": self.market_family,
                     },
                     self.regressor_file,
                 )

@@ -11,10 +11,11 @@ class PathReplaySimulator:
     Research/paper-trading only.
     """
 
-    def __init__(self, logs_dir="logs"):
+    def __init__(self, logs_dir="logs", *, shared_logs_dir=None):
         self.logs_dir = Path(logs_dir)
+        self.shared_logs_dir = Path(shared_logs_dir or logs_dir)
         self.targets_file = self.logs_dir / "contract_targets.csv"
-        self.history_file = self.logs_dir / "clob_price_history.csv"
+        self.history_file = self.shared_logs_dir / "clob_price_history.csv"
         self.output_file = self.logs_dir / "path_replay_backtest.csv"
 
     def _safe_read(self, path):

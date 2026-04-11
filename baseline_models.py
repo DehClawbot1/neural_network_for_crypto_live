@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from brain_paths import filter_frame_for_brain, normalize_market_family, resolve_brain_context
 
 from feature_treatment_policy import features_for_scope, get_treatment
 from model_feature_catalog import DEFAULT_TABULAR_FEATURE_COLUMNS
@@ -107,9 +108,22 @@ def _replay_metrics(df: pd.DataFrame, preds: pd.Series) -> tuple[float | None, f
 class BaselineModels:
     """Train audited tabular baselines with walk-forward CV and regime slices."""
 
-    def __init__(self, logs_dir: str = "logs", weights_dir: str = "weights"):
-        self.logs_dir = Path(logs_dir)
-        self.weights_dir = Path(weights_dir)
+    def __init__(self, logs_dir: str = "logs", weights_dir: str = "weights", *, brain_context=None, brain_id=None, market_family=None, shared_logs_dir="logs", shared_weights_dir="weights"):
+        if brain_context is None and (brain_id or market_family):
+            brain_context = resolve_brain_context(
+                market_family,
+                brain_id=brain_id,
+                shared_logs_dir=shared_logs_dir,
+                shared_weights_dir=shared_weights_dir,
+            )
+        self.brain_context = brain_context
+        self.market_family = (
+            brain_context.market_family
+            if brain_context is not None
+            else (normalize_market_family(market_family) or "btc")
+        )
+        self.logs_dir = Path(brain_context.logs_dir if brain_context is not None else logs_dir)
+        self.weights_dir = Path(brain_context.weights_dir if brain_context is not None else weights_dir)
         self.weights_dir.mkdir(parents=True, exist_ok=True)
         self.dataset_file = self.logs_dir / "contract_targets.csv"
         self.metrics_file = self.logs_dir / "baseline_eval.csv"
@@ -156,7 +170,7 @@ class BaselineModels:
                     "feature_set": feature_set,
                     "scaling": scaling,
                     "regularization": "none",
-                    "market_family": "all",
+                    "market_family": self.market_family,
                     "regime_slice": regime_name,
                     "nonzero_feature_count": feature_count,
                     "n_train_rows": int(n_train_rows),
@@ -186,6 +200,10 @@ class BaselineModels:
         df = self._safe_read()
         if df.empty or "tp_before_sl_60m" not in df.columns:
             return pd.DataFrame()
+        if self.brain_context is not None:
+            df = filter_frame_for_brain(df, self.brain_context)
+            if df.empty or "tp_before_sl_60m" not in df.columns:
+                return pd.DataFrame()
 
         if "timestamp" in df.columns:
             df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
@@ -308,8 +326,23 @@ class BaselineModels:
                 n_train_rows=last_train_rows,
             )
 
-        result = pd.DataFrame(metrics_rows) if metrics_rows else pd.DataFrame()
-        if not result.empty:
-            result.to_csv(self.metrics_file, index=False)
-            logger.info("Baseline eval written to %s", self.metrics_file)
+        result_columns = [
+            "model_kind",
+            "artifact_group",
+            "feature_set",
+            "scaling",
+            "regularization",
+            "market_family",
+            "regime_slice",
+            "nonzero_feature_count",
+            "n_train_rows",
+            "n_test_rows",
+            "accuracy",
+            "precision",
+            "profit_factor",
+            "replay_ev",
+        ]
+        result = pd.DataFrame(metrics_rows, columns=result_columns)
+        result.to_csv(self.metrics_file, index=False)
+        logger.info("Baseline eval written to %s", self.metrics_file)
         return result

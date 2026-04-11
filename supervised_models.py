@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 import pandas as pd
+from brain_paths import filter_frame_for_brain, normalize_market_family, resolve_brain_context
 from model_feature_catalog import DEFAULT_TABULAR_FEATURE_COLUMNS
 from model_feature_safety import drop_all_nan_features
 from return_calibration import fit_return_calibration, transform_return_targets
@@ -63,9 +64,22 @@ class SupervisedModels:
 
     FEATURE_COLUMNS = DEFAULT_TABULAR_FEATURE_COLUMNS
 
-    def __init__(self, logs_dir="logs", weights_dir="weights"):
-        self.logs_dir = Path(logs_dir)
-        self.weights_dir = Path(weights_dir)
+    def __init__(self, logs_dir="logs", weights_dir="weights", *, brain_context=None, brain_id=None, market_family=None, shared_logs_dir="logs", shared_weights_dir="weights"):
+        if brain_context is None and (brain_id or market_family):
+            brain_context = resolve_brain_context(
+                market_family,
+                brain_id=brain_id,
+                shared_logs_dir=shared_logs_dir,
+                shared_weights_dir=shared_weights_dir,
+            )
+        self.brain_context = brain_context
+        self.market_family = (
+            brain_context.market_family
+            if brain_context is not None
+            else (normalize_market_family(market_family) or "btc")
+        )
+        self.logs_dir = Path(brain_context.logs_dir if brain_context is not None else logs_dir)
+        self.weights_dir = Path(brain_context.weights_dir if brain_context is not None else weights_dir)
         self.weights_dir.mkdir(parents=True, exist_ok=True)
         self.dataset_file = self.logs_dir / "contract_targets.csv"
         self.classifier_file = self.weights_dir / "tp_classifier.joblib"
@@ -225,6 +239,10 @@ class SupervisedModels:
         df = self._safe_read()
         if df.empty:
             return None
+        if self.brain_context is not None:
+            df = filter_frame_for_brain(df, self.brain_context)
+            if df.empty:
+                return None
 
         if "timestamp" in df.columns:
             df = df.copy()
@@ -264,7 +282,7 @@ class SupervisedModels:
                         "features": usable,
                         "feature_set": "default_tabular",
                         "scaling": "standard" if not bool(clf_meta.get("fallback_used")) else "none",
-                        "market_family": "btc",
+                        "market_family": self.market_family,
                         **clf_meta,
                     },
                     self.classifier_file,
@@ -281,13 +299,13 @@ class SupervisedModels:
             joblib.dump(
                 {
                     "model": reg,
-                    "features": usable,
-                    "return_calibration": return_calibration,
-                    "feature_set": "default_tabular",
-                    "scaling": "standard" if not bool(reg_meta.get("fallback_used")) else "none",
-                    "market_family": "btc",
-                    **reg_meta,
-                },
+                        "features": usable,
+                        "return_calibration": return_calibration,
+                        "feature_set": "default_tabular",
+                        "scaling": "standard" if not bool(reg_meta.get("fallback_used")) else "none",
+                        "market_family": self.market_family,
+                        **reg_meta,
+                    },
                 self.regressor_file,
             )
 

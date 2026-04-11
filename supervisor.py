@@ -94,6 +94,8 @@ from trading_mode_preset import select_trading_mode, apply_preset, PRESETS
 from btc_trade_feedback import BTCTradeFeedback
 from weather_temperature_strategy import WeatherTemperatureStrategy
 from weather_temperature_markets import fetch_weather_temperature_markets
+from brain_paths import active_runtime_identity, resolve_brain_context
+from model_registry import ModelRegistry
 try:
     from inference_runtime_guard import (
         reset_cycle as _reset_inference_runtime_guard,
@@ -261,6 +263,12 @@ BTC_CONTEXT_LOG_COLUMNS = [
     "regime_blended_conservative_expected_return",
     "regime_blended_edge_score",
 ]
+BRAIN_RUNTIME_LOG_COLUMNS = [
+    "brain_id",
+    "active_model_group",
+    "active_model_kind",
+    "active_regime",
+]
 RAW_CANDIDATE_LOG_COLUMNS = [
     "timestamp",
     "trader_wallet",
@@ -314,7 +322,7 @@ RAW_CANDIDATE_LOG_COLUMNS = [
     "open_positions_loser_count",
     "raw_size",
     "market_url",
-] + SOURCE_WALLET_LOG_COLUMNS + WEATHER_LOG_COLUMNS + BTC_CONTEXT_LOG_COLUMNS
+] + BRAIN_RUNTIME_LOG_COLUMNS + SOURCE_WALLET_LOG_COLUMNS + WEATHER_LOG_COLUMNS + BTC_CONTEXT_LOG_COLUMNS
 RANKED_SIGNAL_LOG_COLUMNS = [
     "timestamp",
     "market",
@@ -364,6 +372,10 @@ RANKED_SIGNAL_LOG_COLUMNS = [
     "open_positions_avg_to_now_price_change_pct_max",
     "open_positions_winner_count",
     "open_positions_loser_count",
+    "brain_id",
+    "active_model_group",
+    "active_model_kind",
+    "active_regime",
     "edge_score",
     "expected_return",
     "p_tp_before_sl",
@@ -690,6 +702,10 @@ def log_ranked_signal(signal_row):
         "open_positions_avg_to_now_price_change_pct_max": signal_row.get("open_positions_avg_to_now_price_change_pct_max"),
         "open_positions_winner_count": signal_row.get("open_positions_winner_count"),
         "open_positions_loser_count": signal_row.get("open_positions_loser_count"),
+        "brain_id": signal_row.get("brain_id"),
+        "active_model_group": signal_row.get("active_model_group"),
+        "active_model_kind": signal_row.get("active_model_kind"),
+        "active_regime": signal_row.get("active_regime"),
         "edge_score": signal_row.get("edge_score"),
         "expected_return": signal_row.get("expected_return"),
         "p_tp_before_sl": signal_row.get("p_tp_before_sl"),
@@ -1018,6 +1034,11 @@ def execute_paper_trade(action, signal_row, fill_price=None, size_usdc=None):
         "wallet_copied": str(signal_row.get("trader_wallet", signal_row.get("wallet_copied", "Unknown"))),
         "token_id": signal_row.get("token_id"),
         "condition_id": signal_row.get("condition_id"),
+        "market_family": signal_row.get("market_family", "other"),
+        "brain_id": signal_row.get("brain_id", ""),
+        "active_model_group": signal_row.get("active_model_group", ""),
+        "active_model_kind": signal_row.get("active_model_kind", ""),
+        "active_regime": signal_row.get("active_regime", ""),
         "outcome_side": outcome_side,
         "order_side": signal_row.get("order_side", "BUY"),
         "signal_price": round(signal_price, 3),
@@ -1072,6 +1093,11 @@ def log_live_fill_event(signal_row, fill_price, size_usdc, action_type="LIVE_TRA
         "wallet_copied": str(signal_row.get("trader_wallet", signal_row.get("wallet_copied", "Unknown"))),
         "token_id": signal_row.get("token_id"),
         "condition_id": signal_row.get("condition_id"),
+        "market_family": signal_row.get("market_family", "other"),
+        "brain_id": signal_row.get("brain_id", ""),
+        "active_model_group": signal_row.get("active_model_group", ""),
+        "active_model_kind": signal_row.get("active_model_kind", ""),
+        "active_regime": signal_row.get("active_regime", ""),
         "outcome_side": str(signal_row.get("outcome_side", signal_row.get("side", "UNKNOWN"))).upper(),
         "order_side": signal_row.get("order_side", signal_row.get("trade_side", "BUY")),
         "signal_price": round(float(signal_row.get("current_price", signal_row.get("price", fill_price)) or fill_price), 3),
@@ -1486,11 +1512,14 @@ def main_loop():
     position_model_artifact = "weights/ppo_position_policy.zip" if position_brain is not None else "weights/ppo_polytrader.zip" if legacy_brain is not None else None
     position_norm_artifact = "weights/ppo_position_vecnormalize.pkl" if position_brain is not None else "weights/ppo_polytrader_vecnormalize.pkl" if legacy_brain is not None else None
 
+    btc_brain_context = resolve_brain_context("btc", shared_logs_dir="logs", shared_weights_dir="weights")
+    weather_brain_context = resolve_brain_context("weather_temperature", shared_logs_dir="logs", shared_weights_dir="weights")
+
     feature_builder = FeatureBuilder()
     signal_engine = SignalEngine()
-    model_inference = ModelInference()
-    stage1_inference = Stage1Inference()
-    stage2_inference = Stage2TemporalInference()
+    model_inference = ModelInference(brain_context=btc_brain_context)
+    stage1_inference = Stage1Inference(brain_context=btc_brain_context)
+    stage2_inference = Stage2TemporalInference(brain_context=btc_brain_context)
     hybrid_scorer = Stage3HybridScorer()
     order_flow_analyzer = OrderFlowAnalyzer(min_usd_volume=500.0, volume_imbalance_threshold=0.75, min_trades_count=3)
     technical_analyzer = TechnicalAnalyzer()
@@ -1620,26 +1649,59 @@ def main_loop():
             )
         except Exception as exc:
             logging.warning("Shutdown heartbeat write failed: %s", exc)
-    def _get_active_model_version():
-        registry_path = Path("weights/model_registry.csv")
-        if not registry_path.exists():
-            return ""
-        try:
-            registry_df = pd.read_csv(registry_path, engine="python", on_bad_lines="skip")
-        except Exception:
-            return ""
-        if registry_df.empty:
-            return ""
-        if "activation_status" in registry_df.columns:
-            promoted = registry_df[registry_df["activation_status"].astype(str).str.strip().str.lower() == "promoted"]
-            if not promoted.empty:
-                registry_df = promoted
-        sort_col = "promoted_at" if "promoted_at" in registry_df.columns else "attempted_at" if "attempted_at" in registry_df.columns else None
-        if sort_col is not None:
-            registry_df[sort_col] = pd.to_datetime(registry_df[sort_col], errors="coerce", utc=True)
-            registry_df = registry_df.sort_values(sort_col)
-        latest = registry_df.iloc[-1].to_dict()
-        return str(latest.get("model_version", "") or "")
+    def _resolve_brain_context_for_family(market_family: str | None):
+        family_text = str(market_family or "").strip().lower()
+        if family_text.startswith("weather_temperature"):
+            return weather_brain_context
+        return btc_brain_context
+
+    def _get_active_model_version(market_family: str = "btc"):
+        context = _resolve_brain_context_for_family(market_family)
+        table = ModelRegistry(brain_context=context).comparison_table()
+        if table.empty:
+            return "weather_v1" if context.market_family.startswith("weather_temperature") else ""
+        work = table.copy()
+        if "market_family" in work.columns:
+            work = work[work["market_family"].fillna("").astype(str).str.startswith(context.market_family)].copy()
+        if work.empty:
+            return "weather_v1" if context.market_family.startswith("weather_temperature") else ""
+        champions = work[work.get("is_champion", pd.Series(dtype=bool)) == True].copy()
+        if champions.empty:
+            champions = work[
+                work.get("promotion_status", pd.Series(dtype=str)).fillna("").astype(str).str.lower() == "promoted"
+            ].copy()
+        latest = champions.iloc[-1].to_dict() if not champions.empty else work.iloc[-1].to_dict()
+        version = str(latest.get("run_id") or latest.get("registered_at") or "").strip()
+        if version:
+            return version
+        return "weather_v1" if context.market_family.startswith("weather_temperature") else ""
+
+    def _runtime_identity_from_row(signal_row):
+        row_dict = signal_row.to_dict() if hasattr(signal_row, "to_dict") else dict(signal_row or {})
+        context = _resolve_brain_context_for_family(row_dict.get("market_family"))
+        if context.market_family.startswith("weather_temperature"):
+            active_model_group = str(row_dict.get("active_model_group", "") or "weather_temperature_brain_hybrid")
+            active_model_kind = str(row_dict.get("active_model_kind", "") or "weather_temperature_hybrid")
+            active_regime = str(row_dict.get("active_regime", "") or "forecast_driven")
+        else:
+            active_model_group = str(row_dict.get("active_model_group", "") or "btc_brain_runtime_stack")
+            active_model_kind = str(
+                row_dict.get("active_model_kind", "")
+                or row_dict.get("btc_market_regime_primary_model", "")
+                or "hybrid_stack"
+            )
+            active_regime = str(
+                row_dict.get("active_regime", "")
+                or row_dict.get("btc_market_regime_label", "")
+                or "calm"
+            )
+        return active_runtime_identity(
+            context,
+            active_model_group=active_model_group,
+            active_model_kind=active_model_kind,
+            active_regime=active_regime,
+        )
+
     def _refresh_runtime_model_handles(reason="runtime_artifacts_reloaded"):
         nonlocal entry_brain, position_brain, legacy_brain
         nonlocal entry_model_name, position_model_name
@@ -1663,9 +1725,9 @@ def main_loop():
         # The supervised inference classes already read fresh artifacts from disk
         # on every run, but rebuilding them here makes promoted model activation
         # explicit and keeps startup/reload paths symmetric.
-        model_inference = ModelInference()
-        stage1_inference = Stage1Inference()
-        stage2_inference = Stage2TemporalInference()
+        model_inference = ModelInference(brain_context=btc_brain_context)
+        stage1_inference = Stage1Inference(brain_context=btc_brain_context)
+        stage2_inference = Stage2TemporalInference(brain_context=btc_brain_context)
 
         active_artifacts = snapshot_artifact_state("weights")
         autonomous_monitor.write_heartbeat(
@@ -2625,7 +2687,7 @@ def main_loop():
                         axis=1,
                     )
 
-            def _annotate_scored_candidates(frame, *, default_model_family: str, default_model_version: str):
+            def _annotate_scored_candidates(frame, *, default_model_family: str, default_model_version: str, brain_context):
                 if frame is None or frame.empty:
                     return pd.DataFrame()
                 out = frame.loc[:, ~frame.columns.duplicated()].copy()
@@ -2646,6 +2708,17 @@ def main_loop():
                 out["liquidity_bucket"] = out.apply(lambda row: build_quality_context(row.to_dict()).get("liquidity_bucket", row.get("liquidity_bucket", "unknown")), axis=1)
                 out["volatility_bucket"] = out.apply(lambda row: build_quality_context(row.to_dict()).get("volatility_bucket", row.get("volatility_bucket", "unknown")), axis=1)
                 out["technical_regime_bucket"] = out.apply(lambda row: build_quality_context(row.to_dict()).get("technical_regime_bucket", row.get("technical_regime_bucket", "neutral")), axis=1)
+                out["brain_id"] = brain_context.brain_id
+                if brain_context.market_family.startswith("weather_temperature"):
+                    out["active_model_group"] = out.get("active_model_group", pd.Series(index=out.index, dtype=object)).replace("", pd.NA).fillna("weather_temperature_brain_hybrid")
+                    out["active_model_kind"] = out.get("active_model_kind", pd.Series(index=out.index, dtype=object)).replace("", pd.NA).fillna("weather_temperature_hybrid")
+                    out["active_regime"] = out.get("active_regime", pd.Series(index=out.index, dtype=object)).replace("", pd.NA).fillna("forecast_driven")
+                else:
+                    primary_model = out.get("btc_market_regime_primary_model", pd.Series(index=out.index, dtype=object)).replace("", pd.NA).fillna("hybrid_stack")
+                    regime_label = out.get("btc_market_regime_label", pd.Series(index=out.index, dtype=object)).replace("", pd.NA).fillna("calm")
+                    out["active_model_group"] = out.get("active_model_group", pd.Series(index=out.index, dtype=object)).replace("", pd.NA).fillna("btc_brain_runtime_stack")
+                    out["active_model_kind"] = out.get("active_model_kind", pd.Series(index=out.index, dtype=object)).replace("", pd.NA).fillna(primary_model)
+                    out["active_regime"] = out.get("active_regime", pd.Series(index=out.index, dtype=object)).replace("", pd.NA).fillna(regime_label)
                 return out.loc[:, ~out.columns.duplicated()].copy()
 
             features_df = pd.DataFrame()
@@ -2816,7 +2889,8 @@ def main_loop():
                 btc_scored_df = _annotate_scored_candidates(
                     btc_scored_df,
                     default_model_family="runtime_live_stack",
-                    default_model_version=_get_active_model_version(),
+                    default_model_version=_get_active_model_version("btc"),
+                    brain_context=btc_brain_context,
                 )
 
             if weather_entry_signals_df is not None and not weather_entry_signals_df.empty:
@@ -2825,7 +2899,8 @@ def main_loop():
                 weather_scored_df = _annotate_scored_candidates(
                     weather_scored_df,
                     default_model_family="weather_temperature_hybrid",
-                    default_model_version="weather_v1",
+                    default_model_version=_get_active_model_version("weather_temperature"),
+                    brain_context=weather_brain_context,
                 )
                 log_raw_candidates(weather_scored_df)
 
@@ -2940,7 +3015,8 @@ def main_loop():
 
             _refresh_local_active_trade_state()
             governor_state = performance_governor.evaluate()
-            active_model_version = _get_active_model_version()
+            btc_active_model_version = _get_active_model_version("btc")
+            weather_active_model_version = _get_active_model_version("weather_temperature")
             try:
                 benchmark_strategy.evaluate_cycle(ta_context, governor_state=governor_state)
             except Exception as exc:
@@ -3530,6 +3606,8 @@ def main_loop():
                     if precomputed_calibrated_edge is not None
                     else _compute_calibrated_edge(signal_row)
                 )
+                runtime_identity = _runtime_identity_from_row(signal_row)
+                signal_market_family = str(signal_row.get("market_family", "") or runtime_identity.get("market_family") or "btc")
                 payload = {
                     "cycle_id": cycle_id,
                     "candidate_id": f"{cycle_id}:{len(_candidate_decision_rows) + 1}",
@@ -3555,20 +3633,35 @@ def main_loop():
                     "final_size_usdc": _safe_float(final_size_usdc, default=0.0) if final_size_usdc is not None else None,
                     "available_balance": _safe_float(available_balance, default=0.0) if available_balance is not None else None,
                     "order_id": str(order_id) if order_id is not None else None,
+                    "market_family": runtime_identity["market_family"],
+                    "brain_id": runtime_identity["brain_id"],
+                    "active_model_group": runtime_identity["active_model_group"],
+                    "active_model_kind": runtime_identity["active_model_kind"],
+                    "active_regime": runtime_identity["active_regime"],
                     "created_at": datetime.now(timezone.utc).isoformat(),
                 }
                 detail_payload = dict(extra or {})
                 detail_payload.setdefault("performance_governor_level", int(governor_state.get("governor_level", 0) or 0))
                 detail_payload.setdefault("performance_governor_reason", governor_state.get("reason", ""))
-                detail_payload.setdefault("entry_model_version", active_model_version)
-                detail_payload.setdefault("entry_model_family", "runtime_live_stack")
+                detail_payload.setdefault(
+                    "entry_model_version",
+                    signal_row.get("entry_model_version")
+                    or (weather_active_model_version if signal_market_family.startswith("weather_temperature") else btc_active_model_version),
+                )
+                detail_payload.setdefault(
+                    "entry_model_family",
+                    signal_row.get("entry_model_family")
+                    or ("weather_temperature_hybrid" if signal_market_family.startswith("weather_temperature") else "runtime_live_stack"),
+                )
                 # blocker / gate lineage
                 detail_payload.setdefault("first_blocker", gate if reject_reason_norm else None)
                 detail_payload.setdefault("all_blockers", gate if reject_reason_norm else None)
                 detail_payload.setdefault("passed_gates", ",".join(extra.get("_passed_gates", [])) if extra.get("_passed_gates") else None)
-                detail_payload.setdefault("active_model_family", "runtime_live_stack")
-                active_regime_label = str(signal_row.get("btc_market_regime_label", "calm") or "calm")
-                detail_payload.setdefault("active_regime", active_regime_label)
+                detail_payload.setdefault("active_model_family", detail_payload.get("entry_model_family"))
+                detail_payload.setdefault("brain_id", runtime_identity["brain_id"])
+                detail_payload.setdefault("active_model_group", runtime_identity["active_model_group"])
+                detail_payload.setdefault("active_model_kind", runtime_identity["active_model_kind"])
+                detail_payload.setdefault("active_regime", runtime_identity["active_regime"])
                 for live_field in (
                     "btc_live_price",
                     "btc_live_index_price",
@@ -3610,8 +3703,9 @@ def main_loop():
                             market_slug, trader_wallet, entry_intent, model_action, final_decision,
                             reject_reason, reject_category, gate, confidence, p_tp_before_sl,
                             expected_return, edge_score, calibrated_edge, calibrated_baseline,
-                            proposed_size_usdc, final_size_usdc, available_balance, order_id, details_json, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            proposed_size_usdc, final_size_usdc, available_balance, order_id, details_json,
+                            market_family, brain_id, active_model_group, active_model_kind, active_regime, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             payload["cycle_id"],
@@ -3639,6 +3733,11 @@ def main_loop():
                             payload["available_balance"],
                             payload["order_id"],
                             details_json,
+                            payload["market_family"],
+                            payload["brain_id"],
+                            payload["active_model_group"],
+                            payload["active_model_kind"],
+                            payload["active_regime"],
                             payload["created_at"],
                         ),
                     )
@@ -4020,9 +4119,21 @@ def main_loop():
                         )
                         continue
                     confidence = _safe_float(signal_row.get("confidence", 0.0), default=0.0)
+                    signal_market_family = str(signal_row.get("market_family", "") or "btc")
+                    signal_runtime_identity = _runtime_identity_from_row(signal_row)
                     signal_row["performance_governor_level"] = int(governor_state.get("governor_level", 0) or 0)
-                    signal_row["entry_model_family"] = "runtime_live_stack"
-                    signal_row["entry_model_version"] = active_model_version
+                    signal_row["entry_model_family"] = str(
+                        signal_row.get("entry_model_family")
+                        or ("weather_temperature_hybrid" if signal_market_family.startswith("weather_temperature") else "runtime_live_stack")
+                    )
+                    signal_row["entry_model_version"] = str(
+                        signal_row.get("entry_model_version")
+                        or (weather_active_model_version if signal_market_family.startswith("weather_temperature") else btc_active_model_version)
+                    )
+                    signal_row["brain_id"] = signal_runtime_identity["brain_id"]
+                    signal_row["active_model_group"] = signal_runtime_identity["active_model_group"]
+                    signal_row["active_model_kind"] = signal_runtime_identity["active_model_kind"]
+                    signal_row["active_regime"] = signal_runtime_identity["active_regime"]
                     signal_quality_context = build_quality_context(
                         {
                             **(signal_row.to_dict() if hasattr(signal_row, "to_dict") else dict(signal_row)),

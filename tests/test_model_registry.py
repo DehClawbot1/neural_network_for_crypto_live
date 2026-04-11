@@ -1,6 +1,7 @@
 import tempfile
 from pathlib import Path
 
+from brain_paths import resolve_brain_context
 from model_registry import ModelRegistry
 
 
@@ -69,3 +70,29 @@ class TestModelRegistry:
 
         assert champion is not None
         assert champion["model_kind"] == "new_model"
+
+    def test_brain_local_registries_do_not_mix_rows(self):
+        btc_context = resolve_brain_context("btc", shared_logs_dir=self.logs_dir, shared_weights_dir=self.logs_dir / "weights")
+        weather_context = resolve_brain_context(
+            "weather_temperature",
+            shared_logs_dir=self.logs_dir,
+            shared_weights_dir=self.logs_dir / "weights",
+        )
+
+        btc_registry = ModelRegistry(brain_context=btc_context)
+        weather_registry = ModelRegistry(brain_context=weather_context)
+
+        btc_registry.register(model_kind="btc_model", market_family="btc", artifact_group="btc_tabular_classifier")
+        weather_registry.register(
+            model_kind="weather_model",
+            market_family="weather_temperature",
+            artifact_group="weather_temperature_classifier",
+        )
+
+        btc_table = btc_registry.comparison_table()
+        weather_table = weather_registry.comparison_table()
+
+        assert len(btc_table) == 1
+        assert btc_table.iloc[0]["market_family"] == "btc"
+        assert len(weather_table) == 1
+        assert weather_table.iloc[0]["market_family"] == "weather_temperature"

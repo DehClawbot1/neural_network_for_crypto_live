@@ -2,6 +2,7 @@ import os
 import sys
 import logging
 from pathlib import Path
+import pandas as pd
 
 # â"€â"€ Only load .env if NOT in interactive mode â"€â"€
 if not os.environ.get("_INTERACTIVE_MODE"):
@@ -29,6 +30,7 @@ from supervisor_ui_patch import apply_supervisor_ui_patch
 from retrainer import Retrainer
 from real_pipeline import run_research_pipeline
 from execution_client import ExecutionClient
+from brain_paths import list_brain_contexts
 from leaderboard_service import PolymarketLeaderboardService
 from model_registry import ModelRegistry
 
@@ -38,18 +40,35 @@ LEGACY_WEIGHTS_PATH = Path("weights/ppo_polytrader.zip")
 ENTRY_WEIGHTS_PATH = Path("weights/ppo_entry_policy.zip")
 POSITION_WEIGHTS_PATH = Path("weights/ppo_position_policy.zip")
 LOGS_DIR = Path("logs")
-RESEARCH_ARTIFACTS = [
-    LOGS_DIR / "historical_dataset.csv",
-    LOGS_DIR / "contract_targets.csv",
-    LOGS_DIR / "wallet_alpha_history.csv",
-    LOGS_DIR / "supervised_eval.csv",
-    LOGS_DIR / "time_split_eval.csv",
-    LOGS_DIR / "stage2_temporal_eval.csv",
-    LOGS_DIR / "walk_forward_eval.csv",
-    LOGS_DIR / "backtest_summary.csv",
-    LOGS_DIR / "path_replay_backtest.csv",
-]
 DEFAULT_RESEARCH_REFRESH_MAX_AGE_MINUTES = 30
+
+
+def _research_artifacts():
+    contexts = list_brain_contexts(shared_logs_dir=LOGS_DIR, shared_weights_dir=Path("weights"))
+    artifacts = [LOGS_DIR / "wallet_alpha_history.csv"]
+    for context in contexts:
+        artifacts.extend(
+            [
+                context.logs_dir / "historical_dataset.csv",
+                context.logs_dir / "contract_targets.csv",
+                context.logs_dir / "sequence_dataset.csv",
+                context.logs_dir / "baseline_eval.csv",
+                context.logs_dir / "model_registry_comparison.csv",
+                context.logs_dir / "regime_model_comparison.csv",
+                context.logs_dir / "decision_profit_audit.md",
+            ]
+        )
+    btc_logs_dir = contexts[0].logs_dir if contexts else LOGS_DIR / "btc"
+    artifacts.extend(
+        [
+            btc_logs_dir / "supervised_eval.csv",
+            btc_logs_dir / "time_split_eval.csv",
+            btc_logs_dir / "stage2_temporal_eval.csv",
+            btc_logs_dir / "walk_forward_eval.csv",
+            btc_logs_dir / "path_replay_backtest.csv",
+        ]
+    )
+    return artifacts
 
 
 def is_interactive():
@@ -286,10 +305,11 @@ def should_refresh_research_artifacts(max_age_minutes=None):
     force_refresh = os.getenv("FORCE_RESEARCH_REFRESH", "").strip().lower() in {"1", "true", "yes", "on"}
     if force_refresh:
         return True, "FORCE_RESEARCH_REFRESH enabled", max_age_minutes
-    missing = [str(path) for path in RESEARCH_ARTIFACTS if not path.exists()]
+    research_artifacts = _research_artifacts()
+    missing = [str(path) for path in research_artifacts if not path.exists()]
     if missing:
         return True, f"missing artifacts: {', '.join(missing[:3])}", max_age_minutes
-    latest_mtime = min(path.stat().st_mtime for path in RESEARCH_ARTIFACTS)
+    latest_mtime = min(path.stat().st_mtime for path in research_artifacts)
     age_seconds = max(0, int(__import__("time").time() - latest_mtime))
     if age_seconds > max_age_minutes * 60:
         return True, f"artifacts are stale ({age_seconds}s old; threshold={max_age_minutes}m)", max_age_minutes
@@ -333,36 +353,43 @@ def log_live_leaderboard_status():
 
 def log_active_model_champions():
     print("[4.6/5] Reading active model champions...")
-    registry = ModelRegistry(logs_dir="logs")
-    table = registry.comparison_table()
-    if table.empty:
-        print("[+] No registered model champions yet.\n")
-        return
-    champions = table[table.get("is_champion", pd.Series(dtype=bool)) == True].copy()
-    if champions.empty:
-        champions = table[table.get("promotion_status", pd.Series(dtype=str)).fillna("").astype(str).str.lower() == "promoted"].copy()
-    if champions.empty:
+    contexts = list_brain_contexts(shared_logs_dir=LOGS_DIR, shared_weights_dir=Path("weights"))
+    printed_any = False
+    for context in contexts:
+        registry = ModelRegistry(brain_context=context)
+        table = registry.comparison_table()
+        if table.empty:
+            continue
+        champions = table[table.get("is_champion", pd.Series(dtype=bool)) == True].copy()
+        if champions.empty:
+            champions = table[table.get("promotion_status", pd.Series(dtype=str)).fillna("").astype(str).str.lower() == "promoted"].copy()
+        if champions.empty:
+            continue
+        champions = champions.drop_duplicates(subset=["artifact_group", "market_family", "regime_slice"], keep="last")
+        if not printed_any:
+            print("[+] Active champions:")
+            printed_any = True
+        print(f"    [{context.brain_id}]")
+        for _, row in champions.iterrows():
+            accuracy = pd.to_numeric(pd.Series([row.get("accuracy")]), errors="coerce").iloc[0]
+            rmse = pd.to_numeric(pd.Series([row.get("rmse")]), errors="coerce").iloc[0]
+            metric_bits = []
+            if pd.notna(accuracy):
+                metric_bits.append(f"accuracy={float(accuracy):.4f}")
+            if pd.notna(rmse):
+                metric_bits.append(f"rmse={float(rmse):.4f}")
+            print(
+                "      - {group} | {kind} | family={family} | regime={regime}{metrics}".format(
+                    group=row.get("artifact_group", ""),
+                    kind=row.get("model_kind", ""),
+                    family=row.get("market_family", ""),
+                    regime=row.get("regime_slice", ""),
+                    metrics=(f" | {' '.join(metric_bits)}" if metric_bits else ""),
+                )
+            )
+    if not printed_any:
         print("[+] No promoted model champions recorded yet.\n")
         return
-    champions = champions.drop_duplicates(subset=["artifact_group", "market_family", "regime_slice"], keep="last")
-    print("[+] Active champions:")
-    for _, row in champions.iterrows():
-        accuracy = pd.to_numeric(pd.Series([row.get("accuracy")]), errors="coerce").iloc[0]
-        rmse = pd.to_numeric(pd.Series([row.get("rmse")]), errors="coerce").iloc[0]
-        metric_bits = []
-        if pd.notna(accuracy):
-            metric_bits.append(f"accuracy={float(accuracy):.4f}")
-        if pd.notna(rmse):
-            metric_bits.append(f"rmse={float(rmse):.4f}")
-        print(
-            "    - {group} | {kind} | family={family} | regime={regime}{metrics}".format(
-                group=row.get("artifact_group", ""),
-                kind=row.get("model_kind", ""),
-                family=row.get("market_family", ""),
-                regime=row.get("regime_slice", ""),
-                metrics=(f" | {' '.join(metric_bits)}" if metric_bits else ""),
-            )
-        )
     print("")
 
 

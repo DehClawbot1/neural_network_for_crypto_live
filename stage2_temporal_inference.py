@@ -3,6 +3,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+from brain_paths import resolve_brain_context
 from return_calibration import calibrate_return_predictions
 
 try:
@@ -13,8 +14,15 @@ except Exception:  # pragma: no cover
 
 
 class Stage2TemporalInference:
-    def __init__(self, weights_dir="weights"):
-        self.weights_dir = Path(weights_dir)
+    def __init__(self, weights_dir="weights", *, brain_context=None, brain_id=None, market_family=None, shared_logs_dir="logs", shared_weights_dir="weights"):
+        if brain_context is None and (brain_id or market_family):
+            brain_context = resolve_brain_context(
+                market_family,
+                brain_id=brain_id,
+                shared_logs_dir=shared_logs_dir,
+                shared_weights_dir=shared_weights_dir,
+            )
+        self.weights_dir = Path(brain_context.weights_dir if brain_context is not None else weights_dir)
         self.classifier_file = self.weights_dir / "stage2_temporal_classifier.joblib"
         self.regressor_file = self.weights_dir / "stage2_temporal_regressor.joblib"
 

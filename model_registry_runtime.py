@@ -16,10 +16,16 @@ logger = logging.getLogger(__name__)
 PROMOTABLE_GROUP_TO_FILENAME = {
     "btc_tabular_classifier": "tp_classifier.joblib",
     "btc_tabular_regressor": "return_regressor.joblib",
+    "weather_tabular_classifier": "tp_classifier.joblib",
+    "weather_tabular_regressor": "return_regressor.joblib",
     "stage1_classifier": "stage1_tp_classifier.joblib",
     "stage1_regressor": "stage1_return_regressor.joblib",
+    "weather_stage1_classifier": "stage1_tp_classifier.joblib",
+    "weather_stage1_regressor": "stage1_return_regressor.joblib",
     "stage2_temporal_classifier": "stage2_temporal_classifier.joblib",
     "stage2_temporal_regressor": "stage2_temporal_regressor.joblib",
+    "weather_stage2_temporal_classifier": "stage2_temporal_classifier.joblib",
+    "weather_stage2_temporal_regressor": "stage2_temporal_regressor.joblib",
     "weather_temperature_classifier": "weather_temperature_model.joblib",
 }
 

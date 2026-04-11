@@ -60,6 +60,11 @@ class Database:
         self._ensure_column("candidate_decisions", "available_balance", "REAL")
         self._ensure_column("candidate_decisions", "order_id", "TEXT")
         self._ensure_column("candidate_decisions", "details_json", "TEXT")
+        self._ensure_column("candidate_decisions", "market_family", "TEXT")
+        self._ensure_column("candidate_decisions", "brain_id", "TEXT")
+        self._ensure_column("candidate_decisions", "active_model_group", "TEXT")
+        self._ensure_column("candidate_decisions", "active_model_kind", "TEXT")
+        self._ensure_column("candidate_decisions", "active_regime", "TEXT")
         self._ensure_column("positions", "market", "TEXT")
         self._ensure_column("positions", "market_title", "TEXT")
         self._ensure_column("positions", "order_side", "TEXT")
@@ -87,6 +92,10 @@ class Database:
             ("entry_model_version", "TEXT"),
             ("performance_governor_level", "INTEGER"),
             ("market_family", "TEXT"),
+            ("brain_id", "TEXT"),
+            ("active_model_group", "TEXT"),
+            ("active_model_kind", "TEXT"),
+            ("active_regime", "TEXT"),
             ("horizon_bucket", "TEXT"),
             ("liquidity_bucket", "TEXT"),
             ("volatility_bucket", "TEXT"),
@@ -167,6 +176,30 @@ class Database:
                 close_fingerprint TEXT,
                 is_reconciliation_close INTEGER,
                 lifecycle_source TEXT,
+                entry_model_family TEXT,
+                entry_model_version TEXT,
+                performance_governor_level INTEGER,
+                market_family TEXT,
+                brain_id TEXT,
+                active_model_group TEXT,
+                active_model_kind TEXT,
+                active_regime TEXT,
+                horizon_bucket TEXT,
+                liquidity_bucket TEXT,
+                volatility_bucket TEXT,
+                technical_regime_bucket TEXT,
+                entry_context_complete INTEGER,
+                learning_eligible INTEGER,
+                operational_close_flag INTEGER,
+                reconciliation_close_flag INTEGER,
+                exit_reason_family TEXT,
+                intended_exit_reason TEXT,
+                actual_execution_path TEXT,
+                exit_fill_latency_seconds REAL,
+                exit_cancel_count INTEGER,
+                exit_partial_fill_ratio REAL,
+                exit_realized_slippage_bps REAL,
+                market_slug TEXT,
                 opened_at TEXT,
                 closed_at TEXT
             );
@@ -241,6 +274,11 @@ class Database:
                 available_balance REAL,
                 order_id TEXT,
                 details_json TEXT,
+                market_family TEXT,
+                brain_id TEXT,
+                active_model_group TEXT,
+                active_model_kind TEXT,
+                active_regime TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS incidents (
@@ -467,11 +505,20 @@ class Database:
         self._ensure_column("candidate_decisions", "available_balance", "REAL")
         self._ensure_column("candidate_decisions", "order_id", "TEXT")
         self._ensure_column("candidate_decisions", "details_json", "TEXT")
+        self._ensure_column("candidate_decisions", "market_family", "TEXT")
+        self._ensure_column("candidate_decisions", "brain_id", "TEXT")
+        self._ensure_column("candidate_decisions", "active_model_group", "TEXT")
+        self._ensure_column("candidate_decisions", "active_model_kind", "TEXT")
+        self._ensure_column("candidate_decisions", "active_regime", "TEXT")
         for column_name, column_type in [
             ("entry_model_family", "TEXT"),
             ("entry_model_version", "TEXT"),
             ("performance_governor_level", "INTEGER"),
             ("market_family", "TEXT"),
+            ("brain_id", "TEXT"),
+            ("active_model_group", "TEXT"),
+            ("active_model_kind", "TEXT"),
+            ("active_regime", "TEXT"),
             ("horizon_bucket", "TEXT"),
             ("liquidity_bucket", "TEXT"),
             ("volatility_bucket", "TEXT"),

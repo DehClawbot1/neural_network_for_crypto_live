@@ -111,6 +111,10 @@ class TradeManager:
         trade.entry_model_version = str(snapshot.get("entry_model_version", trade.entry_model_version or "") or "")
         trade.performance_governor_level = int(snapshot.get("performance_governor_level", trade.performance_governor_level) or trade.performance_governor_level or 0)
         trade.market_family = str(snapshot.get("market_family", trade.market_family or "other") or "other")
+        trade.brain_id = str(snapshot.get("brain_id", trade.brain_id or "") or "")
+        trade.active_model_group = str(snapshot.get("active_model_group", trade.active_model_group or "") or "")
+        trade.active_model_kind = str(snapshot.get("active_model_kind", trade.active_model_kind or "") or "")
+        trade.active_regime = str(snapshot.get("active_regime", trade.active_regime or "") or "")
         trade.horizon_bucket = str(snapshot.get("horizon_bucket", trade.horizon_bucket or "unknown") or "unknown")
         trade.liquidity_bucket = str(snapshot.get("liquidity_bucket", trade.liquidity_bucket or "unknown") or "unknown")
         trade.volatility_bucket = str(snapshot.get("volatility_bucket", trade.volatility_bucket or "unknown") or "unknown")
@@ -657,6 +661,10 @@ class TradeManager:
             "entry_model_version": getattr(trade, "entry_model_version", ""),
             "performance_governor_level": getattr(trade, "performance_governor_level", 0),
             "market_family": getattr(trade, "market_family", "other"),
+            "brain_id": getattr(trade, "brain_id", ""),
+            "active_model_group": getattr(trade, "active_model_group", ""),
+            "active_model_kind": getattr(trade, "active_model_kind", ""),
+            "active_regime": getattr(trade, "active_regime", ""),
             "horizon_bucket": getattr(trade, "horizon_bucket", "unknown"),
             "liquidity_bucket": getattr(trade, "liquidity_bucket", "unknown"),
             "volatility_bucket": getattr(trade, "volatility_bucket", "unknown"),
@@ -731,6 +739,10 @@ class TradeManager:
             or 1
         )
         self._hydrate_trade_from_entry_snapshot(existing_trade, existing_trade.entry_signal_snapshot_json)
+        for attr_name in ("brain_id", "active_model_group", "active_model_kind", "active_regime"):
+            current_value = getattr(existing_trade, attr_name, "")
+            rebuilt_value = getattr(rebuilt_trade, attr_name, "")
+            setattr(existing_trade, attr_name, rebuilt_value or current_value or "")
         for key, value in getattr(rebuilt_trade, "__dict__", {}).items():
             if str(key).startswith(("weather_", "forecast_")):
                 setattr(existing_trade, key, value)
@@ -907,6 +919,7 @@ class TradeManager:
                 entry_signal_snapshot_json, entry_signal_snapshot_feature_count, entry_signal_snapshot_version,
                 close_reason, exit_price, close_fingerprint, is_reconciliation_close, lifecycle_source,
                 entry_model_family, entry_model_version, performance_governor_level, market_family,
+                brain_id, active_model_group, active_model_kind, active_regime,
                 horizon_bucket, liquidity_bucket, volatility_bucket, technical_regime_bucket,
                 entry_context_complete, learning_eligible, operational_close_flag, reconciliation_close_flag, exit_reason_family,
                 intended_exit_reason, actual_execution_path, exit_fill_latency_seconds, exit_cancel_count,
@@ -950,11 +963,12 @@ class TradeManager:
                     entry_signal_snapshot_json, entry_signal_snapshot_feature_count, entry_signal_snapshot_version,
                     close_reason, exit_price, close_fingerprint, is_reconciliation_close, lifecycle_source,
                     entry_model_family, entry_model_version, performance_governor_level, market_family,
+                    brain_id, active_model_group, active_model_kind, active_regime,
                     horizon_bucket, liquidity_bucket, volatility_bucket, technical_regime_bucket,
                     entry_context_complete, learning_eligible, operational_close_flag, reconciliation_close_flag, exit_reason_family,
                     intended_exit_reason, actual_execution_path, exit_fill_latency_seconds, exit_cancel_count,
                     exit_partial_fill_ratio, exit_realized_slippage_bps, market_slug, opened_at, closed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row.get("position_id"),
@@ -994,6 +1008,10 @@ class TradeManager:
                     row.get("entry_model_version"),
                     int(row.get("performance_governor_level", 0) or 0),
                     row.get("market_family"),
+                    row.get("brain_id"),
+                    row.get("active_model_group"),
+                    row.get("active_model_kind"),
+                    row.get("active_regime"),
                     row.get("horizon_bucket"),
                     row.get("liquidity_bucket"),
                     row.get("volatility_bucket"),
@@ -1027,7 +1045,8 @@ class TradeManager:
                 "confidence", "confidence_at_entry", "signal_label",
                 "entry_signal_snapshot_json", "entry_signal_snapshot_feature_count", "entry_signal_snapshot_version",
                 "entry_model_family", "entry_model_version", "performance_governor_level",
-                "market_family", "horizon_bucket", "liquidity_bucket", "volatility_bucket", "technical_regime_bucket",
+                "market_family", "brain_id", "active_model_group", "active_model_kind", "active_regime",
+                "horizon_bucket", "liquidity_bucket", "volatility_bucket", "technical_regime_bucket",
                 "entry_context_complete", "learning_eligible", "operational_close_flag", "reconciliation_close_flag", "exit_reason_family",
                 "intended_exit_reason", "actual_execution_path", "exit_fill_latency_seconds", "exit_cancel_count",
                 "exit_partial_fill_ratio", "exit_realized_slippage_bps",
@@ -1166,6 +1185,14 @@ class TradeManager:
             df["performance_governor_level"] = 0
         if "market_family" not in df.columns:
             df["market_family"] = "other"
+        if "brain_id" not in df.columns:
+            df["brain_id"] = ""
+        if "active_model_group" not in df.columns:
+            df["active_model_group"] = ""
+        if "active_model_kind" not in df.columns:
+            df["active_model_kind"] = ""
+        if "active_regime" not in df.columns:
+            df["active_regime"] = ""
         if "horizon_bucket" not in df.columns:
             df["horizon_bucket"] = "unknown"
         if "liquidity_bucket" not in df.columns:
@@ -1352,6 +1379,10 @@ class TradeManager:
                     setattr(trade, key, value)
             trade.opened_at = row.get("opened_at") or row.get("first_fill_at") or row.get("last_fill_at") or datetime.now().isoformat()
             self._hydrate_trade_from_entry_snapshot(trade, trade.entry_signal_snapshot_json)
+            trade.brain_id = str(row.get("brain_id", trade.brain_id or "") or trade.brain_id or "")
+            trade.active_model_group = str(row.get("active_model_group", trade.active_model_group or "") or trade.active_model_group or "")
+            trade.active_model_kind = str(row.get("active_model_kind", trade.active_model_kind or "") or trade.active_model_kind or "")
+            trade.active_regime = str(row.get("active_regime", trade.active_regime or "") or trade.active_regime or "")
             trade.state = TradeState.OPEN
             rebuilt_trades[trade_key] = trade
 

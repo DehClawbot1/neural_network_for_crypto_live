@@ -99,6 +99,10 @@ class TradeLifecycle:
     entry_model_version: str = ""
     performance_governor_level: int = 0
     market_family: str = "other"
+    brain_id: str = ""
+    active_model_group: str = ""
+    active_model_kind: str = ""
+    active_regime: str = ""
     horizon_bucket: str = "unknown"
     liquidity_bucket: str = "unknown"
     volatility_bucket: str = "unknown"
@@ -171,6 +175,10 @@ class TradeLifecycle:
         self.performance_governor_level = int(normalized_signal_row.get("performance_governor_level", 0) or 0)
         quality_context = build_quality_context(normalized_signal_row)
         self.market_family = str(normalized_signal_row.get("market_family", quality_context.get("market_family", "other")) or "other")
+        self.brain_id = str(normalized_signal_row.get("brain_id", self.brain_id or "") or "")
+        self.active_model_group = str(normalized_signal_row.get("active_model_group", self.active_model_group or "") or "")
+        self.active_model_kind = str(normalized_signal_row.get("active_model_kind", self.active_model_kind or "") or "")
+        self.active_regime = str(normalized_signal_row.get("active_regime", self.active_regime or "") or "")
         self.horizon_bucket = str(normalized_signal_row.get("horizon_bucket", quality_context.get("horizon_bucket", "unknown")) or "unknown")
         self.liquidity_bucket = str(normalized_signal_row.get("liquidity_bucket", quality_context.get("liquidity_bucket", "unknown")) or "unknown")
         self.volatility_bucket = str(normalized_signal_row.get("volatility_bucket", quality_context.get("volatility_bucket", "unknown")) or "unknown")
