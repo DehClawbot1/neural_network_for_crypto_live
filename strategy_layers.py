@@ -11,24 +11,52 @@ def _finite_float(value, default=None):
     return num
 
 
+def _bounded_positive_metric(value, *, scale: float) -> float:
+    metric = _finite_float(value, default=0.0)
+    if metric is None or metric <= 0.0:
+        return 0.0
+    return max(0.0, min(1.0, float(metric) * float(scale)))
+
+
 class PredictionLayer:
     """Placeholder interface for model outputs such as expected return or P(TP before SL)."""
 
     @staticmethod
     def select_signal_score(row: dict) -> float:
-        # Confidence remains the primary gate score when finite.
         confidence = _finite_float(row.get("confidence", 0.0), default=0.0)
-        if confidence > 0:
-            return confidence
+        p_tp = _finite_float(
+            row.get(
+                "ensemble_probability",
+                row.get("p_tp_before_sl", row.get("tp_before_sl_prob", 0.0)),
+            ),
+            default=0.0,
+        )
 
-        # Fallback: use p_tp if available and positive.
-        p_tp = _finite_float(row.get("p_tp_before_sl", row.get("tp_before_sl_prob", 0.0)), default=0.0)
-        if p_tp > 0:
-            return p_tp
+        probability_signal = max(confidence, p_tp, 0.0)
+        profitability_signal = max(
+            _bounded_positive_metric(row.get("edge_score", 0.0), scale=8.0),
+            _bounded_positive_metric(row.get("hybrid_edge", 0.0), scale=8.0),
+            _bounded_positive_metric(row.get("entry_ev", 0.0), scale=4.0),
+            _bounded_positive_metric(row.get("risk_adjusted_ev", 0.0), scale=4.0),
+            _bounded_positive_metric(row.get("calibrated_edge", 0.0), scale=250.0),
+        )
 
-        # Last resort: expected return only if positive.
+        if probability_signal > 0.0 and profitability_signal > 0.0:
+            # We want profitable low-confidence setups to survive when EV is strong,
+            # without letting noisy edge-only rows overwhelm the score.
+            return max(
+                probability_signal,
+                min(1.0, (probability_signal * 0.7) + (profitability_signal * 0.3)),
+            )
+
+        if probability_signal > 0.0:
+            return probability_signal
+
+        if profitability_signal > 0.0:
+            return profitability_signal
+
         er = _finite_float(row.get("expected_return", 0.0), default=0.0)
-        return max(er, 0.0)
+        return _bounded_positive_metric(er, scale=4.0)
 
 
 class EntryRuleLayer:

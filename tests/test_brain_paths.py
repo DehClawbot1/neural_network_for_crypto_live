@@ -2,6 +2,9 @@ from pathlib import Path
 
 import pandas as pd
 
+from model_inference import ModelInference
+from stage1_inference import Stage1Inference
+from stage2_temporal_inference import Stage2TemporalInference
 from brain_paths import (
     BTC_BRAIN_ID,
     WEATHER_BRAIN_ID,
@@ -101,3 +104,22 @@ def test_filter_frame_for_brain_splits_mixed_dataframe(tmp_path: Path):
     weather_only = filter_frame_for_brain(frame, weather_ctx)
     assert len(btc_only) == 2
     assert len(weather_only) == 1
+
+
+def test_inference_loaders_use_brain_specific_weight_directories(tmp_path: Path):
+    btc_ctx = resolve_brain_context("btc", shared_logs_dir=tmp_path / "logs", shared_weights_dir=tmp_path / "weights")
+    weather_ctx = resolve_brain_context(
+        "weather_temperature",
+        shared_logs_dir=tmp_path / "logs",
+        shared_weights_dir=tmp_path / "weights",
+    )
+
+    btc_inference = ModelInference(brain_context=btc_ctx)
+    weather_inference = ModelInference(brain_context=weather_ctx)
+    btc_stage1 = Stage1Inference(brain_context=btc_ctx)
+    weather_stage2 = Stage2TemporalInference(brain_context=weather_ctx)
+
+    assert btc_inference.weights_dir == tmp_path / "weights" / "btc"
+    assert weather_inference.weights_dir == tmp_path / "weights" / "weather_temperature"
+    assert btc_stage1.weights_dir == tmp_path / "weights" / "btc"
+    assert weather_stage2.weights_dir == tmp_path / "weights" / "weather_temperature"

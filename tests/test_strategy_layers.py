@@ -1,4 +1,32 @@
-from strategy_layers import EntryRuleLayer
+from strategy_layers import EntryRuleLayer, PredictionLayer
+
+
+def test_prediction_layer_boosts_score_when_profitability_is_strong():
+    score = PredictionLayer.select_signal_score(
+        {
+            "confidence": 0.35,
+            "p_tp_before_sl": 0.35,
+            "edge_score": 0.08,
+            "entry_ev": 0.09,
+            "risk_adjusted_ev": 0.07,
+        }
+    )
+
+    assert score > 0.35
+    assert score <= 1.0
+
+
+def test_prediction_layer_uses_probability_when_profitability_is_absent():
+    score = PredictionLayer.select_signal_score(
+        {
+            "confidence": 0.35,
+            "p_tp_before_sl": 0.58,
+            "edge_score": 0.0,
+            "entry_ev": 0.0,
+        }
+    )
+
+    assert score == 0.58
 
 
 def test_entry_rule_allows_trade_when_trend_regime_confirms_direction():
