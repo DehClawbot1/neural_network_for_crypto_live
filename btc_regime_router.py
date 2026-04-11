@@ -136,6 +136,9 @@ def annotate_btc_regime(frame: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame() if frame is None else frame.copy()
     out = frame.copy()
     regime_rows = pd.DataFrame([classify_btc_regime_row(row) for _, row in out.iterrows()], index=out.index)
+    overlapping = [column for column in regime_rows.columns if column in out.columns]
+    if overlapping:
+        out = out.drop(columns=overlapping)
     return pd.concat([out, regime_rows], axis=1)
 
 
