@@ -243,6 +243,28 @@ class ContractTargetBuilder:
                     signals_df[_fc] = 1.0
             logging.info("Synthetic live feature backfill applied to contract targets (%d rows).", len(signals_df))
 
+        derived_fill_pairs = [
+            ("btc_live_price_kalman", "btc_live_price"),
+            ("btc_live_spot_price_kalman", "btc_live_spot_price"),
+            ("btc_live_index_price_kalman", "btc_live_index_price"),
+            ("btc_live_mark_price_kalman", "btc_live_mark_price"),
+            ("btc_live_return_1m_kalman", "btc_live_return_1m"),
+            ("btc_live_return_5m_kalman", "btc_live_return_5m"),
+            ("btc_live_return_15m_kalman", "btc_live_return_15m"),
+            ("btc_live_return_1h_kalman", "btc_live_return_1h"),
+            ("btc_live_confluence_kalman", "btc_live_confluence"),
+            ("btc_live_spot_index_basis_bps_kalman", "btc_live_spot_index_basis_bps"),
+            ("btc_live_mark_index_basis_bps_kalman", "btc_live_mark_index_basis_bps"),
+            ("btc_live_mark_spot_basis_bps_kalman", "btc_live_mark_spot_basis_bps"),
+        ]
+        for derived_col, raw_col in derived_fill_pairs:
+            if derived_col in signals_df.columns and raw_col in signals_df.columns:
+                derived_series = pd.to_numeric(signals_df[derived_col], errors="coerce")
+                raw_series = pd.to_numeric(signals_df[raw_col], errors="coerce")
+                signals_df[derived_col] = derived_series.where(derived_series.notna(), raw_series)
+            elif raw_col in signals_df.columns and derived_col not in signals_df.columns:
+                signals_df[derived_col] = pd.to_numeric(signals_df[raw_col], errors="coerce")
+
         if not technical_regime_df.empty:
             technical_regime_df = technical_regime_df.copy()
             ts_col = "technical_timestamp" if "technical_timestamp" in technical_regime_df.columns else "timestamp" if "timestamp" in technical_regime_df.columns else None

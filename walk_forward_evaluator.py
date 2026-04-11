@@ -31,6 +31,24 @@ class WalkForwardEvaluator:
         except Exception:
             return pd.DataFrame()
 
+    @staticmethod
+    def _numeric_feature_frame(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+        normalized = {}
+        truthy = {"true": 1.0, "false": 0.0, "yes": 1.0, "no": 0.0, "on": 1.0, "off": 0.0}
+        for column in columns:
+            series = df[column]
+            if pd.api.types.is_bool_dtype(series):
+                normalized[column] = series.astype(float)
+                continue
+            if pd.api.types.is_numeric_dtype(series):
+                normalized[column] = pd.to_numeric(series, errors="coerce")
+                continue
+            text = series.astype(str).str.strip().str.lower()
+            mapped = text.map(truthy)
+            numeric = pd.to_numeric(series, errors="coerce")
+            normalized[column] = numeric.where(numeric.notna(), mapped)
+        return pd.DataFrame(normalized, index=df.index)
+
     def evaluate(self, train_ratio=0.7):
         df = self._safe_read(self.dataset_file)
         if df.empty or "target_up" not in df.columns:
@@ -59,8 +77,10 @@ class WalkForwardEvaluator:
                 ("clf", RandomForestClassifier(n_estimators=200, random_state=42, class_weight="balanced")),
             ]
         )
-        model.fit(train_df[usable], train_df["target_up"].astype(int))
-        preds = model.predict(test_df[usable])
+        train_x = self._numeric_feature_frame(train_df, usable)
+        test_x = self._numeric_feature_frame(test_df, usable)
+        model.fit(train_x, train_df["target_up"].astype(int))
+        preds = model.predict(test_x)
         acc = accuracy_score(test_df["target_up"].astype(int), preds)
 
         result = pd.DataFrame([

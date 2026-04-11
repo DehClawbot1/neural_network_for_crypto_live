@@ -565,6 +565,14 @@ def _frame_numeric_series(frame: pd.DataFrame, column_name: str, default_value=0
     return series.fillna(float(default_value))
 
 
+def _resolve_exit_btc_price(*candidates, default=0.0) -> float:
+    for candidate in candidates:
+        value = _safe_float(candidate, default=np.nan)
+        if pd.notna(value):
+            return float(value)
+    return float(default)
+
+
 def _fill_missing_series_values(series: pd.Series, fill_value) -> pd.Series:
     filled = series.copy()
     missing_mask = filled.isna()
@@ -3205,7 +3213,16 @@ def main_loop():
                 _apply_exit_execution_metrics(trade, exit_result or {"status": "dead_orderbook"}, intended_reason, reference_price)
                 trade.actual_execution_path = "dead_orderbook_tombstone"
                 trade.intended_exit_reason = intended_reason
-                trade.close(exit_price=reference_price, reason="external_manual_close", exit_btc_price=btc_live_price)
+                trade.close(
+                    exit_price=reference_price,
+                    reason="external_manual_close",
+                    exit_btc_price=_resolve_exit_btc_price(
+                        pos_dict.get("btc_live_price"),
+                        pos_dict.get("btc_live_index_price"),
+                        pos_dict.get("btc_live_mark_price"),
+                        trade.btc_price_at_entry,
+                    ),
+                )
                 trade_manager.persist_closed_trades([trade])
                 trade_manager.active_trades.pop(
                     _make_position_key(
@@ -3888,7 +3905,16 @@ def main_loop():
                                 continue
                         _px = float(getattr(_trade, "current_price", 0.0) or getattr(_trade, "entry_price", 0.0) or 0.0)
                         if _px > 0:
-                            _trade.close(exit_price=_px, reason=close_reason, exit_btc_price=btc_live_price)
+                            _trade.close(
+                                exit_price=_px,
+                                reason=close_reason,
+                                exit_btc_price=_resolve_exit_btc_price(
+                                    _pd.get("btc_live_price"),
+                                    _pd.get("btc_live_index_price"),
+                                    _pd.get("btc_live_mark_price"),
+                                    _trade.btc_price_at_entry,
+                                ),
+                            )
                         else:
                             _trade.state = TradeState.CLOSED
                             _trade.close_reason = close_reason
@@ -4908,7 +4934,16 @@ def main_loop():
                                     _apply_exit_execution_metrics(trade, exit_result, "rl_exit", exit_price)
                                     log_live_fill_event(pos_dict, actual_fill_price, actual_fill_size, action_type="LIVE_EXIT")
                                     if actual_fill_size >= pre_exit_shares - 1e-6:
-                                        trade.close(exit_price=actual_fill_price, reason="rl_exit", exit_btc_price=btc_live_price) # Update TradeLifecycle
+                                        trade.close(
+                                            exit_price=actual_fill_price,
+                                            reason="rl_exit",
+                                            exit_btc_price=_resolve_exit_btc_price(
+                                                pos_dict.get("btc_live_price"),
+                                                pos_dict.get("btc_live_index_price"),
+                                                pos_dict.get("btc_live_mark_price"),
+                                                trade.btc_price_at_entry,
+                                            ),
+                                        ) # Update TradeLifecycle
                                         trade_manager.persist_closed_trades([trade])
                                         trade_manager.active_trades.pop(_make_position_key(token_id=trade.token_id, condition_id=trade.condition_id, outcome_side=trade.outcome_side, market=trade.market), None) # Remove from active trades
                                     else:
@@ -4933,7 +4968,16 @@ def main_loop():
                         else:
                             trade.actual_execution_path = "paper_rl_exit"
                             trade.intended_exit_reason = "rl_exit"
-                            trade.close(exit_price=trade.current_price, reason="rl_exit", exit_btc_price=btc_live_price) # FIX M2: real reason
+                            trade.close(
+                                exit_price=trade.current_price,
+                                reason="rl_exit",
+                                exit_btc_price=_resolve_exit_btc_price(
+                                    pos_dict.get("btc_live_price"),
+                                    pos_dict.get("btc_live_index_price"),
+                                    pos_dict.get("btc_live_mark_price"),
+                                    trade.btc_price_at_entry,
+                                ),
+                            ) # FIX M2: real reason
                             logging.info("Paper EXIT for %s. Realized PnL: %.2f", token_id, trade.realized_pnl)
                             trade_manager.active_trades.pop(_make_position_key(token_id=trade.token_id, condition_id=trade.condition_id, outcome_side=trade.outcome_side, market=trade.market), None) # Remove from active trades
 

@@ -176,8 +176,12 @@ class HistoricalDatasetBuilder:
             "btc_momentum_confluence": 0.0,
             "btc_live_source_quality_score": 0.5,
             "btc_live_source_divergence_bps": 0.0,
+            "btc_live_spot_index_basis_bps": 0.0,
             "btc_live_mark_index_basis_bps": 0.0,
+            "btc_live_mark_spot_basis_bps": 0.0,
+            "btc_live_spot_index_basis_bps_kalman": 0.0,
             "btc_live_mark_index_basis_bps_kalman": 0.0,
+            "btc_live_mark_spot_basis_bps_kalman": 0.0,
             "btc_live_return_1m": 0.0,
             "btc_live_return_5m": 0.0,
             "btc_live_return_15m": 0.0,
@@ -273,6 +277,28 @@ class HistoricalDatasetBuilder:
                 new_columns[column] = pd.Series(prior_series, index=out.index)
             else:
                 updated_columns[column] = pd.to_numeric(out[column], errors="coerce").fillna(prior_series)
+
+        derived_fill_pairs = [
+            ("btc_live_price_kalman", "btc_live_price"),
+            ("btc_live_spot_price_kalman", "btc_live_spot_price"),
+            ("btc_live_index_price_kalman", "btc_live_index_price"),
+            ("btc_live_mark_price_kalman", "btc_live_mark_price"),
+            ("btc_live_return_1m_kalman", "btc_live_return_1m"),
+            ("btc_live_return_5m_kalman", "btc_live_return_5m"),
+            ("btc_live_return_15m_kalman", "btc_live_return_15m"),
+            ("btc_live_return_1h_kalman", "btc_live_return_1h"),
+            ("btc_live_confluence_kalman", "btc_live_confluence"),
+            ("btc_live_spot_index_basis_bps_kalman", "btc_live_spot_index_basis_bps"),
+            ("btc_live_mark_index_basis_bps_kalman", "btc_live_mark_index_basis_bps"),
+            ("btc_live_mark_spot_basis_bps_kalman", "btc_live_mark_spot_basis_bps"),
+        ]
+        for derived_col, raw_col in derived_fill_pairs:
+            if derived_col in out.columns and raw_col in out.columns:
+                derived_series = pd.to_numeric(out[derived_col], errors="coerce")
+                raw_series = pd.to_numeric(out[raw_col], errors="coerce")
+                updated_columns[derived_col] = derived_series.where(derived_series.notna(), raw_series)
+            elif raw_col in out.columns and derived_col not in out.columns:
+                new_columns[derived_col] = pd.to_numeric(out[raw_col], errors="coerce")
 
         for column, prior in boolean_priors.items():
             if column not in out.columns:

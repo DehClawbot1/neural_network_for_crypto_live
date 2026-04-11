@@ -77,6 +77,24 @@ def _resolve_regime_column(df: pd.DataFrame) -> str | None:
     return None
 
 
+def _numeric_feature_frame(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    normalized: dict[str, pd.Series] = {}
+    truthy = {"true": 1.0, "false": 0.0, "yes": 1.0, "no": 0.0, "on": 1.0, "off": 0.0}
+    for column in columns:
+        series = df[column]
+        if pd.api.types.is_bool_dtype(series):
+            normalized[column] = series.astype(float)
+            continue
+        if pd.api.types.is_numeric_dtype(series):
+            normalized[column] = pd.to_numeric(series, errors="coerce")
+            continue
+        text = series.astype(str).str.strip().str.lower()
+        mapped = text.map(truthy)
+        numeric = pd.to_numeric(series, errors="coerce")
+        normalized[column] = numeric.where(numeric.notna(), mapped)
+    return pd.DataFrame(normalized, index=df.index)
+
+
 def _normalize_regime_value(value) -> str:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return ""
@@ -236,6 +254,15 @@ class BaselineModels:
             y_train = train_df["tp_before_sl_60m"].fillna(0).astype(int)
             if y_train.nunique() < 2:
                 continue
+            fold_curated_features, _ = drop_all_nan_features(
+                train_df,
+                curated_features,
+                context="baseline_models_fold",
+            )
+            if not fold_curated_features:
+                continue
+            X_train_curated = _numeric_feature_frame(train_df, fold_curated_features)
+            X_test_curated = _numeric_feature_frame(test_df, fold_curated_features)
             last_train_rows = len(train_df.index)
 
             lda_pipe = Pipeline(
@@ -245,9 +272,9 @@ class BaselineModels:
                     ("model", LinearDiscriminantAnalysis()),
                 ]
             )
-            lda_pipe.fit(train_df[curated_features], y_train)
+            lda_pipe.fit(X_train_curated, y_train)
             lda_fold = test_df.copy()
-            lda_fold["pred"] = lda_pipe.predict(test_df[curated_features])
+            lda_fold["pred"] = lda_pipe.predict(X_test_curated)
             lda_fold["target"] = test_df["tp_before_sl_60m"].fillna(0).astype(int)
             lda_predictions.append(lda_fold)
 
@@ -258,17 +285,24 @@ class BaselineModels:
                     ("model", GaussianNB()),
                 ]
             )
-            nb_pipe.fit(train_df[curated_features], y_train)
+            nb_pipe.fit(X_train_curated, y_train)
             nb_fold = test_df.copy()
-            nb_fold["pred"] = nb_pipe.predict(test_df[curated_features])
+            nb_fold["pred"] = nb_pipe.predict(X_test_curated)
             nb_fold["target"] = test_df["tp_before_sl_60m"].fillna(0).astype(int)
             nb_predictions.append(nb_fold)
 
             if kde_features:
+                fold_kde_features, _ = drop_all_nan_features(
+                    train_df,
+                    kde_features,
+                    context="baseline_models_fold",
+                )
+                if len(fold_kde_features) < 2:
+                    continue
                 imputer = SimpleImputer(strategy="median")
                 scaler = StandardScaler()
-                X_train = scaler.fit_transform(imputer.fit_transform(train_df[kde_features]))
-                X_test = scaler.transform(imputer.transform(test_df[kde_features]))
+                X_train = scaler.fit_transform(imputer.fit_transform(_numeric_feature_frame(train_df, fold_kde_features)))
+                X_test = scaler.transform(imputer.transform(_numeric_feature_frame(test_df, fold_kde_features)))
                 priors = y_train.value_counts(normalize=True).to_dict()
                 models = {}
                 for cls in sorted(y_train.unique()):

@@ -31,6 +31,24 @@ class TimeSplitTrainer:
         except Exception:
             return pd.DataFrame()
 
+    @staticmethod
+    def _numeric_feature_frame(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+        normalized = {}
+        truthy = {"true": 1.0, "false": 0.0, "yes": 1.0, "no": 0.0, "on": 1.0, "off": 0.0}
+        for column in columns:
+            series = df[column]
+            if pd.api.types.is_bool_dtype(series):
+                normalized[column] = series.astype(float)
+                continue
+            if pd.api.types.is_numeric_dtype(series):
+                normalized[column] = pd.to_numeric(series, errors="coerce")
+                continue
+            text = series.astype(str).str.strip().str.lower()
+            mapped = text.map(truthy)
+            numeric = pd.to_numeric(series, errors="coerce")
+            normalized[column] = numeric.where(numeric.notna(), mapped)
+        return pd.DataFrame(normalized, index=df.index)
+
     def run(self):
         df = self._safe_read()
         if df.empty or "target_up" not in df.columns:
@@ -60,9 +78,13 @@ class TimeSplitTrainer:
             ("imputer", SimpleImputer(strategy="median")),
             ("model", RandomForestClassifier(n_estimators=200, random_state=42, class_weight="balanced")),
         ])
-        clf.fit(train_df[usable], train_df["target_up"].astype(int))
-        val_pred = clf.predict(val_df[usable])
-        test_pred = clf.predict(test_df[usable])
+        train_x = self._numeric_feature_frame(train_df, usable)
+        val_x = self._numeric_feature_frame(val_df, usable)
+        test_x = self._numeric_feature_frame(test_df, usable)
+
+        clf.fit(train_x, train_df["target_up"].astype(int))
+        val_pred = clf.predict(val_x)
+        test_pred = clf.predict(test_x)
 
         result = {
             "val_accuracy": accuracy_score(val_df["target_up"].astype(int), val_pred),
@@ -78,9 +100,9 @@ class TimeSplitTrainer:
                 ("imputer", SimpleImputer(strategy="median")),
                 ("model", RandomForestRegressor(n_estimators=200, random_state=42)),
             ])
-            reg.fit(train_df[usable], train_df[target_return_col])
-            val_reg = reg.predict(val_df[usable])
-            test_reg = reg.predict(test_df[usable])
+            reg.fit(train_x, train_df[target_return_col])
+            val_reg = reg.predict(val_x)
+            test_reg = reg.predict(test_x)
             result["val_return_rmse"] = mean_squared_error(val_df[target_return_col], val_reg) ** 0.5
             result["test_return_rmse"] = mean_squared_error(test_df[target_return_col], test_reg) ** 0.5
 

@@ -115,6 +115,24 @@ class Stage2TemporalModels:
         return None
 
     @staticmethod
+    def _numeric_feature_frame(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+        normalized = {}
+        truthy = {"true": 1.0, "false": 0.0, "yes": 1.0, "no": 0.0, "on": 1.0, "off": 0.0}
+        for column in columns:
+            series = df[column]
+            if pd.api.types.is_bool_dtype(series):
+                normalized[column] = series.astype(float)
+                continue
+            if pd.api.types.is_numeric_dtype(series):
+                normalized[column] = pd.to_numeric(series, errors="coerce")
+                continue
+            text = series.astype(str).str.strip().str.lower()
+            mapped = text.map(truthy)
+            numeric = pd.to_numeric(series, errors="coerce")
+            normalized[column] = numeric.where(numeric.notna(), mapped)
+        return pd.DataFrame(normalized, index=df.index)
+
+    @staticmethod
     def _can_use_mlp_early_stopping(n_rows: int, validation_fraction: float = 0.15) -> bool:
         try:
             n_rows = int(n_rows)
@@ -210,13 +228,22 @@ class Stage2TemporalModels:
                 if train_df.empty or test_df.empty:
                     continue
                 balanced_train_df = self._balance_binary_frame(train_df, target_cls)
+                fold_feature_cols, _ = drop_all_nan_features(
+                    balanced_train_df,
+                    feature_cols,
+                    context="stage2_temporal_models_fold",
+                )
+                if not fold_feature_cols:
+                    continue
+                X_train = self._numeric_feature_frame(balanced_train_df, fold_feature_cols)
+                X_test = self._numeric_feature_frame(test_df, fold_feature_cols)
                 y_train = balanced_train_df[target_cls].fillna(0).astype(int)
                 class_counts = y_train.value_counts()
                 use_early_stopping_cls = self._can_use_mlp_early_stopping(len(balanced_train_df), validation_fraction=0.15)
                 if len(class_counts) < 2 or class_counts.min() < 2:
                     use_early_stopping_cls = False
                 clf = Pipeline([
-                    ("imputer", SimpleImputer(strategy="constant", fill_value=0)),
+                    ("imputer", SimpleImputer(strategy="constant", fill_value=0, keep_empty_features=True)),
                     ("scaler", StandardScaler()),
                     ("model", MLPClassifier(
                         hidden_layer_sizes=(48, 24),
@@ -232,14 +259,14 @@ class Stage2TemporalModels:
                 ])
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", category=ConvergenceWarning)
-                    clf.fit(balanced_train_df[feature_cols], y_train)
+                    clf.fit(X_train, y_train)
                 y_test = test_df[target_cls].fillna(0).astype(int)
-                preds = clf.predict(test_df[feature_cols])
+                preds = clf.predict(X_test)
                 cls_scores.append(accuracy_score(y_test, preds))
                 precision_scores.append(precision_score(y_test, preds, zero_division=0))
                 recall_scores.append(recall_score(y_test, preds, zero_division=0))
                 if hasattr(clf, "predict_proba"):
-                    proba = clf.predict_proba(test_df[feature_cols])[:, 1]
+                    proba = clf.predict_proba(X_test)[:, 1]
                     top_k = max(1, int(len(proba) * 0.1))
                     top_idx = np.argsort(proba)[-top_k:]
                     top_precision_scores.append(precision_score(y_test.iloc[top_idx], preds[top_idx], zero_division=0))
@@ -273,9 +300,18 @@ class Stage2TemporalModels:
                 test_df = df.iloc[test_idx]
                 if train_df.empty or test_df.empty:
                     continue
+                fold_feature_cols, _ = drop_all_nan_features(
+                    train_df,
+                    feature_cols,
+                    context="stage2_temporal_models_fold",
+                )
+                if not fold_feature_cols:
+                    continue
+                X_train = self._numeric_feature_frame(train_df, fold_feature_cols)
+                X_test = self._numeric_feature_frame(test_df, fold_feature_cols)
                 use_early_stopping_reg = self._can_use_mlp_early_stopping(len(train_df), validation_fraction=0.15)
                 reg = Pipeline([
-                    ("imputer", SimpleImputer(strategy="constant", fill_value=0)),
+                    ("imputer", SimpleImputer(strategy="constant", fill_value=0, keep_empty_features=True)),
                     ("scaler", StandardScaler()),
                     ("model", MLPRegressor(
                         hidden_layer_sizes=(48, 24),
@@ -293,8 +329,8 @@ class Stage2TemporalModels:
                     warnings.filterwarnings("ignore", category=ConvergenceWarning)
                     warnings.filterwarnings("ignore", category=UndefinedMetricWarning)
                     train_target = pd.to_numeric(train_df[target_reg], errors="coerce").fillna(0.0)
-                    reg.fit(train_df[feature_cols], transform_return_targets(train_target, return_calibration))
-                preds = reg.predict(test_df[feature_cols])
+                    reg.fit(X_train, transform_return_targets(train_target, return_calibration))
+                preds = reg.predict(X_test)
                 from return_calibration import calibrate_return_predictions
                 calibrated_preds = calibrate_return_predictions(preds, return_calibration, index=test_df.index)
                 reg_scores.append(mean_squared_error(pd.to_numeric(test_df[target_reg], errors="coerce").fillna(0.0), calibrated_preds) ** 0.5)
