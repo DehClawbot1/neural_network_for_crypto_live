@@ -31,6 +31,7 @@ from retrainer import Retrainer
 from real_pipeline import run_research_pipeline
 from execution_client import ExecutionClient
 from brain_paths import list_brain_contexts
+from brain_coverage_report import build_btc_brain_coverage_report, format_btc_brain_coverage_line
 from leaderboard_service import PolymarketLeaderboardService
 from model_registry import ModelRegistry
 
@@ -278,6 +279,11 @@ def ensure_optional_rl_model():
 
 def maybe_retrain_before_start():
     print("[3.5/5] Checking whether the model should retrain from accumulated data...")
+    try:
+        coverage = build_btc_brain_coverage_report(shared_logs_dir=LOGS_DIR, shared_weights_dir=Path("weights"))
+        print(f"[~] {format_btc_brain_coverage_line(coverage)}")
+    except Exception as exc:
+        print(f"[!] BTC brain coverage report failed but startup will continue: {exc}")
     retrainer = Retrainer()
     try:
         retrained = retrainer.maybe_retrain()
@@ -325,6 +331,11 @@ def build_research_artifacts():
     try:
         run_research_pipeline()
         print("[+] Research pipeline refreshed (historical dataset, targets, eval files).\n")
+        try:
+            coverage = build_btc_brain_coverage_report(shared_logs_dir=LOGS_DIR, shared_weights_dir=Path("weights"))
+            print(f"[+] {format_btc_brain_coverage_line(coverage)}\n")
+        except Exception as coverage_exc:
+            print(f"[!] BTC brain coverage refresh failed but startup will continue: {coverage_exc}\n")
     except Exception as exc:
         print(f"[!] Research pipeline failed but supervisor can still run: {exc}\n")
 

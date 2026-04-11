@@ -38,6 +38,36 @@ def _parse_snapshot_json(value) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def _coerce_bool_series(series: pd.Series, default: bool = False) -> pd.Series:
+    truthy = {"1", "true", "yes", "on"}
+    falsy = {"0", "false", "no", "off", ""}
+    values = []
+    for value in series.tolist():
+        if value is None:
+            values.append(bool(default))
+            continue
+        try:
+            if pd.isna(value):
+                values.append(bool(default))
+                continue
+        except Exception:
+            pass
+        if isinstance(value, bool):
+            values.append(value)
+            continue
+        if isinstance(value, (int, float)):
+            values.append(float(value) != 0.0)
+            continue
+        text = str(value).strip().lower()
+        if text in truthy:
+            values.append(True)
+        elif text in falsy:
+            values.append(False)
+        else:
+            values.append(bool(default))
+    return pd.Series(values, index=series.index, dtype=bool)
+
+
 def _normalize_market_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "market_title" not in out.columns and "market" in out.columns:
@@ -164,12 +194,15 @@ def enrich_frame_with_entry_snapshots(base_df: pd.DataFrame, logs_dir="logs") ->
     appended = snapshots[~snapshots["_event_key"].isin(event_keys)].copy()
     backfilled_series = merged.get("entry_snapshot_backfilled")
     if isinstance(backfilled_series, pd.Series):
-        merged["entry_snapshot_backfilled"] = backfilled_series.fillna(False).astype(bool)
+        merged["entry_snapshot_backfilled"] = _coerce_bool_series(backfilled_series, default=False)
     else:
         merged["entry_snapshot_backfilled"] = False
 
     drop_cols = [col for col in merged.columns if col.endswith("__snapshot")]
     merged = merged.drop(columns=drop_cols)
     if not appended.empty:
-        merged = pd.concat([merged, appended.reindex(columns=merged.columns, fill_value=pd.NA)], ignore_index=True, sort=False)
+        appended_aligned = appended.reindex(columns=merged.columns)
+        merged_records = merged.to_dict("records")
+        merged_records.extend(appended_aligned.to_dict("records"))
+        merged = pd.DataFrame(merged_records, columns=merged.columns)
     return merged.drop(columns=["_event_key"], errors="ignore")

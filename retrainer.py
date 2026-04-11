@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from brain_paths import list_brain_contexts
+from brain_coverage_report import build_btc_brain_coverage_report, format_btc_brain_coverage_line
 from brain_training_orchestrator import (
     build_family_datasets,
     evaluate_brain_candidate_rows,
@@ -556,6 +557,21 @@ class Retrainer:
         return True, self._register_attempt(candidate_row)
 
     def maybe_retrain(self, force=False, reason="scheduled_cycle_check"):
+        try:
+            coverage = build_btc_brain_coverage_report(
+                shared_logs_dir=self.logs_dir,
+                shared_weights_dir=self.weights_dir,
+            )
+            coverage_summary = {
+                key: value
+                for key, value in coverage.items()
+                if key not in {"feature_report", "core_feature_coverages", "optional_feature_coverages"}
+            }
+            logging.info("BTC_BRAIN_COVERAGE %s", json.dumps(coverage_summary, default=str, sort_keys=True))
+            logging.info("%s", format_btc_brain_coverage_line(coverage))
+        except Exception as exc:
+            logging.warning("BTC brain coverage report failed (non-blocking): %s", exc)
+
         closed_df = self._safe_read(self.closed_file)
         replay_df = self._safe_read(self.replay_file)
         backtest_df = self._safe_read(self.backtest_summary_file)

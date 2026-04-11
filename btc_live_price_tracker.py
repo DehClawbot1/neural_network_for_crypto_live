@@ -8,7 +8,8 @@ import pandas as pd
 import requests
 
 from candle_data_service import CandleDataService
-from csv_utils import safe_csv_append_with_schema
+from brain_log_routing import append_csv_with_brain_mirrors
+from brain_paths import BTC_FAMILY
 from kalman_feature_smoother import AdaptiveScalarKalmanFilter
 
 logger = logging.getLogger(__name__)
@@ -239,7 +240,13 @@ class BTCLivePriceTracker:
 
     def _write_snapshot(self, context: dict):
         try:
-            safe_csv_append_with_schema(self.snapshot_file, pd.DataFrame([context]))
+            append_csv_with_brain_mirrors(
+                self.snapshot_file,
+                pd.DataFrame([context]),
+                family_hint=BTC_FAMILY,
+                shared_logs_dir=self.logs_dir,
+                include_shared=True,
+            )
         except Exception as exc:
             logger.debug("BTCLivePriceTracker: Snapshot write failed: %s", exc)
 

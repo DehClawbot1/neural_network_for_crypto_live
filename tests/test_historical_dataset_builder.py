@@ -1,9 +1,11 @@
 import tempfile
+import warnings
 from pathlib import Path
 
 import pandas as pd
 from trade_lifecycle import serialize_signal_snapshot
 
+from entry_snapshot_enrichment import enrich_frame_with_entry_snapshots
 from historical_dataset_builder import HistoricalDatasetBuilder
 
 
@@ -136,3 +138,57 @@ def test_historical_dataset_builder_backfills_missing_signal_columns_from_entry_
         assert round(float(df.iloc[0]["wallet_quality_score"]), 2) == 0.81
         assert round(float(df.iloc[0]["btc_live_mark_price_kalman"]), 1) == 68222.4
         assert bool(df.iloc[0]["entry_snapshot_backfilled"]) is True
+
+
+def test_entry_snapshot_enrichment_avoids_futurewarning_on_bool_fill_and_append():
+    with tempfile.TemporaryDirectory() as tmp:
+        logs = Path(tmp)
+        base_df = pd.DataFrame(
+            [
+                {
+                    "market": "BTC Test",
+                    "market_title": "BTC Test",
+                    "timestamp": "2026-04-09T05:00:00Z",
+                    "trader_wallet": "0xabc",
+                    "token_id": "tok-1",
+                    "condition_id": "cond-1",
+                    "outcome_side": "YES",
+                    "entry_snapshot_backfilled": None,
+                }
+            ]
+        )
+        snapshot_json, feature_count = serialize_signal_snapshot(
+            {
+                "timestamp": "2026-04-09T05:05:00Z",
+                "market": "BTC Test 2",
+                "trader_wallet": "0xdef",
+                "token_id": "tok-2",
+                "condition_id": "cond-2",
+                "outcome_side": "NO",
+                "wallet_quality_score": 0.55,
+            }
+        )
+        pd.DataFrame(
+            [
+                {
+                    "position_id": "tok-2|cond-2|NO",
+                    "market": "BTC Test 2",
+                    "market_title": "BTC Test 2",
+                    "token_id": "tok-2",
+                    "condition_id": "cond-2",
+                    "outcome_side": "NO",
+                    "opened_at": "2026-04-09T05:05:00Z",
+                    "status": "OPEN",
+                    "entry_signal_snapshot_json": snapshot_json,
+                    "entry_signal_snapshot_feature_count": feature_count,
+                    "entry_signal_snapshot_version": 1,
+                }
+            ]
+        ).to_csv(logs / "positions.csv", index=False)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", FutureWarning)
+            enriched = enrich_frame_with_entry_snapshots(base_df, logs_dir=logs)
+
+        assert len(enriched.index) == 2
+        assert enriched["entry_snapshot_backfilled"].dtype == bool

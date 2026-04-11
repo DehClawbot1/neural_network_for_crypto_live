@@ -10,8 +10,9 @@ import pandas as pd
 
 from btc_regime_router import classify_btc_regime_row
 from btc_live_price_tracker import BTCLivePriceTracker
+from brain_log_routing import append_csv_with_brain_mirrors
+from brain_paths import BTC_FAMILY
 from candle_data_service import CandleDataService
-from csv_utils import safe_csv_append_with_schema
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -293,7 +294,13 @@ class TechnicalAnalyzer:
         ]
         payload = {key: context.get(key) for key in snapshot_keys}
         try:
-            safe_csv_append_with_schema(self.snapshot_file, pd.DataFrame([payload]))
+            append_csv_with_brain_mirrors(
+                self.snapshot_file,
+                pd.DataFrame([payload]),
+                family_hint=BTC_FAMILY,
+                shared_logs_dir=self.logs_dir,
+                include_shared=True,
+            )
         except Exception as exc:
             logger.debug("TechnicalAnalyzer: Snapshot write failed: %s", exc)
 

@@ -9,6 +9,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from brain_log_routing import overwrite_csv_with_brain_mirrors
+from brain_paths import WEATHER_FAMILY
 from leaderboard_service import PolymarketLeaderboardService
 from polymarket_profile_client import PolymarketProfileClient
 from weather_temperature_forecast import WeatherForecastService
@@ -465,9 +467,21 @@ class WeatherTemperatureStrategy:
 
     def _write_snapshot(self, snapshot_df: pd.DataFrame):
         if snapshot_df is None or snapshot_df.empty:
-            pd.DataFrame().to_csv(self.snapshot_file, index=False)
+            overwrite_csv_with_brain_mirrors(
+                self.snapshot_file,
+                pd.DataFrame(),
+                family_hint=WEATHER_FAMILY,
+                shared_logs_dir=self.logs_dir,
+                include_shared=True,
+            )
             return
-        snapshot_df.to_csv(self.snapshot_file, index=False)
+        overwrite_csv_with_brain_mirrors(
+            self.snapshot_file,
+            snapshot_df,
+            family_hint=WEATHER_FAMILY,
+            shared_logs_dir=self.logs_dir,
+            include_shared=True,
+        )
 
     def _build_event_signal(
         self,

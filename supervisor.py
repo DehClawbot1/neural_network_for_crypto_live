@@ -95,6 +95,7 @@ from btc_trade_feedback import BTCTradeFeedback
 from weather_temperature_strategy import WeatherTemperatureStrategy
 from weather_temperature_markets import fetch_weather_temperature_markets
 from brain_paths import active_runtime_identity, resolve_brain_context
+from brain_log_routing import append_csv_with_brain_mirrors
 from model_registry import ModelRegistry
 try:
     from inference_runtime_guard import (
@@ -476,33 +477,7 @@ def append_csv_record(path, record):
 def append_csv_frame(path, df):
     if df is None or df.empty:
         return
-    from csv_utils import safe_csv_append
-    csv_path = Path(path)
-    if not csv_path.exists() or csv_path.stat().st_size == 0:
-        safe_csv_append(csv_path, df)
-        return
-
-    try:
-        existing_header = pd.read_csv(csv_path, nrows=0, engine="python", on_bad_lines="skip")
-        existing_columns = existing_header.columns.tolist()
-    except Exception:
-        existing_columns = []
-
-    ordered_columns = list(existing_columns)
-    for column in df.columns:
-        if column not in ordered_columns:
-            ordered_columns.append(column)
-
-    schema_changed = bool(existing_columns) and ordered_columns != existing_columns
-    append_df = df.reindex(columns=ordered_columns)
-    if schema_changed:
-        try:
-            existing_df = pd.read_csv(csv_path, engine="python", on_bad_lines="skip")
-        except Exception:
-            existing_df = pd.DataFrame(columns=existing_columns)
-        existing_df = existing_df.reindex(columns=ordered_columns)
-        existing_df.to_csv(csv_path, index=False)
-    safe_csv_append(csv_path, append_df)
+    append_csv_with_brain_mirrors(path, df, shared_logs_dir="logs", shared_weights_dir="weights")
 
 
 def _is_truthy(value) -> bool:

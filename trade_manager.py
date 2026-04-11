@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 from balance_normalization import maybe_trace_allowance_payload
-from csv_utils import safe_csv_append
+from brain_log_routing import append_csv_with_brain_mirrors, overwrite_csv_with_brain_mirrors
 from db import Database
 from trade_lifecycle import TradeLifecycle, TradeState
 from trade_quality import build_quality_context, classify_exit_reason_family, resolve_entry_signal_label
@@ -891,12 +891,27 @@ class TradeManager:
         append_df = append_df.reindex(columns=ordered_cols)
         existing_df = existing_df.reindex(columns=ordered_cols)
         if not self.closed_file.exists() or self.closed_file.stat().st_size == 0:
-            append_df.to_csv(self.closed_file, index=False)
+            overwrite_csv_with_brain_mirrors(
+                self.closed_file,
+                append_df,
+                shared_logs_dir=self.logs_dir,
+                include_shared=True,
+            )
         elif schema_changed:
-            existing_df.to_csv(self.closed_file, index=False)
-            safe_csv_append(self.closed_file, append_df)
+            rewrite_df = pd.concat([existing_df, append_df], ignore_index=True)
+            overwrite_csv_with_brain_mirrors(
+                self.closed_file,
+                rewrite_df,
+                shared_logs_dir=self.logs_dir,
+                include_shared=True,
+            )
         else:
-            safe_csv_append(self.closed_file, append_df)
+            append_csv_with_brain_mirrors(
+                self.closed_file,
+                append_df,
+                shared_logs_dir=self.logs_dir,
+                include_shared=True,
+            )
         self._upsert_position_rows_to_db(deduped_rows)
         self._refresh_lifecycle_audit_reports()
         return len(deduped_rows)
@@ -1253,19 +1268,34 @@ class TradeManager:
     def persist_open_positions(self, reconciled_positions_df: pd.DataFrame | None = None):
         if reconciled_positions_df is not None:
             out_df = self._normalize_reconciled_positions_for_csv(reconciled_positions_df)
-            out_df.to_csv(self.positions_file, index=False)
+            overwrite_csv_with_brain_mirrors(
+                self.positions_file,
+                out_df,
+                shared_logs_dir=self.logs_dir,
+                include_shared=True,
+            )
             self._close_absent_ledger_positions(out_df, close_reason="external_manual_close")
             self._upsert_position_rows_to_db(out_df.to_dict("records"))
             return
 
         open_trades = self.get_open_positions()
         if not open_trades:
-            self._empty_positions_frame().to_csv(self.positions_file, index=False)
+            overwrite_csv_with_brain_mirrors(
+                self.positions_file,
+                self._empty_positions_frame(),
+                shared_logs_dir=self.logs_dir,
+                include_shared=True,
+            )
             return
 
         rows = [self._trade_to_dict(t) for t in open_trades]
         out_df = pd.DataFrame(rows)
-        out_df.to_csv(self.positions_file, index=False)
+        overwrite_csv_with_brain_mirrors(
+            self.positions_file,
+            out_df,
+            shared_logs_dir=self.logs_dir,
+            include_shared=True,
+        )
         self._upsert_position_rows_to_db(rows)
 
     def _append_closed_trades(self, closed_trades: List[TradeLifecycle]):

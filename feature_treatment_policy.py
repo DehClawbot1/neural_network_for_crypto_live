@@ -45,6 +45,23 @@ def _bulk(names: Sequence[str], kind: str, scope: str = "all") -> Dict[str, Feat
     return {n: FeatureTreatment(kind=kind, scope=scope) for n in names}
 
 
+def _derived_treatment_name(feature: str) -> str | None:
+    text = str(feature or "").strip()
+    if not text:
+        return None
+    if text in FEATURE_TREATMENT:
+        return text
+    if "_lag_" in text:
+        base_feature = text.split("_lag_", 1)[0]
+        if base_feature in FEATURE_TREATMENT:
+            return base_feature
+    if text.endswith(("_x", "_y")):
+        base_feature = text[:-2]
+        if base_feature in FEATURE_TREATMENT:
+            return base_feature
+    return None
+
+
 # ── the policy registry ────────────────────────────────────────────
 
 FEATURE_TREATMENT: Dict[str, FeatureTreatment] = {}
@@ -67,6 +84,7 @@ FEATURE_TREATMENT["wallet_recent_streak"] = FeatureTreatment("raw")
 
 # ---- market_microstructure ----
 FEATURE_TREATMENT["current_price"] = FeatureTreatment("clip01")
+FEATURE_TREATMENT["entry_price"] = FeatureTreatment("clip01")
 FEATURE_TREATMENT["spread"] = FeatureTreatment("robust_scale")
 FEATURE_TREATMENT.update(_bulk([
     "time_left",
@@ -242,6 +260,8 @@ FEATURE_TREATMENT.update(_bulk([
 ], "standardize"))
 FEATURE_TREATMENT["open_positions_winner_count"] = FeatureTreatment("raw")
 FEATURE_TREATMENT["open_positions_loser_count"] = FeatureTreatment("raw")
+FEATURE_TREATMENT["recent_token_activity_5"] = FeatureTreatment("log_scale", scope="nn")
+FEATURE_TREATMENT["recent_yes_ratio_5"] = FeatureTreatment("clip01", scope="nn")
 
 # ---- weather_wallet_copy ----
 FEATURE_TREATMENT.update(_bulk([
@@ -287,7 +307,10 @@ FEATURE_TREATMENT.update(_bulk([
 
 def get_treatment(feature: str) -> FeatureTreatment:
     """Return the treatment for *feature*, defaulting to ``raw``."""
-    return FEATURE_TREATMENT.get(feature, FeatureTreatment("raw"))
+    derived_name = _derived_treatment_name(feature)
+    if derived_name is not None:
+        return FEATURE_TREATMENT[derived_name]
+    return FeatureTreatment("raw")
 
 
 def features_by_kind(kind: str, features: Sequence[str] | None = None) -> List[str]:
@@ -351,7 +374,7 @@ def audit_schema(catalog_features: Sequence[str] | None = None) -> SchemaAuditRe
     catalog_set: Set[str] = set(catalog_features)
     policy_set: Set[str] = set(FEATURE_TREATMENT)
 
-    missing = sorted(catalog_set - policy_set)
+    missing = sorted(feature for feature in catalog_set if _derived_treatment_name(feature) is None)
     orphans = sorted(policy_set - catalog_set)
     bad_kind = sorted(f for f, t in FEATURE_TREATMENT.items() if t.kind not in VALID_KINDS)
     bad_scope = sorted(f for f, t in FEATURE_TREATMENT.items() if t.scope not in VALID_SCOPES)

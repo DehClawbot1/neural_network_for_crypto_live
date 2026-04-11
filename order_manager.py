@@ -9,6 +9,7 @@ import time
 import pandas as pd
 
 from balance_normalization import normalize_allowance_balance
+from brain_log_routing import append_csv_with_brain_mirrors
 from execution_client import ExecutionClient
 from live_risk_manager import LiveRiskManager, RiskDecision
 from db import Database
@@ -42,33 +43,12 @@ class OrderManager:
         if path.name == "live_orders.csv":
             row.setdefault("order_source", "order_manager")
             row.setdefault("created_at", row.get("timestamp"))
-        row_df = pd.DataFrame([row])
-        if not path.exists():
-            row_df.to_csv(path, index=False)
-            return
-
-        try:
-            header_cols = pd.read_csv(path, nrows=0, engine="python", on_bad_lines="skip").columns.tolist()
-        except Exception:
-            header_cols = []
-
-        if header_cols and all(column in header_cols for column in row_df.columns):
-            row_df.reindex(columns=header_cols).to_csv(path, mode="a", header=False, index=False)
-            return
-
-        try:
-            existing = pd.read_csv(path, engine="python", on_bad_lines="skip")
-        except Exception:
-            existing = pd.DataFrame(columns=header_cols)
-
-        ordered_cols = list(existing.columns)
-        for column in row_df.columns:
-            if column not in ordered_cols:
-                ordered_cols.append(column)
-
-        existing = existing.reindex(columns=ordered_cols)
-        row_df = row_df.reindex(columns=ordered_cols)
-        pd.concat([existing, row_df], ignore_index=True).to_csv(path, index=False)
+        append_csv_with_brain_mirrors(
+            path,
+            pd.DataFrame([row]),
+            shared_logs_dir=self.logs_dir,
+            include_shared=True,
+        )
 
     def _extract_order_id(self, payload):
         if not isinstance(payload, dict):

@@ -31,6 +31,11 @@ class TestFeatureTreatment:
         assert t.kind == "raw"
         assert t.scope == "all"
 
+    def test_get_treatment_inherits_lag_feature_policy(self):
+        t = get_treatment("btc_live_return_15m_lag_5")
+        assert t.kind == "standardize"
+        assert t.scope == "all"
+
     def test_features_by_kind(self):
         bools = features_by_kind("boolean")
         assert "btc_market_regime_is_calm" in bools
@@ -77,3 +82,15 @@ class TestSchemaAudit:
         """Every feature in the default catalog must have a treatment."""
         missing = set(DEFAULT_TABULAR_FEATURE_COLUMNS) - set(FEATURE_TREATMENT)
         assert missing == set(), f"Features without treatment: {missing}"
+
+    def test_audit_passes_for_temporal_lag_schema(self):
+        feature_cols = [
+            "entry_price",
+            "entry_price_lag_1",
+            "btc_live_return_15m_lag_5",
+            "wallet_trade_count_30d_lag_3",
+            "recent_token_activity_5",
+            "recent_yes_ratio_5",
+        ]
+        result = audit_schema(feature_cols)
+        assert result.ok, result.summary()
