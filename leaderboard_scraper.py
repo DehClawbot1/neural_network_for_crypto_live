@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter
+from leaderboard_service import PolymarketLeaderboardService
 from token_utils import normalize_token_id
 from urllib3.util.retry import Retry
 from wallet_state_engine import WalletStateEngine
@@ -125,43 +126,21 @@ def _leaderboard_wallet_quality(rank_index: int, total_count: int, pnl_value) ->
 
 def get_top_crypto_traders(limit=100, return_details=False):
     """Fetch the top proxy wallets by weekly CRYPTO PnL."""
-    url = "https://data-api.polymarket.com/v1/leaderboard"
-    params = {
-        "category": "CRYPTO",
-        "timePeriod": "WEEK",
-        "orderBy": "PNL",
-        "limit": limit,
-    }
-
-    try:
-        session = _build_session()
-        response = session.get(url, params=params, timeout=20)
-        response.raise_for_status()
-        data = response.json()
-
-        watchlist = _parse_watchlist_env()
-        detailed_rows = []
-        for idx, user in enumerate(data):
-            wallet = str(user.get("proxyWallet") or "").strip().lower()
-            if not wallet:
-                continue
-            detailed_rows.append(
-                {
-                    "wallet": wallet,
-                    "rank": idx + 1,
-                    "pnl": _safe_float(user.get("pnl", user.get("PnL", 0.0)), 0.0),
-                    "quality_score": _leaderboard_wallet_quality(idx, len(data), user.get("pnl", user.get("PnL", 0.0))),
-                    "approved": (wallet in watchlist) if watchlist else True,
-                }
-            )
-
-        logging.info("Successfully fetched %s top traders from the leaderboard.", len(detailed_rows))
-        if return_details:
-            return detailed_rows
-        return [row["wallet"] for row in detailed_rows]
-    except Exception as e:
-        logging.error(f"Error fetching leaderboard: {e}")
+    watchlist = _parse_watchlist_env()
+    service = PolymarketLeaderboardService(logs_dir="logs")
+    leaderboard_df = service.fetch_leaderboard(
+        category="CRYPTO",
+        limit=limit,
+        time_period="WEEK",
+        order_by="PNL",
+        approved_wallets=watchlist,
+    )
+    if leaderboard_df.empty:
         return [] if not return_details else []
+    detailed_rows = leaderboard_df.to_dict("records")
+    if return_details:
+        return detailed_rows
+    return [row["wallet"] for row in detailed_rows if str(row.get("wallet") or "").strip()]
 
 
 def _trade_to_signal(
@@ -171,6 +150,8 @@ def _trade_to_signal(
     wallet_quality_score=None,
     wallet_watchlist_approved=None,
     signal_source=None,
+    wallet_source=None,
+    leaderboard_fetched_at=None,
 ):
     market_universe = market_universe or {"condition_ids": set(), "token_ids": set(), "slugs": set()}
     cond_id = trade.get("conditionId") or trade.get("condition_id")
@@ -232,6 +213,8 @@ def _trade_to_signal(
         "size": float(trade.get("size", 0)),
         "timestamp": normalized_ts,
         "signal_source": str(signal_source or "leaderboard_wallet"),
+        "wallet_source": str(wallet_source or signal_source or "leaderboard_wallet"),
+        "leaderboard_fetched_at": leaderboard_fetched_at,
         "wallet_quality_score": _safe_float(wallet_quality_score, 0.50),
         "wallet_watchlist_approved": True if wallet_watchlist_approved is None else bool(wallet_watchlist_approved),
     }
@@ -258,7 +241,7 @@ def load_btc_market_universe(logs_dir="logs"):
     return {"condition_ids": condition_ids, "token_ids": token_ids, "slugs": slugs}
 
 
-def get_recent_btc_trades(wallet_address, limit=50, market_universe=None, session=None, wallet_quality_score=None, wallet_watchlist_approved=None):
+def get_recent_btc_trades(wallet_address, limit=50, market_universe=None, session=None, wallet_quality_score=None, wallet_watchlist_approved=None, wallet_source=None, leaderboard_fetched_at=None):
     """Fetch recent wallet trades from the public Data API and keep only trades that map into the BTC universe."""
     url = "https://data-api.polymarket.com/trades"
     params = {
@@ -281,6 +264,8 @@ def get_recent_btc_trades(wallet_address, limit=50, market_universe=None, sessio
                 wallet_quality_score=wallet_quality_score,
                 wallet_watchlist_approved=wallet_watchlist_approved,
                 signal_source="leaderboard_wallet",
+                wallet_source=wallet_source,
+                leaderboard_fetched_at=leaderboard_fetched_at,
             )
             if signal is not None:
                 signals.append(signal)
@@ -424,6 +409,8 @@ def run_scraper_cycle():
             session=shared_session,
             wallet_quality_score=detail.get("quality_score"),
             wallet_watchlist_approved=detail.get("approved"),
+            wallet_source=detail.get("source"),
+            leaderboard_fetched_at=detail.get("fetched_at"),
         )
         all_signals.extend(trades)
         if wallet_sleep > 0:

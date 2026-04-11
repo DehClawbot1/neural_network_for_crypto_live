@@ -2,10 +2,17 @@ from pathlib import Path
 
 import joblib
 import pandas as pd
+import pytest
 
-from supervised_trainer import SupervisedTrainer
+from supervised_trainer import SupervisedTrainer, _load_sklearn_supervised
+
+try:
+    _SKLEARN_AVAILABLE = _load_sklearn_supervised() is not None
+except Exception:
+    _SKLEARN_AVAILABLE = False
 
 
+@pytest.mark.skipif(not _SKLEARN_AVAILABLE, reason="sklearn import fails in this environment")
 def test_supervised_trainer_coerces_schema_drift_strings(tmp_path):
     logs_dir = tmp_path / "logs"
     weights_dir = tmp_path / "weights"

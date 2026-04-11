@@ -10,11 +10,15 @@ from model_artifact_staging import (
     build_candidate_weights_dir,
     promote_candidate_artifacts,
 )
+from baseline_models import BaselineModels
+from model_registry import ModelRegistry
+from model_registry_runtime import evaluate_artifact_against_dataset
 from rl_trainer import train_model
 from supervised_models import SupervisedModels
 from stage1_models import Stage1Models
 from stage2_temporal_models import Stage2TemporalModels
 from trade_quality import enrich_quality_frame
+from weather_temperature_trainer import WeatherTemperatureTrainer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -632,6 +636,8 @@ class Retrainer:
         SupervisedModels(logs_dir=self.logs_dir, weights_dir=candidate_weights_dir).train()
         Stage1Models(logs_dir=self.logs_dir, weights_dir=candidate_weights_dir).train()
         Stage2TemporalModels(logs_dir=self.logs_dir, weights_dir=candidate_weights_dir).train()
+        BaselineModels(logs_dir=self.logs_dir, weights_dir=candidate_weights_dir).train()
+        WeatherTemperatureTrainer(logs_dir=self.logs_dir, weights_dir=candidate_weights_dir).train()
         train_model(timesteps=rl_timesteps, save_path=candidate_weights_dir / "ppo_polytrader")
         self._retrain_btc_forecast(candidate_weights_dir)
 
@@ -728,4 +734,103 @@ class Retrainer:
             promotion_block_reason=promotion_block_reason,
             candidate_beats_champion=candidate_beats_champion,
         )
+
+        registry = ModelRegistry(logs_dir=str(self.logs_dir))
+        registry_run_id = str(candidate_row.get("model_version") if candidate_row else pd.Timestamp.utcnow().strftime("retrain_%Y%m%d%H%M%S"))
+        registry_rows = []
+        registry_rows.extend(
+            evaluate_artifact_against_dataset(
+                run_id=registry_run_id,
+                dataset_file=self.logs_dir / "contract_targets.csv",
+                artifact_path=candidate_weights_dir / "tp_classifier.joblib",
+                artifact_group="btc_tabular_classifier",
+                market_family="btc",
+                target_col="tp_before_sl_60m",
+            ).to_dict("records")
+        )
+        registry_rows.extend(
+            evaluate_artifact_against_dataset(
+                run_id=registry_run_id,
+                dataset_file=self.logs_dir / "contract_targets.csv",
+                artifact_path=candidate_weights_dir / "return_regressor.joblib",
+                artifact_group="btc_tabular_regressor",
+                market_family="btc",
+                target_col="forward_return_15m",
+            ).to_dict("records")
+        )
+        registry_rows.extend(
+            evaluate_artifact_against_dataset(
+                run_id=registry_run_id,
+                dataset_file=self.logs_dir / "contract_targets.csv",
+                artifact_path=candidate_weights_dir / "stage1_tp_classifier.joblib",
+                artifact_group="stage1_classifier",
+                market_family="btc",
+                target_col="tp_before_sl_60m",
+            ).to_dict("records")
+        )
+        registry_rows.extend(
+            evaluate_artifact_against_dataset(
+                run_id=registry_run_id,
+                dataset_file=self.logs_dir / "contract_targets.csv",
+                artifact_path=candidate_weights_dir / "stage1_return_regressor.joblib",
+                artifact_group="stage1_regressor",
+                market_family="btc",
+                target_col="forward_return_15m",
+            ).to_dict("records")
+        )
+        registry_rows.extend(
+            evaluate_artifact_against_dataset(
+                run_id=registry_run_id,
+                dataset_file=self.logs_dir / "sequence_dataset.csv",
+                artifact_path=candidate_weights_dir / "stage2_temporal_classifier.joblib",
+                artifact_group="stage2_temporal_classifier",
+                market_family="btc",
+                target_col="tp_before_sl_60m",
+            ).to_dict("records")
+        )
+        registry_rows.extend(
+            evaluate_artifact_against_dataset(
+                run_id=registry_run_id,
+                dataset_file=self.logs_dir / "sequence_dataset.csv",
+                artifact_path=candidate_weights_dir / "stage2_temporal_regressor.joblib",
+                artifact_group="stage2_temporal_regressor",
+                market_family="btc",
+                target_col="forward_return_15m",
+            ).to_dict("records")
+        )
+        registry_rows.extend(
+            evaluate_artifact_against_dataset(
+                run_id=registry_run_id,
+                dataset_file=self.logs_dir / "contract_targets.csv",
+                artifact_path=candidate_weights_dir / "weather_temperature_model.joblib",
+                artifact_group="weather_temperature_classifier",
+                market_family="weather_temperature",
+                target_col="target_up",
+                market_family_prefix="weather_temperature",
+            ).to_dict("records")
+        )
+        baseline_df = self._safe_read(self.logs_dir / "baseline_eval.csv")
+        if not baseline_df.empty:
+            baseline_df = baseline_df.copy()
+            baseline_df["run_id"] = registry_run_id
+            baseline_df["promotion_status"] = "evaluation_only"
+            baseline_df["promotion_reason"] = "baseline_report_only"
+            baseline_df["beats_champion"] = None
+            baseline_df["is_champion"] = False
+            baseline_df["promotion_gate_passed"] = None
+            baseline_df["notes"] = baseline_df.get("notes", pd.Series("", index=baseline_df.index)).fillna("")
+            registry_rows.extend(baseline_df.to_dict("records"))
+        if registry_rows:
+            for row in registry_rows:
+                if str(row.get("promotion_status") or "") == "evaluation_only":
+                    continue
+                row["promotion_status"] = "promoted" if promoted else "blocked"
+                row["promotion_reason"] = "" if promoted else promotion_block_reason
+                row["beats_champion"] = candidate_beats_champion
+                row["is_champion"] = bool(promoted)
+                row["promotion_gate_passed"] = bool(candidate_row.get("promotion_gate_passed")) if candidate_row else None
+                row["notes"] = reason
+            registry.register_rows(registry_rows)
+            registry.write_regime_model_comparison()
+            registry.write_decision_profit_audit()
         return promoted

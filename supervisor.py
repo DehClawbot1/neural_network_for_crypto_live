@@ -511,6 +511,56 @@ def _safe_float(value, default=0.0):
     return num
 
 
+def _frame_column_as_series(frame: pd.DataFrame, column_name: str, default_value=np.nan) -> pd.Series:
+    if frame is None or frame.empty:
+        return pd.Series(dtype=object)
+    if column_name not in frame.columns:
+        return pd.Series([default_value] * len(frame), index=frame.index)
+
+    raw = frame.loc[:, column_name]
+    if isinstance(raw, pd.DataFrame):
+        if raw.empty:
+            return pd.Series([default_value] * len(frame), index=frame.index)
+        values = []
+        for _, row in raw.iterrows():
+            picked = default_value
+            for item in row.tolist():
+                if pd.notna(item):
+                    picked = item
+                    break
+            values.append(picked)
+        series = pd.Series(values, index=raw.index)
+    elif isinstance(raw, pd.Series):
+        series = raw
+    else:
+        try:
+            series = pd.Series(raw, index=frame.index)
+        except Exception:
+            values = list(raw) if hasattr(raw, "__iter__") and not isinstance(raw, (str, bytes)) else [raw] * len(frame)
+            series = pd.Series(values[: len(frame)])
+
+    series = series.reset_index(drop=True)
+    if len(series) < len(frame):
+        series = series.reindex(range(len(frame)), fill_value=default_value)
+    elif len(series) > len(frame):
+        series = series.iloc[: len(frame)]
+    series.index = frame.index
+    return series
+
+
+def _frame_numeric_series(frame: pd.DataFrame, column_name: str, default_value=0.0) -> pd.Series:
+    series = pd.to_numeric(_frame_column_as_series(frame, column_name, np.nan), errors="coerce")
+    if isinstance(default_value, pd.Series):
+        fallback = pd.to_numeric(default_value, errors="coerce").reset_index(drop=True)
+        if len(fallback) < len(frame):
+            fallback = fallback.reindex(range(len(frame)), fill_value=np.nan)
+        elif len(fallback) > len(frame):
+            fallback = fallback.iloc[: len(frame)]
+        fallback.index = frame.index
+        return series.where(series.notna(), fallback)
+    return series.fillna(float(default_value))
+
+
 def _parse_timestamp_utc(value):
     if value in (None, "", "nan", "None"):
         return None
@@ -1668,9 +1718,8 @@ def main_loop():
         """Consistent trade key matching TradeManager._get_trade_key."""
         token_id = str(signal_row.get("token_id", "") or "").strip()
         condition_id = str(signal_row.get("condition_id", "") or "").strip()
-        market = signal_row.get("market_title") or signal_row.get("market")
-        outcome_side = signal_row.get("outcome_side") or signal_row.get("side")
-        outcome_side = str(outcome_side or "").strip()
+        market = str(signal_row.get("market_title") or signal_row.get("market") or "").strip()
+        outcome_side = str(signal_row.get("outcome_side") or signal_row.get("side") or "").strip()
         if (token_id or condition_id) and outcome_side:
             return f"{token_id}|{condition_id}|{outcome_side}"
         return f"{market}|{outcome_side}" if market and outcome_side else None
@@ -2361,7 +2410,7 @@ def main_loop():
                     logging.warning("Failed to fetch %s rotating markets: %s", _updown_prefix, _updown_exc)
             if os.getenv("ENABLE_WEATHER_TEMPERATURE_STRATEGY", "true").strip().lower() in {"1", "true", "yes", "on"}:
                 try:
-                    weather_markets_df = fetch_weather_temperature_markets(limit=500, closed=False, max_offset=0)
+                    weather_markets_df = fetch_weather_temperature_markets(limit=500, closed=False, max_offset=None)
                     if weather_markets_df is not None and not weather_markets_df.empty:
                         if markets_df is None or markets_df.empty:
                             markets_df = weather_markets_df
@@ -2461,7 +2510,15 @@ def main_loop():
 
             # --------------------------------------------------
             if not signals_df.empty and macro_context:
-                signals_df = pd.concat([signals_df, pd.DataFrame({k: [v] * len(signals_df) for k, v in macro_context.items()}, index=signals_df.index)], axis=1)
+                _scalar_types = (int, float, str, bool, type(None))
+                _safe_ctx = {}
+                for _mk, _mv in macro_context.items():
+                    if isinstance(_mv, _scalar_types) or (hasattr(np, "integer") and isinstance(_mv, (np.integer, np.floating, np.bool_))):
+                        _safe_ctx[_mk] = _mv
+                    else:
+                        logging.debug("macro_context key %r has non-scalar type %s — skipped for signal injection.", _mk, type(_mv).__name__)
+                if _safe_ctx:
+                    signals_df = pd.concat([signals_df, pd.DataFrame({k: [v] * len(signals_df) for k, v in _safe_ctx.items()}, index=signals_df.index)], axis=1)
             # --------------------------------------------------
             
             if always_on_enabled and always_on_only and signals_df is not None and not signals_df.empty:
@@ -2672,42 +2729,45 @@ def main_loop():
                             except Exception:
                                 pass
                 inferred_df = model_inference.run(features_df)
-                inferred_df["legacy_p_tp_before_sl"] = pd.to_numeric(
-                    inferred_df.get("p_tp_before_sl", 0.0), errors="coerce"
+                inferred_df["legacy_p_tp_before_sl"] = _frame_numeric_series(
+                    inferred_df, "p_tp_before_sl", 0.0
                 ).fillna(0.0)
                 inferred_df["legacy_expected_return"] = clip_expected_return_series(
-                    pd.to_numeric(inferred_df.get("expected_return", 0.0), errors="coerce").fillna(0.0)
+                    _frame_numeric_series(inferred_df, "expected_return", 0.0).fillna(0.0)
                 )
-                inferred_df["legacy_edge_score"] = pd.to_numeric(
-                    inferred_df.get("edge_score", inferred_df["legacy_p_tp_before_sl"] * inferred_df["legacy_expected_return"]),
-                    errors="coerce",
+                inferred_df["legacy_edge_score"] = _frame_numeric_series(
+                    inferred_df,
+                    "edge_score",
+                    inferred_df["legacy_p_tp_before_sl"] * inferred_df["legacy_expected_return"],
                 ).fillna(0.0)
 
                 inferred_df = stage1_inference.run(inferred_df)
-                inferred_df["stage1_p_tp_before_sl"] = pd.to_numeric(
-                    inferred_df.get("p_tp_before_sl", 0.0), errors="coerce"
+                inferred_df["stage1_p_tp_before_sl"] = _frame_numeric_series(
+                    inferred_df, "p_tp_before_sl", 0.0
                 ).fillna(0.0)
                 inferred_df["stage1_expected_return"] = clip_expected_return_series(
-                    pd.to_numeric(inferred_df.get("expected_return", 0.0), errors="coerce").fillna(0.0)
+                    _frame_numeric_series(inferred_df, "expected_return", 0.0).fillna(0.0)
                 )
-                inferred_df["stage1_edge_score"] = pd.to_numeric(
-                    inferred_df.get("edge_score", inferred_df["stage1_p_tp_before_sl"] * inferred_df["stage1_expected_return"]),
-                    errors="coerce",
+                inferred_df["stage1_edge_score"] = _frame_numeric_series(
+                    inferred_df,
+                    "edge_score",
+                    inferred_df["stage1_p_tp_before_sl"] * inferred_df["stage1_expected_return"],
                 ).fillna(0.0)
-                inferred_df["stage1_lower_confidence_bound"] = pd.to_numeric(
-                    inferred_df.get("lower_confidence_bound", inferred_df["stage1_expected_return"]),
-                    errors="coerce",
+                inferred_df["stage1_lower_confidence_bound"] = _frame_numeric_series(
+                    inferred_df,
+                    "lower_confidence_bound",
+                    inferred_df["stage1_expected_return"],
                 ).fillna(inferred_df["stage1_expected_return"])
-                inferred_df["stage1_return_std"] = pd.to_numeric(
-                    inferred_df.get("return_std", 0.0), errors="coerce"
+                inferred_df["stage1_return_std"] = _frame_numeric_series(
+                    inferred_df, "return_std", 0.0
                 ).fillna(0.0)
 
                 inferred_df = stage2_inference.run(inferred_df)
                 inferred_df["temporal_expected_return"] = clip_expected_return_series(
-                    pd.to_numeric(inferred_df.get("temporal_expected_return", 0.0), errors="coerce").fillna(0.0)
+                    _frame_numeric_series(inferred_df, "temporal_expected_return", 0.0).fillna(0.0)
                 )
                 inferred_df["temporal_edge_score"] = (
-                    pd.to_numeric(inferred_df.get("temporal_p_tp_before_sl", 0.0), errors="coerce").fillna(0.0)
+                    _frame_numeric_series(inferred_df, "temporal_p_tp_before_sl", 0.0).fillna(0.0)
                     * inferred_df["temporal_expected_return"]
                 )
                 if trading_mode == "live" and strict_inference_mode and _inference_guard_has_errors():

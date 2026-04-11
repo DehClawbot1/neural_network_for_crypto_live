@@ -13,6 +13,7 @@ INFERENCE_MODEL_FILENAMES = (
     "stage1_return_regressor.joblib",
     "stage2_temporal_classifier.joblib",
     "stage2_temporal_regressor.joblib",
+    "weather_temperature_model.joblib",
 )
 
 LEGACY_RL_FILENAMES = (

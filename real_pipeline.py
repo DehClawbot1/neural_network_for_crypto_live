@@ -14,12 +14,17 @@ from supervised_models import SupervisedModels
 from stage1_models import Stage1Models
 from sequence_feature_builder import SequenceFeatureBuilder
 from stage2_temporal_models import Stage2TemporalModels
+from baseline_models import BaselineModels
 from contract_target_builder import ContractTargetBuilder
 from wallet_alpha_builder import WalletAlphaBuilder
 from feature_ablation import FeatureAblationReporter
 from walk_forward_evaluator import WalkForwardEvaluator
 from time_split_trainer import TimeSplitTrainer
 from path_replay_simulator import PathReplaySimulator
+from weather_temperature_trainer import WeatherTemperatureTrainer
+from model_artifact_staging import build_candidate_weights_dir
+from model_registry import ModelRegistry
+from model_registry_runtime import evaluate_artifact_against_dataset, register_and_promote_rows
 from clob_history import CLOBHistoryClient
 import pandas as pd
 
@@ -213,59 +218,171 @@ def run_research_pipeline():
         WalletAlphaBuilder().write()
         _check_budget("wallet_alpha")
 
-        targets_path = HistoricalDatasetBuilder().logs_dir / "contract_targets.csv"
-        alpha_history_path = HistoricalDatasetBuilder().logs_dir / "wallet_alpha_history.csv"
-        if targets_path.exists() and alpha_history_path.exists():
-            targets = pd.read_csv(targets_path, engine="python", on_bad_lines="skip")
-            alpha_hist = pd.read_csv(alpha_history_path, engine="python", on_bad_lines="skip")
-            if not targets.empty and not alpha_hist.empty and "timestamp" in targets.columns and "timestamp" in alpha_hist.columns:
-                logging.info("Merging point-in-time wallet alpha into target features...")
-                targets["timestamp"] = pd.to_datetime(targets["timestamp"], utc=True, errors="coerce")
-                alpha_hist["timestamp"] = pd.to_datetime(alpha_hist["timestamp"], utc=True, errors="coerce")
-                join_key = "wallet_copied" if "wallet_copied" in targets.columns else "trader_wallet"
-                if join_key in targets.columns and "wallet_copied" in alpha_hist.columns:
-                    if join_key != "wallet_copied":
-                        alpha_hist = alpha_hist.rename(columns={"wallet_copied": join_key})
-                    targets = targets.dropna(subset=["timestamp", join_key])
-                    alpha_hist = alpha_hist.dropna(subset=["timestamp", join_key])
-                    merged_parts = []
-                    for wallet, group in targets.groupby(join_key):
-                        history = alpha_hist[alpha_hist[join_key] == wallet]
-                        if history.empty:
-                            merged_parts.append(group)
-                            continue
-                        merged = pd.merge_asof(
-                            group.sort_values("timestamp"),
-                            history.sort_values("timestamp"),
-                            on="timestamp",
-                            direction="backward",
-                        )
-                        merged_parts.append(merged.loc[:, ~merged.columns.duplicated()])
-                    if merged_parts:
-                        targets = pd.concat(merged_parts, ignore_index=True)
-                        targets = targets.loc[:, ~targets.columns.duplicated()]
-                        targets.to_csv(targets_path, index=False)
-                        logging.info("Alpha merge complete. Targets now enriched with wallet context.")
+        try:
+            targets_path = HistoricalDatasetBuilder().logs_dir / "contract_targets.csv"
+            alpha_history_path = HistoricalDatasetBuilder().logs_dir / "wallet_alpha_history.csv"
+            if targets_path.exists() and alpha_history_path.exists():
+                targets = pd.read_csv(targets_path, engine="python", on_bad_lines="skip")
+                alpha_hist = pd.read_csv(alpha_history_path, engine="python", on_bad_lines="skip")
+                if not targets.empty and not alpha_hist.empty and "timestamp" in targets.columns and "timestamp" in alpha_hist.columns:
+                    logging.info("Merging point-in-time wallet alpha into target features...")
+                    targets["timestamp"] = pd.to_datetime(targets["timestamp"], utc=True, errors="coerce")
+                    alpha_hist["timestamp"] = pd.to_datetime(alpha_hist["timestamp"], utc=True, errors="coerce")
+                    join_key = "wallet_copied" if "wallet_copied" in targets.columns else "trader_wallet"
+                    if join_key in targets.columns and "wallet_copied" in alpha_hist.columns:
+                        if join_key != "wallet_copied":
+                            alpha_hist = alpha_hist.rename(columns={"wallet_copied": join_key})
+                        targets = targets.dropna(subset=["timestamp", join_key])
+                        alpha_hist = alpha_hist.dropna(subset=["timestamp", join_key])
+                        merged_parts = []
+                        for wallet, group in targets.groupby(join_key):
+                            history = alpha_hist[alpha_hist[join_key] == wallet]
+                            if history.empty:
+                                merged_parts.append(group)
+                                continue
+                            merged = pd.merge_asof(
+                                group.sort_values("timestamp"),
+                                history.sort_values("timestamp"),
+                                on="timestamp",
+                                direction="backward",
+                            )
+                            merged_parts.append(merged.loc[:, ~merged.columns.duplicated()])
+                        if merged_parts:
+                            targets = pd.concat(merged_parts, ignore_index=True)
+                            targets = targets.loc[:, ~targets.columns.duplicated()]
+                            targets.to_csv(targets_path, index=False)
+                            logging.info("Alpha merge complete. Targets now enriched with wallet context.")
+        except (ValueError, TypeError) as _merge_exc:
+            logging.error("Research pipeline step 'alpha_merge' failed: %s", _merge_exc, exc_info=True)
+            raise
 
         _check_budget("alpha_merge")
 
-        SupervisedModels().train()
-        _check_budget("supervised_models")
+        candidate_weights_dir = build_candidate_weights_dir("weights", prefix="research")
+        registry = ModelRegistry(logs_dir="logs")
+        run_id = pd.Timestamp.utcnow().strftime("research_%Y%m%d%H%M%S")
 
-        Stage1Models().train()
-        _check_budget("stage1_models")
+        _training_steps = [
+            ("supervised_models", lambda: SupervisedModels(weights_dir=candidate_weights_dir).train()),
+            ("stage1_models", lambda: Stage1Models(weights_dir=candidate_weights_dir).train()),
+            ("sequence_features", lambda: SequenceFeatureBuilder().write()),
+            ("stage2_temporal", lambda: Stage2TemporalModels(weights_dir=candidate_weights_dir).train()),
+            ("baseline_models", lambda: BaselineModels().train()),
+            ("weather_temperature_trainer", lambda: WeatherTemperatureTrainer(weights_dir=candidate_weights_dir).train()),
+            ("walk_forward_eval", lambda: WalkForwardEvaluator().evaluate()),
+            ("time_split_trainer", lambda: TimeSplitTrainer().run()),
+            ("feature_ablation", lambda: FeatureAblationReporter().write()),
+            ("path_replay", lambda: PathReplaySimulator().write()),
+            ("dashboard_eval", lambda: _ensure_dashboard_supervised_eval("logs")),
+        ]
+        for _step_name, _step_fn in _training_steps:
+            try:
+                _step_fn()
+            except (ValueError, TypeError) as _step_exc:
+                logging.error("Research pipeline step '%s' failed: %s", _step_name, _step_exc, exc_info=True)
+                raise
+            _check_budget(_step_name)
 
-        SequenceFeatureBuilder().write()
-        _check_budget("sequence_features")
+        candidate_rows = []
+        candidate_rows.extend(
+            evaluate_artifact_against_dataset(
+                run_id=run_id,
+                dataset_file=Path("logs") / "contract_targets.csv",
+                artifact_path=candidate_weights_dir / "tp_classifier.joblib",
+                artifact_group="btc_tabular_classifier",
+                market_family="btc",
+                target_col="tp_before_sl_60m",
+            ).to_dict("records")
+        )
+        candidate_rows.extend(
+            evaluate_artifact_against_dataset(
+                run_id=run_id,
+                dataset_file=Path("logs") / "contract_targets.csv",
+                artifact_path=candidate_weights_dir / "return_regressor.joblib",
+                artifact_group="btc_tabular_regressor",
+                market_family="btc",
+                target_col="forward_return_15m",
+            ).to_dict("records")
+        )
+        candidate_rows.extend(
+            evaluate_artifact_against_dataset(
+                run_id=run_id,
+                dataset_file=Path("logs") / "contract_targets.csv",
+                artifact_path=candidate_weights_dir / "stage1_tp_classifier.joblib",
+                artifact_group="stage1_classifier",
+                market_family="btc",
+                target_col="tp_before_sl_60m",
+            ).to_dict("records")
+        )
+        candidate_rows.extend(
+            evaluate_artifact_against_dataset(
+                run_id=run_id,
+                dataset_file=Path("logs") / "contract_targets.csv",
+                artifact_path=candidate_weights_dir / "stage1_return_regressor.joblib",
+                artifact_group="stage1_regressor",
+                market_family="btc",
+                target_col="forward_return_15m",
+            ).to_dict("records")
+        )
+        candidate_rows.extend(
+            evaluate_artifact_against_dataset(
+                run_id=run_id,
+                dataset_file=Path("logs") / "sequence_dataset.csv",
+                artifact_path=candidate_weights_dir / "stage2_temporal_classifier.joblib",
+                artifact_group="stage2_temporal_classifier",
+                market_family="btc",
+                target_col="tp_before_sl_60m",
+            ).to_dict("records")
+        )
+        candidate_rows.extend(
+            evaluate_artifact_against_dataset(
+                run_id=run_id,
+                dataset_file=Path("logs") / "sequence_dataset.csv",
+                artifact_path=candidate_weights_dir / "stage2_temporal_regressor.joblib",
+                artifact_group="stage2_temporal_regressor",
+                market_family="btc",
+                target_col="forward_return_15m",
+            ).to_dict("records")
+        )
+        candidate_rows.extend(
+            evaluate_artifact_against_dataset(
+                run_id=run_id,
+                dataset_file=Path("logs") / "contract_targets.csv",
+                artifact_path=candidate_weights_dir / "weather_temperature_model.joblib",
+                artifact_group="weather_temperature_classifier",
+                market_family="weather_temperature",
+                target_col="target_up",
+                market_family_prefix="weather_temperature",
+            ).to_dict("records")
+        )
 
-        Stage2TemporalModels().train()
-        _check_budget("stage2_temporal")
+        baseline_df = _safe_read_csv(Path("logs") / "baseline_eval.csv")
+        if not baseline_df.empty:
+            baseline_df = baseline_df.copy()
+            baseline_df["run_id"] = run_id
+            baseline_df["promotion_status"] = "evaluation_only"
+            baseline_df["promotion_reason"] = "baseline_report_only"
+            baseline_df["beats_champion"] = None
+            baseline_df["is_champion"] = False
+            baseline_df["promotion_gate_passed"] = None
+            baseline_df["notes"] = baseline_df.get("notes", pd.Series("", index=baseline_df.index)).fillna("")
+            candidate_rows.extend(baseline_df.to_dict("records"))
 
-        WalkForwardEvaluator().evaluate()
-        TimeSplitTrainer().run()
-        FeatureAblationReporter().write()
-        PathReplaySimulator().write()
-        _ensure_dashboard_supervised_eval("logs")
+        registered = register_and_promote_rows(
+            registry=registry,
+            candidate_rows=candidate_rows,
+            candidate_weights_dir=candidate_weights_dir,
+            active_weights_dir="weights",
+        )
+        if not registered.empty:
+            promoted = registered[
+                registered.get("promotion_status", pd.Series(dtype=str)).fillna("").astype(str) == "promoted"
+            ]
+            logging.info(
+                "Model registry updated with %s rows; promoted %s artifact slices.",
+                len(registered.index),
+                len(promoted.index),
+            )
 
         elapsed = time.time() - pipeline_start
         logging.info("Research pipeline complete in %.0fs.", elapsed)
@@ -281,4 +398,3 @@ def run_research_pipeline():
 
 if __name__ == "__main__":
     run_research_pipeline()
-

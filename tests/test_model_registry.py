@@ -39,3 +39,33 @@ class TestModelRegistry:
         assert path.exists()
         content = path.read_text(encoding="utf-8")
         assert "Decision / Profit Audit" in content
+
+    def test_current_champion_returns_latest_promoted_row(self):
+        registry = ModelRegistry(logs_dir=str(self.logs_dir))
+        registry.register(
+            model_kind="old_model",
+            artifact_group="btc_tabular_classifier",
+            market_family="btc",
+            regime_slice="all",
+            accuracy=0.60,
+            promotion_status="promoted",
+            is_champion=True,
+        )
+        registry.register(
+            model_kind="new_model",
+            artifact_group="btc_tabular_classifier",
+            market_family="btc",
+            regime_slice="all",
+            accuracy=0.72,
+            promotion_status="promoted",
+            is_champion=True,
+        )
+
+        champion = registry.current_champion(
+            artifact_group="btc_tabular_classifier",
+            market_family="btc",
+            regime_slice="all",
+        )
+
+        assert champion is not None
+        assert champion["model_kind"] == "new_model"

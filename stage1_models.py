@@ -52,6 +52,17 @@ def _load_sklearn_stage1():
     }
 
 
+def _dedupe_feature_names(feature_names):
+    seen = set()
+    out = []
+    for name in feature_names or []:
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+
 class Stage1Models:
     """
     Stronger tabular ensemble stage with calibrated classification outputs.
@@ -80,10 +91,10 @@ class Stage1Models:
             return pd.DataFrame()
 
     def _usable_features(self, df):
-        candidates = [c for c in self.FEATURE_COLUMNS if c in df.columns]
+        candidates = _dedupe_feature_names([c for c in self.FEATURE_COLUMNS if c in df.columns])
         candidates = features_for_scope("tree", candidates)
         usable, _ = drop_all_nan_features(df, candidates, context="stage1_models")
-        return usable
+        return _dedupe_feature_names(usable)
 
     def _build_classifier(self, cv=3):
         sk = _load_sklearn_stage1()
@@ -176,7 +187,17 @@ class Stage1Models:
                     category=UserWarning,
                 )
                 clf.fit(X, y_cls)
-            joblib.dump({"model": clf, "features": usable}, self.classifier_file)
+            joblib.dump(
+                {
+                    "model": clf,
+                    "features": usable,
+                    "model_kind": "stage1_classifier",
+                    "feature_set": "tree_tabular",
+                    "scaling": "none",
+                    "regularization": "tree_ensemble",
+                },
+                self.classifier_file,
+            )
             self._write_feature_importance(usable, clf)
 
         if "forward_return_15m" in df.columns:
@@ -184,6 +205,17 @@ class Stage1Models:
             return_calibration = fit_return_calibration(target_returns)
             reg = self._build_regressor()
             reg.fit(X, transform_return_targets(target_returns, return_calibration))
-            joblib.dump({"model": reg, "features": usable, "return_calibration": return_calibration}, self.regressor_file)
+            joblib.dump(
+                {
+                    "model": reg,
+                    "features": usable,
+                    "return_calibration": return_calibration,
+                    "model_kind": "stage1_regressor",
+                    "feature_set": "tree_tabular",
+                    "scaling": "none",
+                    "regularization": "tree_ensemble",
+                },
+                self.regressor_file,
+            )
 
         return usable

@@ -29,6 +29,8 @@ from supervisor_ui_patch import apply_supervisor_ui_patch
 from retrainer import Retrainer
 from real_pipeline import run_research_pipeline
 from execution_client import ExecutionClient
+from leaderboard_service import PolymarketLeaderboardService
+from model_registry import ModelRegistry
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -307,6 +309,63 @@ def build_research_artifacts():
         print(f"[!] Research pipeline failed but supervisor can still run: {exc}\n")
 
 
+def log_live_leaderboard_status():
+    print("[4.5/5] Refreshing leaderboard source status...")
+    service = PolymarketLeaderboardService(logs_dir="logs")
+    try:
+        btc_status = service.snapshot_status(category="CRYPTO", limit=int(os.getenv("LEADERBOARD_TOP_TRADERS_LIMIT", "100") or 100))
+        print(
+            f"[+] BTC leaderboard: {btc_status['wallet_count']} wallets | "
+            f"last_refresh={btc_status['fetched_at'] or 'n/a'}"
+        )
+    except Exception as exc:
+        print(f"[!] BTC leaderboard status unavailable: {exc}")
+    try:
+        weather_status = service.snapshot_status(category="WEATHER", limit=int(os.getenv("WEATHER_LEADERBOARD_LIMIT", "100") or 100))
+        print(
+            f"[+] Weather leaderboard: {weather_status['wallet_count']} wallets | "
+            f"last_refresh={weather_status['fetched_at'] or 'n/a'}"
+        )
+    except Exception as exc:
+        print(f"[!] Weather leaderboard status unavailable: {exc}")
+    print("")
+
+
+def log_active_model_champions():
+    print("[4.6/5] Reading active model champions...")
+    registry = ModelRegistry(logs_dir="logs")
+    table = registry.comparison_table()
+    if table.empty:
+        print("[+] No registered model champions yet.\n")
+        return
+    champions = table[table.get("is_champion", pd.Series(dtype=bool)) == True].copy()
+    if champions.empty:
+        champions = table[table.get("promotion_status", pd.Series(dtype=str)).fillna("").astype(str).str.lower() == "promoted"].copy()
+    if champions.empty:
+        print("[+] No promoted model champions recorded yet.\n")
+        return
+    champions = champions.drop_duplicates(subset=["artifact_group", "market_family", "regime_slice"], keep="last")
+    print("[+] Active champions:")
+    for _, row in champions.iterrows():
+        accuracy = pd.to_numeric(pd.Series([row.get("accuracy")]), errors="coerce").iloc[0]
+        rmse = pd.to_numeric(pd.Series([row.get("rmse")]), errors="coerce").iloc[0]
+        metric_bits = []
+        if pd.notna(accuracy):
+            metric_bits.append(f"accuracy={float(accuracy):.4f}")
+        if pd.notna(rmse):
+            metric_bits.append(f"rmse={float(rmse):.4f}")
+        print(
+            "    - {group} | {kind} | family={family} | regime={regime}{metrics}".format(
+                group=row.get("artifact_group", ""),
+                kind=row.get("model_kind", ""),
+                family=row.get("market_family", ""),
+                regime=row.get("regime_slice", ""),
+                metrics=(f" | {' '.join(metric_bits)}" if metric_bits else ""),
+            )
+        )
+    print("")
+
+
 def start_supervisor():
     apply_supervisor_ui_patch(supervisor_module)
     print("[5/5] Starting supervisor...")
@@ -386,6 +445,8 @@ def main():
 
         maybe_retrain_before_start()
         build_research_artifacts()
+        log_live_leaderboard_status()
+        log_active_model_champions()
 
         if load_brain() is None:
             print("[!] RL model not available. Starting with supervised-first mode only.\n")

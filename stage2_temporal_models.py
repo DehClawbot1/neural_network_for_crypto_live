@@ -233,7 +233,17 @@ class Stage2TemporalModels:
                 if top_precision_scores:
                     metrics["temporal_precision_at_top_10pct"] = float(sum(top_precision_scores) / len(top_precision_scores))
             if last_clf is not None:
-                joblib.dump({"model": last_clf, "features": feature_cols}, self.classifier_file)
+                joblib.dump(
+                    {
+                        "model": last_clf,
+                        "features": feature_cols,
+                        "model_kind": "stage2_temporal_classifier",
+                        "feature_set": "temporal_sequence",
+                        "scaling": "standard",
+                        "regularization": "mlp_alpha",
+                    },
+                    self.classifier_file,
+                )
 
         if target_reg:
             reg_scores = []
@@ -273,10 +283,20 @@ class Stage2TemporalModels:
             if reg_scores:
                 metrics["temporal_walk_forward_rmse"] = float(sum(reg_scores) / len(reg_scores))
             if last_reg is not None:
-                joblib.dump({"model": last_reg, "features": feature_cols, "return_calibration": return_calibration}, self.regressor_file)
+                joblib.dump(
+                    {
+                        "model": last_reg,
+                        "features": feature_cols,
+                        "return_calibration": return_calibration,
+                        "model_kind": "stage2_temporal_regressor",
+                        "feature_set": "temporal_sequence",
+                        "scaling": "standard",
+                        "regularization": "mlp_alpha",
+                    },
+                    self.regressor_file,
+                )
 
         result = pd.DataFrame([metrics]) if metrics else pd.DataFrame()
         if not result.empty:
             result.to_csv(self.metrics_file, index=False)
         return result
-

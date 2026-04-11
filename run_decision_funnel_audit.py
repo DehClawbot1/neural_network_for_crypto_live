@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from model_registry import ModelRegistry
 
 
 LOGS_DIR = Path("logs")
@@ -127,6 +128,9 @@ def _summarize_cycle(decisions_df: pd.DataFrame, stats_df: pd.DataFrame, cycle_i
 
     governor_level = None
     governor_reason = ""
+    wallet_source_counts = Counter()
+    active_model_counts = Counter()
+    regime_counts = Counter()
     if not cycle_decisions.empty:
         for detail in cycle_decisions["details"]:
             if isinstance(detail, dict) and detail:
@@ -134,8 +138,15 @@ def _summarize_cycle(decisions_df: pd.DataFrame, stats_df: pd.DataFrame, cycle_i
                     governor_level = detail.get("performance_governor_level")
                 if not governor_reason and detail.get("performance_governor_reason"):
                     governor_reason = str(detail.get("performance_governor_reason"))
-                if governor_level is not None and governor_reason:
-                    break
+                wallet_source = str(detail.get("wallet_source") or detail.get("signal_source") or "").strip()
+                if wallet_source:
+                    wallet_source_counts[wallet_source] += 1
+                active_model = str(detail.get("active_champion_model") or detail.get("entry_model_family") or "").strip()
+                if active_model:
+                    active_model_counts[active_model] += 1
+                regime_name = str(detail.get("active_regime") or detail.get("btc_market_regime_label") or detail.get("technical_regime_bucket") or "").strip()
+                if regime_name:
+                    regime_counts[regime_name] += 1
 
     cycle_stats_row = cycle_stats.iloc[-1].to_dict() if not cycle_stats.empty else {}
     report = {
@@ -156,6 +167,9 @@ def _summarize_cycle(decisions_df: pd.DataFrame, stats_df: pd.DataFrame, cycle_i
             "liquidity_fail": int(rule_liquidity_fail),
         },
         "wallet_gate_breakdown": dict(sorted(wallet_reason_counts.items())),
+        "wallet_source_counts": dict(sorted(wallet_source_counts.items())),
+        "active_model_counts": dict(sorted(active_model_counts.items())),
+        "regime_counts": dict(sorted(regime_counts.items())),
         "performance_governor_level": governor_level,
         "performance_governor_reason": governor_reason,
     }
@@ -275,6 +289,29 @@ def _write_markdown_report(
         ]
     )
     report_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _active_champion_summary() -> list[str]:
+    table = ModelRegistry(logs_dir=str(LOGS_DIR)).comparison_table()
+    if table.empty:
+        return []
+    champions = table[table.get("is_champion", pd.Series(dtype=bool)) == True].copy()
+    if champions.empty:
+        champions = table[table.get("promotion_status", pd.Series(dtype=str)).fillna("").astype(str).str.lower() == "promoted"].copy()
+    if champions.empty:
+        return []
+    champions = champions.drop_duplicates(subset=["artifact_group", "market_family", "regime_slice"], keep="last")
+    out = []
+    for _, row in champions.iterrows():
+        out.append(
+            "{group}:{kind}:{family}:{regime}".format(
+                group=row.get("artifact_group", ""),
+                kind=row.get("model_kind", ""),
+                family=row.get("market_family", ""),
+                regime=row.get("regime_slice", ""),
+            )
+        )
+    return out
 
 
 def _seeded_open_position_frame() -> pd.DataFrame:

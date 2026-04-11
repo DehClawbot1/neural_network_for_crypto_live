@@ -42,7 +42,8 @@ class TestBaselineModels:
         result = model.train()
         assert not result.empty
         assert "model_kind" in result.columns
-        assert set(result["model_kind"]) == {"lda", "gaussian_nb"}
+        assert {"lda", "gaussian_nb"}.issubset(set(result["model_kind"]))
+        assert "regime_slice" in result.columns
 
     def test_empty_dataset(self):
         model = BaselineModels(logs_dir=str(self.logs_dir))

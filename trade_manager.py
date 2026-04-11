@@ -272,8 +272,8 @@ class TradeManager:
         if str(signal_row.get("action", "BUY")).upper() != "BUY":
             return None # BUG FIX 3: Prevent opening new trades on EXIT signals
 
-        market = signal_row.get("market_title") or signal_row.get("market")
-        outcome_side = signal_row.get("outcome_side") or signal_row.get("side")
+        market = str(signal_row.get("market_title") or signal_row.get("market") or "").strip()
+        outcome_side = str(signal_row.get("outcome_side") or signal_row.get("side") or "").strip()
         token_id = signal_row.get("token_id")
         condition_id = signal_row.get("condition_id")
         trade_key = self._compose_trade_key(
@@ -300,8 +300,8 @@ class TradeManager:
         if str(signal_row.get("action", "BUY")).upper() != "BUY":
             return None # BUG FIX 3: Prevent opening new trades on EXIT signals
 
-        market = signal_row.get("market_title") or signal_row.get("market")
-        outcome_side = signal_row.get("outcome_side") or signal_row.get("side")
+        market = str(signal_row.get("market_title") or signal_row.get("market") or "").strip()
+        outcome_side = str(signal_row.get("outcome_side") or signal_row.get("side") or "").strip()
         token_id = signal_row.get("token_id")
         condition_id = signal_row.get("condition_id")
 
@@ -1316,8 +1316,8 @@ class TradeManager:
         min_reconciled_notional = float(os.getenv("MIN_RECONCILED_POSITION_NOTIONAL_USDC", "0.01") or 0.01)
         rebuilt_trades: Dict[str, TradeLifecycle] = {}
         for _, row in reconciled_positions_df.iterrows():
-            market = row.get("market") or row.get("market_title") or str(row.get("condition_id") or row.get("token_id") or "unknown_market")
-            outcome_side = row.get("outcome_side") or row.get("side") or "UNKNOWN"
+            market = str(row.get("market") or row.get("market_title") or row.get("condition_id") or row.get("token_id") or "unknown_market").strip()
+            outcome_side = str(row.get("outcome_side") or row.get("side") or "UNKNOWN").strip()
             trade_key = self._compose_trade_key(
                 token_id=row.get("token_id"),
                 condition_id=row.get("condition_id"),

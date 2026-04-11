@@ -11,6 +11,17 @@ logger = logging.getLogger(__name__)
 _MIN_NONZERO_FEATURES = int(os.getenv("MIN_NONZERO_FEATURES", "3") or 3)
 
 
+def _dedupe_feature_names(feature_names):
+    seen = set()
+    out = []
+    for name in feature_names or []:
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+
 def _load_sklearn_supervised():
     """Lazy-import sklearn to avoid import-time failures."""
     import joblib
@@ -152,11 +163,12 @@ class SupervisedTrainer:
         if df.empty:
             return None, None
 
-        candidates = [col for col in self.FEATURE_COLUMNS if col in df.columns]
+        candidates = _dedupe_feature_names([col for col in self.FEATURE_COLUMNS if col in df.columns])
         usable_features, _ = drop_all_nan_features(df, candidates, context="supervised_trainer")
         if not usable_features or "target_up" not in df.columns:
             return None, None
 
+        usable_features = _dedupe_feature_names(usable_features)
         X = df[usable_features].apply(pd.to_numeric, errors="coerce")
         usable_features = [col for col in usable_features if X[col].notna().any()]
         if not usable_features:

@@ -1,0 +1,2 @@
+wallet,label,enabled,min_wallet_score,region_scope,source,approved
+0xweatherwallet,Smoke Wallet,True,0.6,nyc,manual_override_csv,True

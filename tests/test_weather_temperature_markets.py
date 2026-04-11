@@ -1,6 +1,9 @@
 from datetime import datetime, timezone
 
-from weather_temperature_markets import parse_weather_temperature_market_text
+from weather_temperature_markets import (
+    is_weather_temperature_market,
+    parse_weather_temperature_market_text,
+)
 
 
 def test_parse_weather_temperature_threshold_market_in_fahrenheit():
@@ -47,3 +50,22 @@ def test_parse_weather_temperature_threshold_market_in_celsius():
     assert parsed["weather_temp_unit"] == "C"
     assert parsed["weather_lower_c"] == 10.0
     assert parsed["weather_event_date_local"] == "2026-01-28"
+
+
+def test_parse_high_temperature_variation_market():
+    parsed = parse_weather_temperature_market_text(
+        "Will the high temperature in New York's Central Park be 60Â°F or higher on November 15th, 2026?",
+        reference_date=datetime(2026, 11, 1, tzinfo=timezone.utc),
+    )
+
+    assert parsed["market_family"] == "weather_temperature_threshold"
+    assert parsed["weather_parseable"] is True
+    assert parsed["weather_location"] == "New York's Central Park"
+    assert parsed["weather_temp_unit"] == "F"
+
+
+def test_is_weather_temperature_market_accepts_high_temperature_phrase():
+    assert is_weather_temperature_market(
+        {"question": "Will the high temperature in Dallas be 70°F or higher on April 11?"}
+    ) is True
+    assert is_weather_temperature_market({"question": "Who will win the match?"}) is False

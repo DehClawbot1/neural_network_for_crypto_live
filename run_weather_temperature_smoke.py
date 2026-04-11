@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 from strategy_layers import EntryRuleLayer
+from leaderboard_service import PolymarketLeaderboardService
 from weather_temperature_strategy import WeatherTemperatureStrategy
 
 
@@ -151,6 +152,8 @@ def main():
     ]
 
     profile_client = _FakeProfileClient(open_positions=open_positions, closed_positions=closed_positions, trades=trades)
+    leaderboard_service = PolymarketLeaderboardService(logs_dir=str(logs_dir))
+    leaderboard_service.fetch_leaderboard = lambda **kwargs: pd.DataFrame()
     forecast_service = _FakeForecastService(
         open_forecast={
             "weather_country": "United States",
@@ -183,6 +186,7 @@ def main():
         watchlist_path=str(watchlist_path),
         profile_client=profile_client,
         forecast_service=forecast_service,
+        leaderboard_service=leaderboard_service,
     )
 
     signals_df = strategy.build_cycle_signals(markets_df)

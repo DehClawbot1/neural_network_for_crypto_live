@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
+from leaderboard_service import PolymarketLeaderboardService
 from weather_temperature_strategy import WeatherTemperatureStrategy
 
 
@@ -168,11 +169,49 @@ def test_load_watchlist_uses_env_fallback_when_csv_is_empty(tmp_path, monkeypatc
         "WEATHER_APPROVED_WALLETS",
         "0xabc123|1pixel|true|0.72|nyc\n0xdef456|london-pro|true|0.65|london",
     )
-
-    strategy = WeatherTemperatureStrategy(logs_dir=str(tmp_path), watchlist_path=str(watchlist_path))
+    empty_service = PolymarketLeaderboardService(logs_dir=str(tmp_path))
+    empty_service.fetch_leaderboard = lambda **kwargs: pd.DataFrame()
+    strategy = WeatherTemperatureStrategy(
+        logs_dir=str(tmp_path),
+        watchlist_path=str(watchlist_path),
+        leaderboard_service=empty_service,
+    )
     watchlist = strategy.load_watchlist()
 
     assert len(watchlist.index) == 2
     assert set(watchlist["wallet"].astype(str)) == {"0xabc123", "0xdef456"}
     assert round(float(watchlist.loc[watchlist["wallet"] == "0xabc123", "min_wallet_score"].iloc[0]), 2) == 0.72
     assert str(watchlist.loc[watchlist["wallet"] == "0xdef456", "region_scope"].iloc[0]) == "london"
+
+
+def test_load_watchlist_prefers_dynamic_weather_leaderboard_and_keeps_overrides(tmp_path):
+    watchlist_path = tmp_path / "weather_wallet_watchlist.csv"
+    watchlist_path.write_text(
+        "wallet,label,enabled,min_wallet_score,region_scope\n0xmanual,manual,true,0.77,nyc\n",
+        encoding="utf-8",
+    )
+    service = PolymarketLeaderboardService(logs_dir=str(tmp_path))
+    service.fetch_leaderboard = lambda **kwargs: pd.DataFrame(
+        [
+            {
+                "wallet": "0xleader",
+                "label": "leader",
+                "enabled": True,
+                "min_wallet_score": 0.6,
+                "region_scope": "",
+                "approved": True,
+                "source": "leaderboard_api",
+            }
+        ]
+    )
+    strategy = WeatherTemperatureStrategy(
+        logs_dir=str(tmp_path),
+        watchlist_path=str(watchlist_path),
+        leaderboard_service=service,
+    )
+
+    watchlist = strategy.load_watchlist()
+
+    assert set(watchlist["wallet"].astype(str)) == {"0xleader", "0xmanual"}
+    assert "leaderboard_api" in set(watchlist["source"].astype(str))
+    assert "manual_override_csv" in set(watchlist["source"].astype(str))

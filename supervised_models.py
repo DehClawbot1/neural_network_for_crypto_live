@@ -12,6 +12,17 @@ logger = logging.getLogger(__name__)
 _MIN_NONZERO_FEATURES = int(os.getenv("MIN_NONZERO_FEATURES", "3") or 3)
 
 
+def _dedupe_feature_names(feature_names):
+    seen = set()
+    out = []
+    for name in feature_names or []:
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+
 def _load_sklearn_supervised():
     """Lazy-import sklearn to avoid import-time failures."""
     import joblib
@@ -225,11 +236,12 @@ class SupervisedModels:
         if train_df.empty:
             return None
 
-        candidates = [c for c in self.FEATURE_COLUMNS if c in train_df.columns]
+        candidates = _dedupe_feature_names([c for c in self.FEATURE_COLUMNS if c in train_df.columns])
         usable, _ = drop_all_nan_features(train_df, candidates, context="supervised_models")
         if not usable:
             return None
 
+        usable = _dedupe_feature_names(usable)
         X = train_df[usable].apply(pd.to_numeric, errors="coerce")
         usable = [col for col in usable if X[col].notna().any()]
         if not usable:
@@ -246,7 +258,17 @@ class SupervisedModels:
                     clf, clf_meta = self._train_sparse_classifier(X, y_clf)
                 except Exception:
                     clf, clf_meta = self._train_classifier_fallback(X, y_clf)
-                joblib.dump({"model": clf, "features": usable, **clf_meta}, self.classifier_file)
+                joblib.dump(
+                    {
+                        "model": clf,
+                        "features": usable,
+                        "feature_set": "default_tabular",
+                        "scaling": "standard" if not bool(clf_meta.get("fallback_used")) else "none",
+                        "market_family": "btc",
+                        **clf_meta,
+                    },
+                    self.classifier_file,
+                )
 
         if "forward_return_15m" in train_df.columns:
             target_returns = pd.to_numeric(train_df["forward_return_15m"], errors="coerce").fillna(0.0)
@@ -257,7 +279,15 @@ class SupervisedModels:
             except Exception:
                 reg, reg_meta = self._train_regressor_fallback(X, transformed_returns)
             joblib.dump(
-                {"model": reg, "features": usable, "return_calibration": return_calibration, **reg_meta},
+                {
+                    "model": reg,
+                    "features": usable,
+                    "return_calibration": return_calibration,
+                    "feature_set": "default_tabular",
+                    "scaling": "standard" if not bool(reg_meta.get("fallback_used")) else "none",
+                    "market_family": "btc",
+                    **reg_meta,
+                },
                 self.regressor_file,
             )
 

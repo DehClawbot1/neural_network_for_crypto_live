@@ -2,6 +2,17 @@ from __future__ import annotations
 
 from collections import OrderedDict
 
+
+def _dedupe_preserve_order(values):
+    seen = set()
+    out = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
 WALLET_FEATURES = [
     "trader_win_rate",
     "wallet_trade_count_30d",
@@ -207,13 +218,15 @@ TRAINING_FEATURE_FAMILIES = OrderedDict(
     ]
 )
 
-DEFAULT_TABULAR_FEATURE_COLUMNS = [
-    feature
-    for family in TRAINING_FEATURE_FAMILIES.values()
-    for feature in family
-]
+DEFAULT_TABULAR_FEATURE_COLUMNS = _dedupe_preserve_order(
+    [
+        feature
+        for family in TRAINING_FEATURE_FAMILIES.values()
+        for feature in family
+    ]
+)
 
-SEQUENCE_BASE_COLUMNS = [
+SEQUENCE_BASE_COLUMNS = _dedupe_preserve_order([
     "entry_price",
     "wallet_trade_count_30d",
     "wallet_alpha_30d",
@@ -266,4 +279,4 @@ SEQUENCE_BASE_COLUMNS = [
     "spread",
     "current_price",
     "normalized_trade_size",
-]
+])

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 from datetime import datetime, timezone
 
@@ -14,15 +15,17 @@ from token_utils import parse_token_id_list
 logger = logging.getLogger(__name__)
 
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
+_TEMP_DEGREE_RE = r"(?:[^0-9A-Za-z\s]{1,2})?"
+_DASH_RE = r"(?:-|–|to)"
 
 _THRESHOLD_RE = re.compile(
-    r"will\s+the\s+highest\s+temperature\s+in\s+(?P<location>.+?)\s+be\s+"
-    r"(?P<threshold>-?\d+(?:\.\d+)?)\s*[°º]?\s*(?P<unit>[fc])(?:\s+or\s+higher|\+)?\s+on\s+(?P<date>.+?)\??$",
+    rf"will\s+the\s+(?:highest|high|maximum|max(?:imum)?)\s+temperature\s+in\s+(?P<location>.+?)\s+be\s+"
+    rf"(?P<threshold>-?\d+(?:\.\d+)?)\s*{_TEMP_DEGREE_RE}\s*(?P<unit>[fc])(?:\s+or\s+higher|\+)?\s+on\s+(?P<date>.+?)\??$",
     re.IGNORECASE,
 )
 _RANGE_RE = re.compile(
-    r"will\s+the\s+highest\s+temperature\s+in\s+(?P<location>.+?)\s+be\s+between\s+"
-    r"(?P<lower>-?\d+(?:\.\d+)?)\s*(?:-|–|to)\s*(?P<upper>-?\d+(?:\.\d+)?)\s*[°º]?\s*(?P<unit>[fc])\s+on\s+(?P<date>.+?)\??$",
+    rf"will\s+the\s+(?:highest|high|maximum|max(?:imum)?)\s+temperature\s+in\s+(?P<location>.+?)\s+be\s+between\s+"
+    rf"(?P<lower>-?\d+(?:\.\d+)?)\s*{_DASH_RE}\s*(?P<upper>-?\d+(?:\.\d+)?)\s*{_TEMP_DEGREE_RE}\s*(?P<unit>[fc])\s+on\s+(?P<date>.+?)\??$",
     re.IGNORECASE,
 )
 
@@ -91,7 +94,17 @@ def _parse_date_without_year(raw_date, reference_date: datetime | None = None) -
 def is_weather_temperature_market(market: dict | None) -> bool:
     market = market or {}
     question = str(market.get("question") or market.get("title") or "").strip().lower()
-    return "highest temperature" in question
+    if not question:
+        return False
+    return any(
+        phrase in question
+        for phrase in (
+            "highest temperature",
+            "high temperature",
+            "maximum temperature",
+            "max temperature",
+        )
+    )
 
 
 def parse_weather_temperature_market_text(
@@ -243,6 +256,12 @@ def _fetch_page(session: requests.Session, *, closed: bool, limit: int, offset: 
 
 
 def fetch_weather_temperature_markets(limit: int = 500, closed: bool = False, max_offset: int = 0) -> pd.DataFrame:
+    if max_offset is None:
+        try:
+            max_offset = int(os.getenv("WEATHER_MARKETS_MAX_OFFSET", "5000") or 5000)
+        except Exception:
+            max_offset = 5000
+    max_offset = max(0, int(max_offset))
     session = requests.Session()
     offsets = [0]
     if max_offset:
@@ -251,6 +270,7 @@ def fetch_weather_temperature_markets(limit: int = 500, closed: bool = False, ma
 
     rows = []
     seen_ids = set()
+    scanned_markets = 0
     for offset in offsets:
         try:
             markets = _fetch_page(session, closed=closed, limit=limit, offset=offset)
@@ -259,6 +279,7 @@ def fetch_weather_temperature_markets(limit: int = 500, closed: bool = False, ma
             break
         if not markets:
             break
+        scanned_markets += len(markets)
         for market in markets:
             if not is_weather_temperature_market(market):
                 continue
@@ -269,8 +290,15 @@ def fetch_weather_temperature_markets(limit: int = 500, closed: bool = False, ma
             if market_id:
                 seen_ids.add(market_id)
             rows.append(row)
+
     frame = pd.DataFrame(rows)
     if not frame.empty and "market_id" in frame.columns:
         frame = frame.drop_duplicates(subset=["market_id"], keep="last")
-    logger.info("Fetched %s weather temperature markets (closed=%s).", len(frame), closed)
+    logger.info(
+        "Fetched %s weather temperature markets (closed=%s, scanned=%s Gamma markets, max_offset=%s).",
+        len(frame),
+        closed,
+        scanned_markets,
+        max_offset,
+    )
     return frame

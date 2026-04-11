@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from leaderboard_service import PolymarketLeaderboardService
 from polymarket_profile_client import PolymarketProfileClient
 from weather_temperature_forecast import WeatherForecastService
 from weather_temperature_guard import weather_city_date_cluster_key
@@ -66,6 +67,7 @@ class WeatherTemperatureStrategy:
         watchlist_path: str | None = None,
         profile_client: PolymarketProfileClient | None = None,
         forecast_service: WeatherForecastService | None = None,
+        leaderboard_service: PolymarketLeaderboardService | None = None,
     ):
         self.logs_dir = Path(logs_dir)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -74,6 +76,7 @@ class WeatherTemperatureStrategy:
         )
         self.profile_client = profile_client or PolymarketProfileClient(timeout=20)
         self.forecast_service = forecast_service or WeatherForecastService(timeout=20)
+        self.leaderboard_service = leaderboard_service or PolymarketLeaderboardService(logs_dir=str(self.logs_dir))
         self.snapshot_file = self.logs_dir / "weather_wallet_state_snapshot.csv"
         self.position_epsilon = max(0.001, float(os.getenv("WEATHER_POSITION_EPS", "0.5") or 0.5))
         self.sharp_reduce_threshold = max(0.05, float(os.getenv("SOURCE_WALLET_SHARP_REDUCE_THRESHOLD", "0.55") or 0.55))
@@ -136,10 +139,45 @@ class WeatherTemperatureStrategy:
 
         env_watchlist = self._watchlist_rows_from_env()
         if not env_watchlist.empty:
-            if watchlist.empty:
-                watchlist = env_watchlist.copy()
+            env_watchlist = env_watchlist.copy()
+            env_watchlist["source"] = "manual_override_env"
+        if not watchlist.empty:
+            watchlist = watchlist.copy()
+            watchlist["source"] = "manual_override_csv"
+        override_rows = pd.concat(
+            [frame for frame in (watchlist, env_watchlist) if frame is not None and not frame.empty],
+            ignore_index=True,
+            sort=False,
+        ) if (not watchlist.empty or not env_watchlist.empty) else pd.DataFrame(columns=columns + ["source"])
+
+        dynamic_enabled = str(os.getenv("WEATHER_USE_DYNAMIC_LEADERBOARD", "true")).strip().lower() in {"1", "true", "yes", "on"}
+        dynamic_rows = pd.DataFrame()
+        if dynamic_enabled:
+            dynamic_limit = max(10, int(os.getenv("WEATHER_LEADERBOARD_LIMIT", "100") or 100))
+            dynamic_rows = self.leaderboard_service.fetch_leaderboard(
+                category="WEATHER",
+                limit=dynamic_limit,
+                time_period="WEEK",
+                order_by="PNL",
+            )
+            if not dynamic_rows.empty:
+                dynamic_rows = dynamic_rows.copy()
+                dynamic_rows["enabled"] = True
+                dynamic_rows["approved"] = True
+                dynamic_rows["min_wallet_score"] = pd.to_numeric(
+                    dynamic_rows.get("min_wallet_score"),
+                    errors="coerce",
+                ).fillna(self.min_wallet_score)
+                dynamic_rows["region_scope"] = dynamic_rows.get("region_scope", pd.Series("", index=dynamic_rows.index)).fillna("")
             else:
-                watchlist = pd.concat([watchlist, env_watchlist], ignore_index=True, sort=False)
+                logger.info("Weather leaderboard returned no wallets; falling back to manual weather overrides only.")
+
+        merged_watchlist = self.leaderboard_service.merge_with_overrides(
+            category="WEATHER",
+            dynamic_rows=dynamic_rows,
+            override_rows=override_rows,
+        )
+        watchlist = merged_watchlist.copy()
 
         for field, default in (
             ("wallet", ""),
@@ -147,6 +185,7 @@ class WeatherTemperatureStrategy:
             ("enabled", True),
             ("min_wallet_score", self.min_wallet_score),
             ("region_scope", ""),
+            ("source", "leaderboard_api"),
         ):
             if field not in watchlist.columns:
                 watchlist[field] = default
@@ -161,10 +200,19 @@ class WeatherTemperatureStrategy:
         watchlist["wallet"] = watchlist["wallet"].map(_normalize_wallet)
         watchlist["min_wallet_score"] = pd.to_numeric(watchlist["min_wallet_score"], errors="coerce").fillna(self.min_wallet_score)
         watchlist = watchlist[watchlist["wallet"].astype(str).str.len() > 0].drop_duplicates(subset=["wallet"], keep="last")
+        if dynamic_enabled:
+            dynamic_count = int(len(dynamic_rows.index))
+            override_count = int(len(override_rows.index))
+            logger.info(
+                "Weather wallet source loaded %s live leaderboard wallets and %s manual overrides (%s effective wallets).",
+                dynamic_count,
+                override_count,
+                int(len(watchlist.index)),
+            )
         return watchlist.reset_index(drop=True)
 
     def fetch_markets(self) -> pd.DataFrame:
-        return fetch_weather_temperature_markets(limit=500, closed=False, max_offset=0)
+        return fetch_weather_temperature_markets(limit=500, closed=False, max_offset=None)
 
     def _safe_profile_call(self, method_name: str, **kwargs):
         method = getattr(self.profile_client, method_name, None)
@@ -372,6 +420,7 @@ class WeatherTemperatureStrategy:
                         **skill,
                         "wallet_label": watch_row.get("label"),
                         "wallet_watchlist_approved": True,
+                        "wallet_source": watch_row.get("source", "leaderboard_api"),
                         "wallet_region_scope": watch_row.get("region_scope"),
                         "min_wallet_score": watch_row.get("min_wallet_score"),
                         "source_wallet_reference_ts": reference_ts,

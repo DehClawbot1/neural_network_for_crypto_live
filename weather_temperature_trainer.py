@@ -143,6 +143,10 @@ class WeatherTemperatureTrainer:
                 "model": model,
                 "features": usable_features,
                 "market_family": "weather_temperature",
+                "model_kind": "weather_temperature_centroid",
+                "feature_set": "weather_temperature_hybrid",
+                "scaling": "median_fill_only",
+                "regularization": "centroid_distance",
             },
             self.model_file,
         )
