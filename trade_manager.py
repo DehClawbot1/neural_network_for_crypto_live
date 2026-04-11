@@ -21,6 +21,21 @@ from config import TradingConfig
 logger = logging.getLogger(__name__)
 
 
+def _safe_int(value, default=0) -> int:
+    try:
+        if pd.isna(value):
+            return int(default)
+    except Exception:
+        pass
+    try:
+        num = float(value)
+    except Exception:
+        return int(default)
+    if not np.isfinite(num):
+        return int(default)
+    return int(num)
+
+
 class TradeManager:
     """
     Manages a collection of TradeLifecycle instances, acting as the central
@@ -92,7 +107,10 @@ class TradeManager:
             snapshot.get("wallet_quality_score", trade.source_wallet_quality_score) or trade.source_wallet_quality_score or 0.0
         )
         trade.entry_btc_trend_bias = str(snapshot.get("btc_trend_bias", trade.entry_btc_trend_bias or "NEUTRAL") or "NEUTRAL")
-        trade.entry_btc_predicted_direction = int(snapshot.get("btc_predicted_direction", trade.entry_btc_predicted_direction) or trade.entry_btc_predicted_direction or 0)
+        trade.entry_btc_predicted_direction = _safe_int(
+            snapshot.get("btc_predicted_direction", trade.entry_btc_predicted_direction),
+            trade.entry_btc_predicted_direction or 0,
+        )
         trade.entry_btc_predicted_return = float(
             snapshot.get("btc_predicted_return_15", trade.entry_btc_predicted_return) or trade.entry_btc_predicted_return or 0.0
         )
@@ -109,7 +127,10 @@ class TradeManager:
         trade.entry_fractal_trigger_direction = str(snapshot.get("fractal_trigger_direction", trade.entry_fractal_trigger_direction or "NEUTRAL") or "NEUTRAL")
         trade.entry_model_family = str(snapshot.get("entry_model_family", trade.entry_model_family or "") or "")
         trade.entry_model_version = str(snapshot.get("entry_model_version", trade.entry_model_version or "") or "")
-        trade.performance_governor_level = int(snapshot.get("performance_governor_level", trade.performance_governor_level) or trade.performance_governor_level or 0)
+        trade.performance_governor_level = _safe_int(
+            snapshot.get("performance_governor_level", trade.performance_governor_level),
+            trade.performance_governor_level or 0,
+        )
         trade.market_family = str(snapshot.get("market_family", trade.market_family or "other") or "other")
         trade.brain_id = str(snapshot.get("brain_id", trade.brain_id or "") or "")
         trade.active_model_group = str(snapshot.get("active_model_group", trade.active_model_group or "") or "")
@@ -728,12 +749,12 @@ class TradeManager:
             getattr(rebuilt_trade, "entry_signal_snapshot_json", None)
             or getattr(existing_trade, "entry_signal_snapshot_json", "")
         )
-        existing_trade.entry_signal_snapshot_feature_count = int(
+        existing_trade.entry_signal_snapshot_feature_count = _safe_int(
             getattr(rebuilt_trade, "entry_signal_snapshot_feature_count", 0)
             or getattr(existing_trade, "entry_signal_snapshot_feature_count", 0)
             or 0
         )
-        existing_trade.entry_signal_snapshot_version = int(
+        existing_trade.entry_signal_snapshot_version = _safe_int(
             getattr(rebuilt_trade, "entry_signal_snapshot_version", 1)
             or getattr(existing_trade, "entry_signal_snapshot_version", 1)
             or 1
@@ -1012,8 +1033,8 @@ class TradeManager:
                     row.get("confidence_at_entry"),
                     row.get("signal_label"),
                     row.get("entry_signal_snapshot_json"),
-                    int(row.get("entry_signal_snapshot_feature_count", 0) or 0),
-                    int(row.get("entry_signal_snapshot_version", 1) or 1),
+            _safe_int(row.get("entry_signal_snapshot_feature_count", 0), 0),
+            _safe_int(row.get("entry_signal_snapshot_version", 1), 1),
                     row.get("close_reason"),
                     row.get("exit_price"),
                     row.get("close_fingerprint"),
@@ -1021,7 +1042,7 @@ class TradeManager:
                     row.get("lifecycle_source"),
                     row.get("entry_model_family"),
                     row.get("entry_model_version"),
-                    int(row.get("performance_governor_level", 0) or 0),
+            _safe_int(row.get("performance_governor_level", 0), 0),
                     row.get("market_family"),
                     row.get("brain_id"),
                     row.get("active_model_group"),
@@ -1402,8 +1423,8 @@ class TradeManager:
             trade.realized_pnl = float(row.get("realized_pnl", 0.0) or 0.0)
             trade.unrealized_pnl = float(row.get("unrealized_pnl", 0.0) or 0.0)
             trade.entry_signal_snapshot_json = str(row.get("entry_signal_snapshot_json", "") or "")
-            trade.entry_signal_snapshot_feature_count = int(row.get("entry_signal_snapshot_feature_count", 0) or 0)
-            trade.entry_signal_snapshot_version = int(row.get("entry_signal_snapshot_version", 1) or 1)
+            trade.entry_signal_snapshot_feature_count = _safe_int(row.get("entry_signal_snapshot_feature_count", 0), 0)
+            trade.entry_signal_snapshot_version = _safe_int(row.get("entry_signal_snapshot_version", 1), 1)
             for key, value in row.items():
                 if str(key).startswith(("weather_", "forecast_")):
                     setattr(trade, key, value)

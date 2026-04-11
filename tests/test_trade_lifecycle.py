@@ -52,6 +52,19 @@ class TestTradeLifecycle(unittest.TestCase):
         self.assertEqual(snapshot["reddit_sentiment"], -0.21)
         self.assertEqual(snapshot["open_positions_count"], 3)
 
+    def test_on_signal_handles_nan_integer_like_fields(self):
+        tl = TradeLifecycle(market="BTC Test", token_id="1", condition_id="abc", outcome_side="YES")
+        tl.on_signal(
+            {
+                "market": "BTC Test",
+                "btc_predicted_direction": float("nan"),
+                "performance_governor_level": float("nan"),
+            }
+        )
+
+        self.assertEqual(tl.entry_btc_predicted_direction, 0)
+        self.assertEqual(tl.performance_governor_level, 0)
+
 
     def test_trade_lifecycle_dict_contains_expected_fields(self):
         tl = TradeLifecycle(market="BTC Test", token_id="1", condition_id="abc", outcome_side="YES")

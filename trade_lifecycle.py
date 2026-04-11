@@ -51,6 +51,21 @@ def _json_safe_value(value):
     return value
 
 
+def _safe_int(value, default=0) -> int:
+    try:
+        if pd.isna(value):
+            return int(default)
+    except Exception:
+        pass
+    try:
+        num = float(value)
+    except Exception:
+        return int(default)
+    if math.isnan(num) or math.isinf(num):
+        return int(default)
+    return int(num)
+
+
 def serialize_signal_snapshot(signal_row: dict) -> tuple[str, int]:
     normalized = {str(key): _json_safe_value(value) for key, value in dict(signal_row or {}).items()}
     return json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True), len(normalized)
@@ -164,7 +179,7 @@ class TradeLifecycle:
         self.source_wallet_position_event = str(normalized_signal_row.get("source_wallet_position_event", "") or "")
         self.source_wallet_quality_score = float(normalized_signal_row.get("wallet_quality_score", 0.0) or 0.0)
         self.entry_btc_trend_bias = str(normalized_signal_row.get("btc_trend_bias", "NEUTRAL") or "NEUTRAL")
-        self.entry_btc_predicted_direction = int(normalized_signal_row.get("btc_predicted_direction", 0) or 0)
+        self.entry_btc_predicted_direction = _safe_int(normalized_signal_row.get("btc_predicted_direction", 0), 0)
         self.entry_btc_predicted_return = float(normalized_signal_row.get("btc_predicted_return_15", 0.0) or 0.0)
         self.entry_btc_forecast_confidence = float(normalized_signal_row.get("btc_forecast_confidence", 0.0) or 0.0)
         self.entry_btc_price = float(normalized_signal_row.get("btc_live_price", 0.0) or 0.0)
@@ -177,7 +192,7 @@ class TradeLifecycle:
         self.entry_fractal_trigger_direction = str(normalized_signal_row.get("fractal_trigger_direction", "NEUTRAL") or "NEUTRAL")
         self.entry_model_family = str(normalized_signal_row.get("entry_model_family", "") or "")
         self.entry_model_version = str(normalized_signal_row.get("entry_model_version", "") or "")
-        self.performance_governor_level = int(normalized_signal_row.get("performance_governor_level", 0) or 0)
+        self.performance_governor_level = _safe_int(normalized_signal_row.get("performance_governor_level", 0), 0)
         quality_context = build_quality_context(normalized_signal_row)
         self.market_family = str(normalized_signal_row.get("market_family", quality_context.get("market_family", "other")) or "other")
         self.brain_id = str(normalized_signal_row.get("brain_id", self.brain_id or "") or "")
@@ -243,7 +258,7 @@ class TradeLifecycle:
             if minutes_open <= 10 and return_pct <= -0.02:
                 previous_mae = float(getattr(self, "_last_fast_adverse_recorded_mae", 0.0) or 0.0)
                 if return_pct < previous_mae - 1e-9:
-                    self.fast_adverse_move_count = int(getattr(self, "fast_adverse_move_count", 0) or 0) + 1
+                    self.fast_adverse_move_count = _safe_int(getattr(self, "fast_adverse_move_count", 0), 0) + 1
                     self.last_fast_adverse_move_at = now_dt.isoformat()
                     self._last_fast_adverse_recorded_mae = return_pct
         if self.state in [TradeState.ENTERED, TradeState.PARTIAL_EXIT]:

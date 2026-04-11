@@ -500,6 +500,21 @@ def _safe_float(value, default=0.0):
     return num
 
 
+def _safe_int(value, default=0) -> int:
+    try:
+        if pd.isna(value):
+            return int(default)
+    except Exception:
+        pass
+    try:
+        num = float(value)
+    except Exception:
+        return int(default)
+    if not np.isfinite(num):
+        return int(default)
+    return int(num)
+
+
 def _frame_column_as_series(frame: pd.DataFrame, column_name: str, default_value=np.nan) -> pd.Series:
     if frame is None or frame.empty:
         return pd.Series(dtype=object)
@@ -881,14 +896,14 @@ def choose_action(
         try:
             _av = entry_brain.predict(signal_row)
             if _av is not None:
-                action_val = int(_av)
+                action_val = _safe_int(_av, 0)
         except Exception:
             pass
     if action_val == 0 and legacy_brain is not None:
         try:
             obs = prepare_observation(signal_row)
             action, _ = legacy_brain.predict(obs, deterministic=True)
-            action_val = int(action.item() if hasattr(action, "item") else action[0])
+            action_val = _safe_int(action.item() if hasattr(action, "item") else action[0], 0)
         except Exception:
             pass
 
@@ -1179,7 +1194,7 @@ def choose_cycle_sleep_interval(
     idle_poll_seconds: float,
     entry_freeze_poll_seconds: float,
 ) -> tuple[float, str]:
-    if int(open_positions_count or 0) > 0:
+    if _safe_int(open_positions_count, 0) > 0:
         return max(1.0, float(active_position_poll_seconds)), "fast-polling active trades"
     if bool(entry_freeze_active):
         return max(1.0, float(entry_freeze_poll_seconds)), "entry freeze active; rechecking soon"
@@ -1193,13 +1208,13 @@ def performance_governor_top_signal_decision(governor_state: dict, consumed_coun
     """
     if not bool((governor_state or {}).get("top_signal_only")):
         return True
-    return int(consumed_count or 0) <= 0
+    return _safe_int(consumed_count, 0) <= 0
 
 
 def performance_governor_consume_top_signal_slot(governor_state: dict, consumed_count: int) -> int:
     if not bool((governor_state or {}).get("top_signal_only")):
-        return int(consumed_count or 0)
-    return int(consumed_count or 0) + 1
+        return _safe_int(consumed_count, 0)
+    return _safe_int(consumed_count, 0) + 1
 
 _shutdown_requested = False
 
@@ -2187,7 +2202,7 @@ def main_loop():
 
         # --- Side selection: BTC forecast → leaderboard consensus → price fallback ---
         btc_ctx = btc_context or {}
-        btc_direction = int(btc_ctx.get("btc_predicted_direction", 0) or 0)
+        btc_direction = _safe_int(btc_ctx.get("btc_predicted_direction", 0), 0)
         btc_confidence = float(btc_ctx.get("btc_forecast_confidence", 0.0) or 0.0)
         btc_ready = bool(btc_ctx.get("btc_forecast_ready", False))
         leaderboard_consensus = compute_leaderboard_consensus(out_signals)
@@ -2581,13 +2596,18 @@ def main_loop():
                     else:
                         logging.debug("macro_context key %r has non-scalar type %s — skipped for signal injection.", _mk, type(_mv).__name__)
                 if _safe_ctx:
+                    _ctx_assignments = {}
                     for _ctx_key, _ctx_value in _safe_ctx.items():
                         if _ctx_key in signals_df.columns:
                             _existing = _frame_column_as_series(signals_df, _ctx_key, np.nan)
-                            signals_df = signals_df.loc[:, signals_df.columns != _ctx_key].copy()
-                            signals_df[_ctx_key] = _existing.fillna(_ctx_value)
+                            _ctx_assignments[_ctx_key] = _existing.fillna(_ctx_value)
                         else:
-                            signals_df[_ctx_key] = _ctx_value
+                            _ctx_assignments[_ctx_key] = pd.Series([_ctx_value] * len(signals_df), index=signals_df.index)
+                    _ctx_frame = pd.DataFrame(_ctx_assignments, index=signals_df.index)
+                    signals_df = pd.concat(
+                        [signals_df.drop(columns=list(_ctx_frame.columns), errors="ignore"), _ctx_frame],
+                        axis=1,
+                    ).copy()
             # --------------------------------------------------
             
             if always_on_enabled and always_on_only and signals_df is not None and not signals_df.empty:
@@ -3187,7 +3207,7 @@ def main_loop():
 
             cadence_boost_blockers = []
             if cadence_boost_active:
-                governor_level = int(governor_state.get("governor_level", 0) or 0)
+                governor_level = _safe_int(governor_state.get("governor_level", 0), 0)
                 min_profit_factor_for_boost = float(os.getenv("ENTRY_CADENCE_MIN_PROFIT_FACTOR", "1.0") or 1.0)
                 if governor_level > 0:
                     cadence_boost_blockers.append(f"governor_level={governor_level}")
@@ -3451,7 +3471,7 @@ def main_loop():
                 status = str((exit_result or {}).get("status", "unknown") or "unknown")
                 trade.actual_execution_path = f"live_exit_{status}"
                 trade.exit_fill_latency_seconds = float((exit_result or {}).get("elapsed_seconds", 0.0) or 0.0)
-                trade.exit_cancel_count = int((exit_result or {}).get("cancel_count", 0) or 0)
+                trade.exit_cancel_count = _safe_int((exit_result or {}).get("cancel_count", 0), 0)
                 trade.exit_partial_fill_ratio = float((exit_result or {}).get("partial_fill_ratio", 0.0) or 0.0)
                 trade.exit_realized_slippage_bps = float((exit_result or {}).get("slippage_bps", 0.0) or 0.0)
 
@@ -3663,7 +3683,7 @@ def main_loop():
                     "created_at": datetime.now(timezone.utc).isoformat(),
                 }
                 detail_payload = dict(extra or {})
-                detail_payload.setdefault("performance_governor_level", int(governor_state.get("governor_level", 0) or 0))
+                detail_payload.setdefault("performance_governor_level", _safe_int(governor_state.get("governor_level", 0), 0))
                 detail_payload.setdefault("performance_governor_reason", governor_state.get("reason", ""))
                 detail_payload.setdefault(
                     "entry_model_version",
@@ -4143,7 +4163,7 @@ def main_loop():
                     confidence = _safe_float(signal_row.get("confidence", 0.0), default=0.0)
                     signal_market_family = str(signal_row.get("market_family", "") or "btc")
                     signal_runtime_identity = _runtime_identity_from_row(signal_row)
-                    signal_row["performance_governor_level"] = int(governor_state.get("governor_level", 0) or 0)
+                    signal_row["performance_governor_level"] = _safe_int(governor_state.get("governor_level", 0), 0)
                     signal_row["entry_model_family"] = str(
                         signal_row.get("entry_model_family")
                         or ("weather_temperature_hybrid" if signal_market_family.startswith("weather_temperature") else "runtime_live_stack")
@@ -4226,7 +4246,7 @@ def main_loop():
                             "performance_governor_min_confidence",
                             gate="performance_governor",
                             model_action=action_map.get(action_val, "UNKNOWN"),
-                            governor_level=int(governor_state.get("governor_level", 0) or 0),
+                                governor_level=_safe_int(governor_state.get("governor_level", 0), 0),
                             required_confidence=round(governor_min_conf, 4),
                         )
                         continue
@@ -4251,7 +4271,7 @@ def main_loop():
                             "performance_governor_top_signal_only",
                             gate="performance_governor",
                             model_action=action_map.get(action_val, "UNKNOWN"),
-                            governor_level=int(governor_state.get("governor_level", 0) or 0),
+                        governor_level=_safe_int(governor_state.get("governor_level", 0), 0),
                         )
                         continue
 
@@ -4710,7 +4730,7 @@ def main_loop():
                         else:
                             obs = prepare_position_observation(pos_dict)
                             pos_action, _ = legacy_brain.predict(obs, deterministic=True)
-                            pos_action_val = int(pos_action.item() if hasattr(pos_action, "item") else pos_action[0])
+                            pos_action_val = _safe_int(pos_action.item() if hasattr(pos_action, "item") else pos_action[0], 0)
                     except Exception as e:
                         logging.warning("Position brain prediction failed for %s: %s. Defaulting to HOLD.", token_id, e)
                         pos_action_val = 3 # HOLD
