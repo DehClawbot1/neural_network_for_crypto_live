@@ -854,8 +854,10 @@ class WeatherTemperatureStrategy:
                 )
             )
 
+            confidence = 0.0
             if entry_intent == "CLOSE_LONG":
                 model_confidence = max(0.70, (direction_conf * 0.6) + 0.30)
+                confidence = model_confidence
                 signal_label = "WEATHER_SOURCE_EXIT"
                 reason = f"weather_exit event={raw.get('source_wallet_position_event')} confidence={model_confidence:.2f}"
                 action_code = 2

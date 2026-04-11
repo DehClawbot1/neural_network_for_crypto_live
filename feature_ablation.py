@@ -93,6 +93,28 @@ class FeatureAblationReporter:
                 merged = merged.rename(columns={target_column: column})
         return merged
 
+    def _numeric_feature_frame(self, df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
+        numeric_cols: dict[str, pd.Series] = {}
+        truthy = {"1", "true", "yes", "on"}
+        falsy = {"0", "false", "no", "off", ""}
+        for feature in features:
+            if feature not in df.columns:
+                continue
+            series = df[feature]
+            if pd.api.types.is_bool_dtype(series):
+                numeric_cols[feature] = series.astype(float)
+                continue
+            if pd.api.types.is_numeric_dtype(series):
+                numeric_cols[feature] = pd.to_numeric(series, errors="coerce")
+                continue
+            text = series.astype(str).str.strip().str.lower()
+            bool_like = text.isin(truthy | falsy)
+            if bool_like.all():
+                numeric_cols[feature] = text.map(lambda value: 1.0 if value in truthy else 0.0)
+            else:
+                numeric_cols[feature] = pd.to_numeric(series, errors="coerce")
+        return pd.DataFrame(numeric_cols, index=df.index)
+
     def _evaluate_feature_set(self, train_df: pd.DataFrame, test_df: pd.DataFrame, candidates: list[str]) -> dict | None:
         usable, dropped_all_nan = drop_all_nan_features(train_df, candidates, context="feature_ablation")
         if not usable:
@@ -104,17 +126,19 @@ class FeatureAblationReporter:
             "dropped_all_nan_json": str(dropped_all_nan),
         }
         from sklearn.metrics import accuracy_score, mean_squared_error
+        train_x = self._numeric_feature_frame(train_df, usable)
+        test_x = self._numeric_feature_frame(test_df, usable)
 
         if "target_up" in train_df.columns and "target_up" in test_df.columns:
             clf = self._build_classifier()
-            clf.fit(train_df[usable], train_df["target_up"].fillna(0).astype(int))
-            preds = clf.predict(test_df[usable])
+            clf.fit(train_x, train_df["target_up"].fillna(0).astype(int))
+            preds = clf.predict(test_x)
             result["accuracy"] = float(accuracy_score(test_df["target_up"].fillna(0).astype(int), preds))
 
         if "forward_return_15m" in train_df.columns and "forward_return_15m" in test_df.columns:
             reg = self._build_regressor()
-            reg.fit(train_df[usable], pd.to_numeric(train_df["forward_return_15m"], errors="coerce").fillna(0.0))
-            pred = reg.predict(test_df[usable])
+            reg.fit(train_x, pd.to_numeric(train_df["forward_return_15m"], errors="coerce").fillna(0.0))
+            pred = reg.predict(test_x)
             actual = pd.to_numeric(test_df["forward_return_15m"], errors="coerce").fillna(0.0)
             result["return_rmse"] = float(mean_squared_error(actual, pred) ** 0.5)
 

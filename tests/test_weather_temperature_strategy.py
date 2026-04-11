@@ -164,6 +164,51 @@ def test_score_candidates_uses_profitability_first_score_for_weather_ranking(tmp
     assert row["signal_label"] != "IGNORE"
 
 
+def test_score_candidates_close_long_initializes_confidence(tmp_path):
+    strategy = WeatherTemperatureStrategy(logs_dir=str(tmp_path))
+    signals_df = pd.DataFrame(
+        [
+            {
+                "timestamp": "2026-03-09T12:00:00+00:00",
+                "market_title": "Will the highest temperature in Jakarta be 30C on April 12?",
+                "market_slug": "jakarta-30c",
+                "condition_id": "cond-jkt",
+                "token_id": "tok-jkt",
+                "entry_intent": "CLOSE_LONG",
+                "outcome_side": "YES",
+                "market_family": "weather_temperature_threshold",
+                "weather_question_type": "threshold",
+                "weather_parseable": True,
+                "forecast_ready": True,
+                "forecast_stale": False,
+                "forecast_p_hit_interval": 0.55,
+                "weather_market_probability": 0.44,
+                "wallet_quality_score": 0.60,
+                "source_wallet_direction_confidence": 0.59,
+                "wallet_agreement_score": 0.60,
+                "source_wallet_size_delta_ratio": 0.05,
+                "wallet_state_gate_pass": True,
+                "liquidity": 12000.0,
+                "volume": 4000.0,
+                "liquidity_score": 0.30,
+                "best_bid": 0.43,
+                "best_ask": 0.45,
+                "current_price": 0.44,
+                "end_date": "2026-04-12T23:59:00+00:00",
+                "source_wallet_position_event": "TRIM_EXIT",
+            }
+        ]
+    )
+
+    scored = strategy.score_candidates(signals_df)
+
+    assert len(scored) == 1
+    row = scored.iloc[0]
+    assert row["recommended_action"] == "CLOSE_LONG"
+    assert row["signal_label"] == "WEATHER_SOURCE_EXIT"
+    assert float(row["confidence"]) >= 0.70
+
+
 def test_apply_active_exit_rules_closes_weather_trade_when_forecast_turns_stale(tmp_path):
     strategy = WeatherTemperatureStrategy(logs_dir=str(tmp_path))
     strategy.forecast_service.fetch_market_forecast = lambda row: {
