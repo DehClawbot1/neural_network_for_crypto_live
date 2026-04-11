@@ -29,6 +29,27 @@ def test_prediction_layer_uses_probability_when_profitability_is_absent():
     assert score == 0.58
 
 
+def test_prediction_layer_weather_uses_forecast_edge_and_fair_value_gap():
+    components = PredictionLayer.select_signal_components(
+        {
+            "market_family": "weather_temperature_threshold",
+            "confidence": 0.34,
+            "forecast_p_hit_interval": 0.66,
+            "weather_fair_probability_side": 0.71,
+            "weather_market_probability": 0.52,
+            "weather_forecast_edge": 0.19,
+            "weather_forecast_margin_score": 0.73,
+            "weather_forecast_stability_score": 0.81,
+            "entry_ev": 0.09,
+        }
+    )
+
+    assert components["probability_signal"] >= 0.66
+    assert components["profitability_signal"] > 0.0
+    assert components["market_inefficiency_signal"] > 0.0
+    assert components["score"] > 0.60
+
+
 def test_entry_rule_allows_trade_when_trend_regime_confirms_direction():
     layer = EntryRuleLayer(min_score=0.25, max_spread=0.20, min_liquidity=5, min_liquidity_score=0.05)
     result = layer.evaluate(
@@ -154,3 +175,31 @@ def test_entry_rule_tightens_when_open_portfolio_is_underwater():
     assert stressed["allow"] is False
     assert stressed["portfolio_pressure_penalty"] > 0.0
     assert stressed["score_threshold"] > baseline["score_threshold"]
+
+
+def test_weather_entry_rule_exposes_profitability_first_components():
+    layer = EntryRuleLayer(min_score=0.25, max_spread=0.20, min_liquidity=5, min_liquidity_score=0.05)
+    result = layer.evaluate(
+        {
+            "market_family": "weather_temperature_threshold",
+            "confidence": 0.33,
+            "forecast_p_hit_interval": 0.69,
+            "weather_fair_probability_side": 0.74,
+            "weather_market_probability": 0.51,
+            "weather_forecast_edge": 0.23,
+            "weather_forecast_margin_score": 0.65,
+            "weather_forecast_stability_score": 0.80,
+            "weather_parseable": True,
+            "forecast_ready": True,
+            "forecast_stale": False,
+            "weather_forecast_confirms_direction": True,
+            "wallet_state_gate_pass": True,
+            "liquidity_score": 0.60,
+            "spread": 0.03,
+        }
+    )
+
+    assert result["allow"] is True
+    assert result["decision_probability_signal"] >= 0.69
+    assert result["decision_profitability_signal"] > 0.0
+    assert result["decision_market_inefficiency_signal"] > 0.0

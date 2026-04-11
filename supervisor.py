@@ -5212,6 +5212,7 @@ def main_loop():
                 "(Memory state is completely preserved).",
                 e,
                 error_backoff_seconds,
+                exc_info=True,
             )
             if _sleep_until_shutdown_or_timeout(max(1.0, error_backoff_seconds)):
                 break

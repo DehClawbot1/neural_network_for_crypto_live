@@ -156,6 +156,50 @@ class ContractTargetBuilder:
                 ]
                 live_view = btc_live_df[live_cols].sort_values(ts_col).rename(columns={ts_col: "timestamp"})
                 signals_df = _safe_merge_asof(signals_df, live_view, on="timestamp", direction="backward")
+
+        # Synthetic live feature backfill when btc_live_snapshot.csv is empty
+        if btc_live_df.empty and "btc_price" in signals_df.columns:
+            _bp = pd.to_numeric(signals_df.get("btc_price"), errors="coerce")
+            for _pc in ["btc_live_price", "btc_live_spot_price", "btc_live_index_price",
+                        "btc_live_mark_price", "btc_live_price_kalman", "btc_live_spot_price_kalman",
+                        "btc_live_index_price_kalman", "btc_live_mark_price_kalman"]:
+                if _pc not in signals_df.columns:
+                    signals_df[_pc] = _bp
+            _rmap = {"btc_live_return_5m": "btc_spot_return_5m", "btc_live_return_15m": "btc_spot_return_15m"}
+            for _lc, _sc in _rmap.items():
+                if _lc not in signals_df.columns and _sc in signals_df.columns:
+                    signals_df[_lc] = pd.to_numeric(signals_df[_sc], errors="coerce")
+            for _sf in ["5m", "15m"]:
+                _raw, _kal = f"btc_live_return_{_sf}", f"btc_live_return_{_sf}_kalman"
+                if _kal not in signals_df.columns and _raw in signals_df.columns:
+                    signals_df[_kal] = signals_df[_raw]
+            if "btc_live_return_1m" not in signals_df.columns and "btc_live_return_5m" in signals_df.columns:
+                signals_df["btc_live_return_1m"] = signals_df["btc_live_return_5m"] / 5.0
+                signals_df["btc_live_return_1m_kalman"] = signals_df["btc_live_return_1m"]
+            if "btc_live_return_1h" not in signals_df.columns and "btc_live_return_15m" in signals_df.columns:
+                signals_df["btc_live_return_1h"] = signals_df["btc_live_return_15m"] * 4.0
+                signals_df["btc_live_return_1h_kalman"] = signals_df["btc_live_return_1h"]
+            if "btc_live_volatility_proxy" not in signals_df.columns and "btc_realized_vol_15m" in signals_df.columns:
+                signals_df["btc_live_volatility_proxy"] = pd.to_numeric(signals_df["btc_realized_vol_15m"], errors="coerce")
+            for _bc in ["btc_live_source_divergence_bps", "btc_live_spot_index_basis_bps",
+                        "btc_live_mark_index_basis_bps", "btc_live_mark_spot_basis_bps",
+                        "btc_live_spot_index_basis_bps_kalman", "btc_live_mark_index_basis_bps_kalman",
+                        "btc_live_mark_spot_basis_bps_kalman"]:
+                if _bc not in signals_df.columns:
+                    signals_df[_bc] = 0.0
+            if "btc_live_source_quality_score" not in signals_df.columns:
+                signals_df["btc_live_source_quality_score"] = 0.5
+            if "btc_live_funding_rate" not in signals_df.columns:
+                signals_df["btc_live_funding_rate"] = 0.0
+            _rc = [c for c in signals_df.columns if c.startswith("btc_live_return_") and "kalman" not in c]
+            if "btc_live_confluence" not in signals_df.columns and _rc:
+                signals_df["btc_live_confluence"] = signals_df[_rc].mean(axis=1).fillna(0.0)
+                signals_df["btc_live_confluence_kalman"] = signals_df["btc_live_confluence"]
+            for _fc in ["btc_live_index_ready", "btc_live_index_feed_available", "btc_live_mark_feed_available"]:
+                if _fc not in signals_df.columns:
+                    signals_df[_fc] = 1.0
+            logging.info("Synthetic live feature backfill applied to contract targets (%d rows).", len(signals_df))
+
         if not technical_regime_df.empty:
             technical_regime_df = technical_regime_df.copy()
             ts_col = "technical_timestamp" if "technical_timestamp" in technical_regime_df.columns else "timestamp" if "timestamp" in technical_regime_df.columns else None

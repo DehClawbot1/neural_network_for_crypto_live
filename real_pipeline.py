@@ -33,7 +33,7 @@ MAX_PIPELINE_SECONDS = int(os.getenv("MAX_PIPELINE_SECONDS", "600"))  # 10 min d
 def _default_max_clob_tokens():
     always_on_only = os.getenv("ALWAYS_ON_ONLY", "true").strip().lower() in {"1", "true", "yes", "on"}
     # Pinned single-market mode can use a leaner research universe.
-    return 24 if always_on_only else 80
+    return 200 if always_on_only else 500
 
 MAX_CLOB_TOKENS = int(os.getenv("MAX_CLOB_TOKENS", str(_default_max_clob_tokens())))  # cap tokens fetched
 MAX_CLOB_DAYS = int(os.getenv("MAX_CLOB_DAYS", "3"))  # reduce from 7 to 3 days

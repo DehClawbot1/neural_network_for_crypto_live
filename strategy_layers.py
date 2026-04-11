@@ -18,17 +18,36 @@ def _bounded_positive_metric(value, *, scale: float) -> float:
     return max(0.0, min(1.0, float(metric) * float(scale)))
 
 
+def _market_family(row: dict) -> str:
+    return str(row.get("market_family", "") or "").strip().lower()
+
+
+def _positive_gap(high_value, low_value) -> float:
+    hi = _finite_float(high_value, default=0.0) or 0.0
+    lo = _finite_float(low_value, default=0.0) or 0.0
+    return max(0.0, hi - lo)
+
+
 class PredictionLayer:
     """Placeholder interface for model outputs such as expected return or P(TP before SL)."""
 
     @staticmethod
-    def select_signal_score(row: dict) -> float:
+    def select_signal_components(row: dict) -> dict:
+        market_family = _market_family(row)
         confidence = _finite_float(row.get("confidence", 0.0), default=0.0)
         p_tp = _finite_float(
             row.get(
                 "ensemble_probability",
                 row.get("p_tp_before_sl", row.get("tp_before_sl_prob", 0.0)),
             ),
+            default=0.0,
+        )
+        forecast_probability = _finite_float(
+            row.get("weather_fair_probability_side", row.get("forecast_p_hit_interval", 0.0)),
+            default=0.0,
+        )
+        market_probability = _finite_float(
+            row.get("weather_market_probability", row.get("current_price", 0.0)),
             default=0.0,
         )
 
@@ -39,24 +58,51 @@ class PredictionLayer:
             _bounded_positive_metric(row.get("entry_ev", 0.0), scale=4.0),
             _bounded_positive_metric(row.get("risk_adjusted_ev", 0.0), scale=4.0),
             _bounded_positive_metric(row.get("calibrated_edge", 0.0), scale=250.0),
+            _bounded_positive_metric(row.get("expected_return", 0.0), scale=4.0),
         )
+        market_inefficiency_signal = 0.0
 
-        if probability_signal > 0.0 and profitability_signal > 0.0:
-            # We want profitable low-confidence setups to survive when EV is strong,
-            # without letting noisy edge-only rows overwhelm the score.
-            return max(
-                probability_signal,
-                min(1.0, (probability_signal * 0.7) + (profitability_signal * 0.3)),
+        if market_family.startswith("weather_temperature"):
+            probability_signal = max(probability_signal, forecast_probability)
+            market_inefficiency_signal = max(
+                _bounded_positive_metric(_positive_gap(row.get("weather_fair_probability_side", forecast_probability), market_probability), scale=4.0),
+                _bounded_positive_metric(row.get("weather_forecast_edge", 0.0), scale=6.0),
+                _bounded_positive_metric(row.get("weather_forecast_margin_score", 0.0), scale=1.0),
+                _bounded_positive_metric(row.get("weather_forecast_stability_score", 0.0), scale=1.0),
             )
+        else:
+            market_inefficiency_signal = max(
+                _bounded_positive_metric(row.get("regime_blended_edge_score", 0.0), scale=8.0),
+                _bounded_positive_metric(row.get("supervised_edge", 0.0), scale=8.0),
+                _bounded_positive_metric(row.get("temporal_edge_score", 0.0), scale=8.0),
+                _bounded_positive_metric(row.get("stage1_edge_score", 0.0), scale=8.0),
+                _bounded_positive_metric(row.get("legacy_edge_score", 0.0), scale=8.0),
+            )
+        profitability_signal = max(profitability_signal, market_inefficiency_signal)
 
-        if probability_signal > 0.0:
-            return probability_signal
+        if profitability_signal > 0.0 and probability_signal > 0.0:
+            score = max(
+                profitability_signal,
+                min(1.0, (profitability_signal * 0.60) + (probability_signal * 0.40)),
+            )
+        elif profitability_signal > 0.0:
+            score = profitability_signal
+        elif probability_signal > 0.0:
+            score = probability_signal
+        else:
+            score = 0.0
 
-        if profitability_signal > 0.0:
-            return profitability_signal
+        return {
+            "score": float(max(0.0, min(1.0, score))),
+            "probability_signal": float(max(0.0, min(1.0, probability_signal))),
+            "profitability_signal": float(max(0.0, min(1.0, profitability_signal))),
+            "market_inefficiency_signal": float(max(0.0, min(1.0, market_inefficiency_signal))),
+            "market_family": market_family or "btc",
+        }
 
-        er = _finite_float(row.get("expected_return", 0.0), default=0.0)
-        return _bounded_positive_metric(er, scale=4.0)
+    @staticmethod
+    def select_signal_score(row: dict) -> float:
+        return PredictionLayer.select_signal_components(row)["score"]
 
 
 class EntryRuleLayer:
@@ -78,7 +124,8 @@ class EntryRuleLayer:
         return "NEUTRAL"
 
     def _evaluate_weather(self, row: dict) -> dict:
-        score = PredictionLayer.select_signal_score(row)
+        decision_components = PredictionLayer.select_signal_components(row)
+        score = decision_components["score"]
         score_relax = max(0.0, _finite_float(row.get("entry_score_relax", 0.0), default=0.0) or 0.0)
         dynamic_min_score = max(0.02, min(0.95, max(self.min_score, _finite_float(row.get("weather_min_score"), default=self.min_score) or self.min_score) - score_relax))
         spread = _finite_float(row.get("spread"), default=0.0) or 0.0
@@ -141,6 +188,9 @@ class EntryRuleLayer:
             "analytics_only": analytics_only,
             "weather_cluster_conflict": weather_cluster_conflict,
             "portfolio_pressure_penalty": 0.0,
+            "decision_probability_signal": decision_components["probability_signal"],
+            "decision_profitability_signal": decision_components["profitability_signal"],
+            "decision_market_inefficiency_signal": decision_components["market_inefficiency_signal"],
         }
 
     def evaluate(self, row: dict) -> dict:
@@ -149,7 +199,8 @@ class EntryRuleLayer:
         if market_family.startswith("weather_temperature"):
             return self._evaluate_weather(row)
 
-        score = PredictionLayer.select_signal_score(row)
+        decision_components = PredictionLayer.select_signal_components(row)
+        score = decision_components["score"]
         score_relax = max(0.0, _finite_float(row.get("entry_score_relax", 0.0), default=0.0) or 0.0)
         spread_relax = max(0.0, _finite_float(row.get("entry_spread_relax", 0.0), default=0.0) or 0.0)
         liquidity_relax_factor = _finite_float(row.get("entry_liquidity_relax_factor", 1.0), default=1.0)
@@ -440,6 +491,9 @@ class EntryRuleLayer:
             "open_positions_winner_count": open_positions_winner_count,
             "open_positions_loser_count": open_positions_loser_count,
             "portfolio_pressure_penalty": portfolio_pressure_penalty,
+            "decision_probability_signal": decision_components["probability_signal"],
+            "decision_profitability_signal": decision_components["profitability_signal"],
+            "decision_market_inefficiency_signal": decision_components["market_inefficiency_signal"],
         }
 
     def should_enter(self, row: dict) -> bool:

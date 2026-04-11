@@ -87,6 +87,50 @@ def test_historical_dataset_builder_merges_kalman_and_regime_context():
         assert round(float(df.iloc[0]["btc_market_regime_confidence_multiplier"]), 2) == 1.08
 
 
+def test_historical_dataset_builder_coalesces_suffix_columns_from_live_and_regime_merges():
+    with tempfile.TemporaryDirectory() as tmp:
+        logs = Path(tmp)
+        pd.DataFrame(
+            [
+                {
+                    "market": "BTC Test",
+                    "timestamp": "2026-04-09T05:00:00Z",
+                    "trader_wallet": "0xabc",
+                    "confidence": 0.42,
+                    "btc_live_index_price": None,
+                    "btc_market_regime_score": None,
+                }
+            ]
+        ).to_csv(logs / "signals.csv", index=False)
+        pd.DataFrame(
+            [
+                {
+                    "btc_live_timestamp": "2026-04-09T04:59:30Z",
+                    "btc_live_index_price": 68195.2,
+                    "btc_live_source_quality_score": 0.87,
+                }
+            ]
+        ).to_csv(logs / "btc_live_snapshot.csv", index=False)
+        pd.DataFrame(
+            [
+                {
+                    "technical_timestamp": "2026-04-09T04:59:45Z",
+                    "btc_market_regime_score": 0.74,
+                }
+            ]
+        ).to_csv(logs / "technical_regime_snapshot.csv", index=False)
+
+        df = HistoricalDatasetBuilder(logs_dir=logs).build()
+
+        assert not df.empty
+        assert "btc_live_index_price_x" not in df.columns
+        assert "btc_live_index_price_y" not in df.columns
+        assert "btc_market_regime_score_x" not in df.columns
+        assert "btc_market_regime_score_y" not in df.columns
+        assert round(float(df.iloc[0]["btc_live_index_price"]), 1) == 68195.2
+        assert round(float(df.iloc[0]["btc_market_regime_score"]), 2) == 0.74
+
+
 def test_historical_dataset_builder_backfills_missing_signal_columns_from_entry_snapshots():
     with tempfile.TemporaryDirectory() as tmp:
         logs = Path(tmp)

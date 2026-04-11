@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -46,6 +47,16 @@ class HistoricalDatasetBuilder:
     def _safe_merge_asof(self, left, right, on, by=None):
         if left.empty or right.empty or on not in left.columns or on not in right.columns:
             return left
+        left = left.copy()
+        right = right.copy()
+        try:
+            left_on_series = left[on]
+            right_on_series = right[on]
+            if str(left_on_series.dtype) != str(right_on_series.dtype):
+                left[on] = pd.to_datetime(left_on_series, utc=True, errors="coerce", format="mixed")
+                right[on] = pd.to_datetime(right_on_series, utc=True, errors="coerce", format="mixed")
+        except Exception:
+            pass
         # pd.merge_asof raises if the merge key has NaT/null on the left side.
         # Split off null-key rows, merge the valid ones, then concat back.
         mask = left[on].notna()
@@ -62,6 +73,32 @@ class HistoricalDatasetBuilder:
         if df is None or df.empty:
             return df
         return df.loc[:, ~df.columns.duplicated()].copy()
+
+    def _coalesce_suffix_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+        out = df.copy()
+        suffix_map: dict[str, list[str]] = {}
+        for column in list(out.columns):
+            match = re.match(r"^(?P<base>.+?)(?P<suffix>_(?:x|y|trade|target))$", str(column))
+            if not match:
+                continue
+            suffix_map.setdefault(match.group("base"), []).append(column)
+
+        for base_name, suffix_columns in suffix_map.items():
+            ordered_columns = []
+            if base_name in out.columns:
+                ordered_columns.append(base_name)
+            ordered_columns.extend([column for column in suffix_columns if column in out.columns])
+            if not ordered_columns:
+                continue
+            coalesce_frame = out[ordered_columns].copy()
+            out[base_name] = coalesce_frame.apply(
+                lambda row: next((value for value in row.tolist() if pd.notna(value)), pd.NA),
+                axis=1,
+            )
+            out = out.drop(columns=[column for column in suffix_columns if column in out.columns])
+        return self._dedupe_columns(out)
 
     def _parse_logged_timestamp_series(self, series: pd.Series) -> pd.Series:
         local_tz = os.getenv("BOT_LOG_LOCAL_TIMEZONE", "Europe/Lisbon")
@@ -113,6 +150,7 @@ class HistoricalDatasetBuilder:
         }
         dataset = dataset.rename(columns={k: v for k, v in rename_map.items() if k in dataset.columns})
         dataset = self._coalesce_market_columns(dataset)
+        dataset = self._coalesce_suffix_columns(dataset)
         dataset = self._dedupe_columns(dataset)
         if "timestamp" not in dataset.columns:
             dataset["timestamp"] = pd.NaT
@@ -131,6 +169,7 @@ class HistoricalDatasetBuilder:
             merge_keys = [c for c in ["market_title", "trader_wallet"] if c in dataset.columns and c in trade_view.columns]
             if merge_keys:
                 dataset = dataset.merge(trade_view, on=merge_keys, how="left", suffixes=("", "_trade"))
+                dataset = self._coalesce_suffix_columns(dataset)
                 dataset = self._dedupe_columns(dataset)
 
         if not markets_df.empty:
@@ -150,13 +189,15 @@ class HistoricalDatasetBuilder:
                             continue
                         cols = [c for c in ["timestamp", market_name_col, "liquidity", "volume", "last_trade_price", "url", "best_bid", "best_ask", "slug", "condition_id", "end_date"] if c in market_history.columns]
                         merged = self._safe_merge_asof(group, market_history[cols], on="timestamp")
-                        merged_parts.append(self._dedupe_columns(merged))
+                        merged_parts.append(self._coalesce_suffix_columns(self._dedupe_columns(merged)))
                     dataset = pd.concat(merged_parts, ignore_index=True) if merged_parts else dataset
+                    dataset = self._coalesce_suffix_columns(dataset)
                     dataset = self._dedupe_columns(dataset)
                 else:
                     latest_markets = markets_df.drop_duplicates(subset=[market_name_col], keep="last")
                     cols = [c for c in [market_name_col, "liquidity", "volume", "last_trade_price", "url", "best_bid", "best_ask", "slug", "condition_id", "end_date"] if c in latest_markets.columns]
                     dataset = dataset.merge(latest_markets[cols], left_on="market_title", right_on=market_name_col, how="left")
+                    dataset = self._coalesce_suffix_columns(dataset)
                     dataset = self._dedupe_columns(dataset)
 
         if not alerts_df.empty and "market_title" in dataset.columns:
@@ -165,12 +206,14 @@ class HistoricalDatasetBuilder:
                 alert_counts = alerts_df.groupby(alert_market_col).size().reset_index(name="alert_count")
                 dataset = dataset.merge(alert_counts, left_on="market_title", right_on=alert_market_col, how="left")
                 dataset["alert_count"] = dataset["alert_count"].fillna(0).astype(int)
+                dataset = self._coalesce_suffix_columns(dataset)
                 dataset = self._dedupe_columns(dataset)
 
         if not wallet_alpha_df.empty and "trader_wallet" in dataset.columns:
             wallet_key = "wallet_copied" if "wallet_copied" in wallet_alpha_df.columns else "trader_wallet" if "trader_wallet" in wallet_alpha_df.columns else None
             if wallet_key:
                 dataset = dataset.merge(wallet_alpha_df, left_on="trader_wallet", right_on=wallet_key, how="left")
+                dataset = self._coalesce_suffix_columns(dataset)
                 dataset = self._dedupe_columns(dataset)
 
         if not wallet_alpha_history_df.empty and "trader_wallet" in dataset.columns and "timestamp" in dataset.columns:
@@ -185,8 +228,9 @@ class HistoricalDatasetBuilder:
                     if history.empty:
                         merged_parts.append(group)
                         continue
-                    merged_parts.append(self._dedupe_columns(self._safe_merge_asof(group, history, on="timestamp")))
+                    merged_parts.append(self._coalesce_suffix_columns(self._dedupe_columns(self._safe_merge_asof(group, history, on="timestamp"))))
                 dataset = pd.concat(merged_parts, ignore_index=True) if merged_parts else dataset
+                dataset = self._coalesce_suffix_columns(dataset)
                 dataset = self._dedupe_columns(dataset)
 
         if not btc_targets_df.empty and "timestamp" in dataset.columns and "timestamp" in btc_targets_df.columns:
@@ -195,7 +239,70 @@ class HistoricalDatasetBuilder:
             btc_targets_df = btc_targets_df[btc_targets_df["timestamp"].notna()].copy()
             cols = [c for c in ["timestamp", "btc_price", "btc_spot_return_5m", "btc_spot_return_15m", "btc_realized_vol_15m", "btc_volume_proxy"] if c in btc_targets_df.columns]
             dataset = self._safe_merge_asof(dataset, btc_targets_df[cols], on="timestamp")
+            dataset = self._coalesce_suffix_columns(dataset)
             dataset = self._dedupe_columns(dataset)
+
+        # ------------------------------------------------------------------
+        # Synthetic backfill: when btc_live_snapshot.csv is empty, derive
+        # live-equivalent features from btc_targets columns already merged.
+        # ------------------------------------------------------------------
+        _live_backfill_applied = False
+        if btc_live_df.empty and "btc_price" in dataset.columns:
+            logging.info("btc_live_snapshot.csv empty — synthesising live features from btc_targets columns.")
+            _bp = pd.to_numeric(dataset.get("btc_price"), errors="coerce")
+            for col in ["btc_live_price", "btc_live_spot_price", "btc_live_index_price",
+                        "btc_live_mark_price", "btc_live_price_kalman", "btc_live_spot_price_kalman",
+                        "btc_live_index_price_kalman", "btc_live_mark_price_kalman"]:
+                if col not in dataset.columns:
+                    dataset[col] = _bp
+            # Returns — map from btc_targets return columns
+            _return_map = {
+                "btc_live_return_5m": "btc_spot_return_5m",
+                "btc_live_return_15m": "btc_spot_return_15m",
+            }
+            for live_col, src_col in _return_map.items():
+                if live_col not in dataset.columns and src_col in dataset.columns:
+                    dataset[live_col] = pd.to_numeric(dataset[src_col], errors="coerce")
+            # Kalman returns = same as raw (no live filter available)
+            for suffix in ["5m", "15m"]:
+                raw = f"btc_live_return_{suffix}"
+                kal = f"btc_live_return_{suffix}_kalman"
+                if kal not in dataset.columns and raw in dataset.columns:
+                    dataset[kal] = dataset[raw]
+            # Approximate 1m return from 5m / 5
+            if "btc_live_return_1m" not in dataset.columns and "btc_live_return_5m" in dataset.columns:
+                dataset["btc_live_return_1m"] = dataset["btc_live_return_5m"] / 5.0
+                dataset["btc_live_return_1m_kalman"] = dataset["btc_live_return_1m"]
+            # Approximate 1h return from 15m * 4
+            if "btc_live_return_1h" not in dataset.columns and "btc_live_return_15m" in dataset.columns:
+                dataset["btc_live_return_1h"] = dataset["btc_live_return_15m"] * 4.0
+                dataset["btc_live_return_1h_kalman"] = dataset["btc_live_return_1h"]
+            # Volatility proxy from btc_realized_vol_15m
+            if "btc_live_volatility_proxy" not in dataset.columns and "btc_realized_vol_15m" in dataset.columns:
+                dataset["btc_live_volatility_proxy"] = pd.to_numeric(dataset["btc_realized_vol_15m"], errors="coerce")
+            # Basis features = 0 (single-source historical, no spot/index divergence)
+            for basis_col in ["btc_live_source_divergence_bps", "btc_live_spot_index_basis_bps",
+                              "btc_live_mark_index_basis_bps", "btc_live_mark_spot_basis_bps",
+                              "btc_live_spot_index_basis_bps_kalman", "btc_live_mark_index_basis_bps_kalman",
+                              "btc_live_mark_spot_basis_bps_kalman"]:
+                if basis_col not in dataset.columns:
+                    dataset[basis_col] = 0.0
+            # Quality / boolean flags
+            if "btc_live_source_quality_score" not in dataset.columns:
+                dataset["btc_live_source_quality_score"] = 0.5  # moderate confidence for historical proxy
+            if "btc_live_funding_rate" not in dataset.columns:
+                dataset["btc_live_funding_rate"] = 0.0
+            # Confluence = mean of available return signals
+            _ret_cols = [c for c in dataset.columns if c.startswith("btc_live_return_") and "kalman" not in c]
+            if "btc_live_confluence" not in dataset.columns and _ret_cols:
+                dataset["btc_live_confluence"] = dataset[_ret_cols].mean(axis=1).fillna(0.0)
+                dataset["btc_live_confluence_kalman"] = dataset["btc_live_confluence"]
+            # Boolean ready flags
+            for flag_col in ["btc_live_index_ready", "btc_live_index_feed_available", "btc_live_mark_feed_available"]:
+                if flag_col not in dataset.columns:
+                    dataset[flag_col] = 1.0  # mark as available (proxied from candle data)
+            _live_backfill_applied = True
+            logging.info("Synthetic live feature backfill applied (%d rows).", len(dataset))
 
         if not btc_live_df.empty and "timestamp" in dataset.columns:
             btc_live_df = btc_live_df.copy()
@@ -243,6 +350,7 @@ class HistoricalDatasetBuilder:
                 ]
                 live_view = btc_live_df[live_cols].sort_values(ts_col).rename(columns={ts_col: "timestamp"})
                 dataset = self._safe_merge_asof(dataset, live_view, on="timestamp")
+                dataset = self._coalesce_suffix_columns(dataset)
                 dataset = self._dedupe_columns(dataset)
 
         if not technical_regime_df.empty and "timestamp" in dataset.columns:
@@ -292,7 +400,55 @@ class HistoricalDatasetBuilder:
                 ]
                 regime_view = technical_regime_df[regime_cols].sort_values(ts_col).rename(columns={ts_col: "timestamp"})
                 dataset = self._safe_merge_asof(dataset, regime_view, on="timestamp")
+                dataset = self._coalesce_suffix_columns(dataset)
                 dataset = self._dedupe_columns(dataset)
+
+        # ------------------------------------------------------------------
+        # Sentiment feature backfill: provide neutral defaults so models
+        # see numeric values instead of NaN during historical training.
+        # ------------------------------------------------------------------
+        _sentiment_defaults = {
+            "fgi_value": 50.0,          # neutral fear & greed
+            "fgi_normalized": 0.0,
+            "fgi_extreme_fear": 0.0,
+            "fgi_extreme_greed": 0.0,
+            "fgi_contrarian": 0.0,
+            "fgi_momentum": 0.0,
+            "fgi_momentum_3d": 0.0,
+            "twitter_sentiment": 0.0,
+            "twitter_post_count": 0.0,
+            "twitter_sentiment_pos": 0.0,
+            "twitter_sentiment_neg": 0.0,
+            "twitter_engagement_proxy": 0.0,
+            "twitter_sentiment_zscore": 0.0,
+            "twitter_bullish": 0.0,
+            "twitter_bearish": 0.0,
+            "twitter_sentiment_momentum": 0.0,
+            "reddit_sentiment": 0.0,
+            "reddit_post_count": 0.0,
+            "reddit_sentiment_pos": 0.0,
+            "reddit_sentiment_neg": 0.0,
+            "reddit_sentiment_zscore": 0.0,
+            "reddit_bullish": 0.0,
+            "reddit_bearish": 0.0,
+            "reddit_sentiment_momentum": 0.0,
+            "gtrends_bitcoin": 0.0,
+            "gtrends_zscore": 0.0,
+            "gtrends_spike": 0.0,
+            "gtrends_momentum": 0.0,
+            "sentiment_score": 0.0,
+            "is_overheated_long": 0.0,
+            "btc_funding_rate": 0.0,
+        }
+        _sent_filled = 0
+        for _sc, _sv in _sentiment_defaults.items():
+            if _sc not in dataset.columns:
+                dataset[_sc] = _sv
+                _sent_filled += 1
+            else:
+                dataset[_sc] = pd.to_numeric(dataset[_sc], errors="coerce").fillna(_sv)
+        if _sent_filled > 0:
+            logging.info("Backfilled %d missing sentiment features with neutral defaults.", _sent_filled)
 
         if not portfolio_curve_df.empty and "timestamp" in dataset.columns and "timestamp" in portfolio_curve_df.columns:
             portfolio_curve_df = portfolio_curve_df.copy()
@@ -332,6 +488,7 @@ class HistoricalDatasetBuilder:
                         dataset[col] = merged[col]
                     else:
                         dataset[col] = dataset[col].fillna(merged[col])
+                dataset = self._coalesce_suffix_columns(dataset)
                 dataset = self._dedupe_columns(dataset)
 
         if "best_ask" in dataset.columns and "best_bid" in dataset.columns:
@@ -339,6 +496,8 @@ class HistoricalDatasetBuilder:
         if "end_date" in dataset.columns and "timestamp" in dataset.columns:
             dataset["end_date"] = pd.to_datetime(dataset["end_date"], utc=True, errors="coerce")
             dataset["time_to_close_minutes"] = (dataset["end_date"] - dataset["timestamp"]).dt.total_seconds().div(60)
+
+        dataset = self._coalesce_suffix_columns(dataset)
 
         if self.brain_context is not None and not dataset.empty:
             dataset = filter_frame_for_brain(dataset, self.brain_context)
