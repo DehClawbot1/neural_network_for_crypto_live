@@ -276,9 +276,10 @@ def run_research_pipeline():
                 candidate_rows=candidate_rows,
                 candidate_weights_dir=candidate_weights_dir,
             )
-            promoted = registered[
-                registered.get("promotion_status", pd.Series(dtype=str)).fillna("").astype(str) == "promoted"
-            ] if not registered.empty else pd.DataFrame()
+            if not registered.empty and "promotion_status" in registered.columns:
+                promoted = registered[registered["promotion_status"].fillna("").astype(str) == "promoted"]
+            else:
+                promoted = pd.DataFrame()
             logging.info(
                 "[%s] Model registry updated with %s rows; promoted %s artifact slices.",
                 context.brain_id,

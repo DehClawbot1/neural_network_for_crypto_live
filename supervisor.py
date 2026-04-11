@@ -1640,11 +1640,9 @@ def main_loop():
             work = work[work["market_family"].fillna("").astype(str).str.startswith(context.market_family)].copy()
         if work.empty:
             return "weather_v1" if context.market_family.startswith("weather_temperature") else ""
-        champions = work[work.get("is_champion", pd.Series(dtype=bool)) == True].copy()
+        champions = work[work["is_champion"] == True].copy() if "is_champion" in work.columns else pd.DataFrame()
         if champions.empty:
-            champions = work[
-                work.get("promotion_status", pd.Series(dtype=str)).fillna("").astype(str).str.lower() == "promoted"
-            ].copy()
+            champions = work[work["promotion_status"].fillna("").astype(str).str.lower() == "promoted"].copy() if "promotion_status" in work.columns else pd.DataFrame()
         latest = champions.iloc[-1].to_dict() if not champions.empty else work.iloc[-1].to_dict()
         version = str(latest.get("run_id") or latest.get("registered_at") or "").strip()
         if version:
@@ -2638,7 +2636,7 @@ def main_loop():
 
             pre_cycle_positions_df = locals().get("pre_positions_df")
             if pre_cycle_positions_df is None or (hasattr(pre_cycle_positions_df, "empty") and pre_cycle_positions_df.empty):
-                pre_cycle_positions_df = pd.DataFrame([trade.__dict__ for trade in trade_manager.active_trades.values()]) if trade_manager.active_trades else pd.DataFrame()
+                pre_cycle_positions_df = pd.DataFrame([{k: v for k, v in trade.__dict__.items() if not isinstance(v, (list, dict, set))} for trade in trade_manager.active_trades.values()]) if trade_manager.active_trades else pd.DataFrame()
             entry_signals_df, open_position_context = attach_open_position_context(
                 entry_signals_df,
                 positions_df=pre_cycle_positions_df,
@@ -2677,7 +2675,7 @@ def main_loop():
                 if "performance_governor_level" not in out.columns:
                     out["performance_governor_level"] = 0
                 else:
-                    out["performance_governor_level"] = pd.to_numeric(out["performance_governor_level"], errors="coerce").fillna(0).astype(int)
+                    out["performance_governor_level"] = _frame_numeric_series(out, "performance_governor_level", 0.0).fillna(0).astype(int)
                 out["market_family"] = out.apply(lambda row: build_quality_context(row.to_dict()).get("market_family", row.get("market_family", "other")), axis=1)
                 out["horizon_bucket"] = out.apply(lambda row: build_quality_context(row.to_dict()).get("horizon_bucket", row.get("horizon_bucket", "unknown")), axis=1)
                 out["liquidity_bucket"] = out.apply(lambda row: build_quality_context(row.to_dict()).get("liquidity_bucket", row.get("liquidity_bucket", "unknown")), axis=1)
@@ -2692,8 +2690,11 @@ def main_loop():
                     primary_model = out.get("btc_market_regime_primary_model", pd.Series(index=out.index, dtype=object)).replace("", pd.NA).fillna("hybrid_stack")
                     regime_label = out.get("btc_market_regime_label", pd.Series(index=out.index, dtype=object)).replace("", pd.NA).fillna("calm")
                     out["active_model_group"] = out.get("active_model_group", pd.Series(index=out.index, dtype=object)).replace("", pd.NA).fillna("btc_brain_runtime_stack")
-                    out["active_model_kind"] = out.get("active_model_kind", pd.Series(index=out.index, dtype=object)).replace("", pd.NA).fillna(primary_model)
-                    out["active_regime"] = out.get("active_regime", pd.Series(index=out.index, dtype=object)).replace("", pd.NA).fillna(regime_label)
+                    # primary_model/regime_label are Series — use them element-wise via .where()
+                    _amk = out.get("active_model_kind", pd.Series(index=out.index, dtype=object)).replace("", pd.NA)
+                    out["active_model_kind"] = _amk.where(_amk.notna(), primary_model)
+                    _ar = out.get("active_regime", pd.Series(index=out.index, dtype=object)).replace("", pd.NA)
+                    out["active_regime"] = _ar.where(_ar.notna(), regime_label)
                 return out.loc[:, ~out.columns.duplicated()].copy()
 
             features_df = pd.DataFrame()
@@ -5071,7 +5072,7 @@ def main_loop():
                 )
             else:
                 open_positions_for_status = trade_manager.get_open_positions()
-                open_positions_df_for_status = pd.DataFrame([trade.__dict__ for trade in open_positions_for_status]) if open_positions_for_status else pd.DataFrame()
+                open_positions_df_for_status = pd.DataFrame([{k: v for k, v in trade.__dict__.items() if not isinstance(v, (list, dict, set))} for trade in open_positions_for_status]) if open_positions_for_status else pd.DataFrame()
                 autonomous_monitor.write_heartbeat("trade_manager", status="ok", message="trades_updated", extra={"open_positions": len(open_positions_for_status)})
 
             autonomous_monitor.write_status(trader_signals_df, trades_df, alerts_df, open_positions_df_for_status)

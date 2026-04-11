@@ -53,5 +53,33 @@ class TestTradeLifecycle(unittest.TestCase):
         self.assertEqual(snapshot["open_positions_count"], 3)
 
 
+    def test_trade_lifecycle_dict_contains_expected_fields(self):
+        tl = TradeLifecycle(market="BTC Test", token_id="1", condition_id="abc", outcome_side="YES")
+        d = tl.__dict__
+        for key in ["market", "token_id", "condition_id", "outcome_side", "state", "size_usdc", "ledger"]:
+            self.assertIn(key, d)
+
+    def test_ledger_default_is_empty_list(self):
+        tl = TradeLifecycle(market="X", token_id=None, condition_id=None, outcome_side="YES")
+        self.assertIsInstance(tl.ledger, list)
+        self.assertEqual(len(tl.ledger), 0)
+
+
+def test_serialize_signal_snapshot_with_simple_dict():
+    from trade_lifecycle import serialize_signal_snapshot
+
+    json_str, count = serialize_signal_snapshot({"a": 1, "b": "hello"})
+    self_parsed = __import__("json").loads(json_str)
+    assert self_parsed == {"a": 1, "b": "hello"}
+    assert count == 2
+
+
+def test_serialize_signal_snapshot_with_empty_dict():
+    from trade_lifecycle import serialize_signal_snapshot
+
+    json_str, count = serialize_signal_snapshot({})
+    assert count == 0
+
+
 if __name__ == "__main__":
     unittest.main()

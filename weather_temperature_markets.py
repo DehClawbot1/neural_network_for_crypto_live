@@ -91,20 +91,23 @@ def _parse_date_without_year(raw_date, reference_date: datetime | None = None) -
     return chosen.date().isoformat()
 
 
+_WEATHER_TEMP_PHRASES = (
+    "highest temperature",
+    "high temperature",
+    "maximum temperature",
+    "max temperature",
+    "temperature will be",
+    "temperature be between",
+    "temperature be ",
+)
+
+
 def is_weather_temperature_market(market: dict | None) -> bool:
     market = market or {}
     question = str(market.get("question") or market.get("title") or "").strip().lower()
     if not question:
         return False
-    return any(
-        phrase in question
-        for phrase in (
-            "highest temperature",
-            "high temperature",
-            "maximum temperature",
-            "max temperature",
-        )
-    )
+    return any(phrase in question for phrase in _WEATHER_TEMP_PHRASES)
 
 
 def parse_weather_temperature_market_text(

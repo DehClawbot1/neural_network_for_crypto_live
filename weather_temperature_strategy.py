@@ -89,6 +89,7 @@ class WeatherTemperatureStrategy:
         self.min_liquidity_score = max(0.0, min(1.0, float(os.getenv("WEATHER_MIN_LIQUIDITY_SCORE", "0.08") or 0.08)))
         self.max_concurrent_positions = max(1, int(os.getenv("WEATHER_MAX_CONCURRENT_POSITIONS", "6") or 6))
         self.cluster_cap = max(1, int(os.getenv("WEATHER_CITY_DATE_CLUSTER_CAP", "1") or 1))
+        self._last_watchlist_log_signature: tuple[int, int, int] | None = None
 
     def _watchlist_rows_from_env(self) -> pd.DataFrame:
         raw = str(
@@ -166,8 +167,12 @@ class WeatherTemperatureStrategy:
                 dynamic_rows = dynamic_rows.copy()
                 dynamic_rows["enabled"] = True
                 dynamic_rows["approved"] = True
+                min_wallet_score_series = dynamic_rows.get(
+                    "min_wallet_score",
+                    pd.Series([self.min_wallet_score] * len(dynamic_rows.index), index=dynamic_rows.index),
+                )
                 dynamic_rows["min_wallet_score"] = pd.to_numeric(
-                    dynamic_rows.get("min_wallet_score"),
+                    min_wallet_score_series,
                     errors="coerce",
                 ).fillna(self.min_wallet_score)
                 dynamic_rows["region_scope"] = dynamic_rows.get("region_scope", pd.Series("", index=dynamic_rows.index)).fillna("")
@@ -205,12 +210,22 @@ class WeatherTemperatureStrategy:
         if dynamic_enabled:
             dynamic_count = int(len(dynamic_rows.index))
             override_count = int(len(override_rows.index))
-            logger.info(
-                "Weather wallet source loaded %s live leaderboard wallets and %s manual overrides (%s effective wallets).",
-                dynamic_count,
-                override_count,
-                int(len(watchlist.index)),
-            )
+            signature = (dynamic_count, override_count, int(len(watchlist.index)))
+            if signature != self._last_watchlist_log_signature:
+                logger.info(
+                    "Weather wallet source loaded %s live leaderboard wallets and %s manual overrides (%s effective wallets).",
+                    dynamic_count,
+                    override_count,
+                    int(len(watchlist.index)),
+                )
+                self._last_watchlist_log_signature = signature
+            else:
+                logger.debug(
+                    "Weather wallet source unchanged: %s live leaderboard wallets, %s manual overrides, %s effective wallets.",
+                    dynamic_count,
+                    override_count,
+                    int(len(watchlist.index)),
+                )
         return watchlist.reset_index(drop=True)
 
     def fetch_markets(self) -> pd.DataFrame:

@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
+import logging
 
 from leaderboard_service import PolymarketLeaderboardService
 from weather_temperature_strategy import WeatherTemperatureStrategy
@@ -215,3 +216,25 @@ def test_load_watchlist_prefers_dynamic_weather_leaderboard_and_keeps_overrides(
     assert set(watchlist["wallet"].astype(str)) == {"0xleader", "0xmanual"}
     assert "leaderboard_api" in set(watchlist["source"].astype(str))
     assert "manual_override_csv" in set(watchlist["source"].astype(str))
+
+
+def test_load_watchlist_logs_summary_only_when_changed(tmp_path, caplog):
+    service = PolymarketLeaderboardService(logs_dir=str(tmp_path))
+    service.fetch_leaderboard = lambda **kwargs: pd.DataFrame(
+        [
+            {"wallet": "0xleader1", "approved": True, "source": "leaderboard_api"},
+            {"wallet": "0xleader2", "approved": True, "source": "leaderboard_api"},
+        ]
+    )
+    strategy = WeatherTemperatureStrategy(
+        logs_dir=str(tmp_path),
+        watchlist_path=str(tmp_path / "missing.csv"),
+        leaderboard_service=service,
+    )
+
+    with caplog.at_level(logging.INFO):
+        strategy.load_watchlist()
+        strategy.load_watchlist()
+
+    messages = [record.message for record in caplog.records if "Weather wallet source loaded" in record.message]
+    assert len(messages) == 1
