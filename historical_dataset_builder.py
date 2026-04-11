@@ -34,6 +34,12 @@ class HistoricalDatasetBuilder:
         )
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.output_file = self.logs_dir / "historical_dataset.csv"
+        self.btc_live_merge_tolerance = pd.Timedelta(
+            os.getenv("BTC_LIVE_MERGE_TOLERANCE", "12h") or "12h"
+        )
+        self.technical_merge_tolerance = pd.Timedelta(
+            os.getenv("TECHNICAL_REGIME_MERGE_TOLERANCE", "12h") or "12h"
+        )
 
     def _safe_read(self, filename):
         path = self.shared_logs_dir / filename
@@ -53,7 +59,7 @@ class HistoricalDatasetBuilder:
         except Exception:
             return pd.DataFrame()
 
-    def _safe_merge_asof(self, left, right, on, by=None):
+    def _safe_merge_asof(self, left, right, on, by=None, **kwargs):
         if left.empty or right.empty or on not in left.columns or on not in right.columns:
             return left
         left = left.copy()
@@ -73,7 +79,7 @@ class HistoricalDatasetBuilder:
             return left
         valid = left[mask].copy().sort_values(on)
         work_right = right.copy().sort_values(on)
-        merged = pd.merge_asof(valid, work_right, on=on, by=by, direction="backward")
+        merged = pd.merge_asof(valid, work_right, on=on, by=by, direction="backward", **kwargs)
         if mask.all():
             return merged
         return pd.concat([merged, left[~mask]], ignore_index=True)
@@ -161,6 +167,7 @@ class HistoricalDatasetBuilder:
             "btc_mempool_congestion_score": 0.5,
             "btc_network_activity_score": 0.5,
             "btc_network_stress_score": 0.5,
+            "trend_score": 0.5,
             "btc_atr_pct_15m": 0.0,
             "btc_realized_vol_1h": 0.0,
             "btc_realized_vol_4h": 0.0,
@@ -176,6 +183,7 @@ class HistoricalDatasetBuilder:
             "btc_momentum_confluence": 0.0,
             "btc_live_source_quality_score": 0.5,
             "btc_live_source_divergence_bps": 0.0,
+            "btc_live_funding_rate": 0.0,
             "btc_live_spot_index_basis_bps": 0.0,
             "btc_live_mark_index_basis_bps": 0.0,
             "btc_live_mark_spot_basis_bps": 0.0,
@@ -190,6 +198,7 @@ class HistoricalDatasetBuilder:
             "btc_live_return_5m_kalman": 0.0,
             "btc_live_return_15m_kalman": 0.0,
             "btc_live_return_1h_kalman": 0.0,
+            "btc_live_volatility_proxy": 0.0,
             "btc_live_confluence": 0.0,
             "btc_live_confluence_kalman": 0.0,
             "btc_market_regime_score": 0.5,
@@ -432,6 +441,7 @@ class HistoricalDatasetBuilder:
                         cols = [c for c in ["timestamp", market_name_col, "liquidity", "volume", "last_trade_price", "url", "best_bid", "best_ask", "slug", "condition_id", "end_date"] if c in market_history.columns]
                         merged = self._safe_merge_asof(group, market_history[cols], on="timestamp")
                         merged_parts.append(self._coalesce_suffix_columns(self._dedupe_columns(merged)))
+                    merged_parts = [part for part in merged_parts if part is not None and not part.empty]
                     dataset = pd.concat(merged_parts, ignore_index=True) if merged_parts else dataset
                     dataset = self._coalesce_suffix_columns(dataset)
                     dataset = self._dedupe_columns(dataset)
@@ -591,7 +601,12 @@ class HistoricalDatasetBuilder:
                     if c in btc_live_df.columns
                 ]
                 live_view = btc_live_df[live_cols].sort_values(ts_col).rename(columns={ts_col: "timestamp"})
-                dataset = self._safe_merge_asof(dataset, live_view, on="timestamp")
+                dataset = self._safe_merge_asof(
+                    dataset,
+                    live_view,
+                    on="timestamp",
+                    tolerance=self.btc_live_merge_tolerance,
+                )
                 dataset = self._coalesce_suffix_columns(dataset)
                 dataset = self._dedupe_columns(dataset)
 
@@ -641,7 +656,12 @@ class HistoricalDatasetBuilder:
                     if c in technical_regime_df.columns
                 ]
                 regime_view = technical_regime_df[regime_cols].sort_values(ts_col).rename(columns={ts_col: "timestamp"})
-                dataset = self._safe_merge_asof(dataset, regime_view, on="timestamp")
+                dataset = self._safe_merge_asof(
+                    dataset,
+                    regime_view,
+                    on="timestamp",
+                    tolerance=self.technical_merge_tolerance,
+                )
                 dataset = self._coalesce_suffix_columns(dataset)
                 dataset = self._dedupe_columns(dataset)
 

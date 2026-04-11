@@ -53,6 +53,12 @@ class ContractTargetBuilder:
         self.technical_regime_file = self.shared_logs_dir / "technical_regime_snapshot.csv"
         self.historical_dataset_file = self.logs_dir / "historical_dataset.csv"
         self.output_file = self.logs_dir / "contract_targets.csv"
+        self.btc_live_merge_tolerance = pd.Timedelta(
+            os.getenv("BTC_LIVE_MERGE_TOLERANCE", "12h") or "12h"
+        )
+        self.technical_merge_tolerance = pd.Timedelta(
+            os.getenv("TECHNICAL_REGIME_MERGE_TOLERANCE", "12h") or "12h"
+        )
 
     def _safe_read(self, path):
         if not path.exists():
@@ -197,7 +203,13 @@ class ContractTargetBuilder:
                     if c in btc_live_df.columns
                 ]
                 live_view = btc_live_df[live_cols].sort_values(ts_col).rename(columns={ts_col: "timestamp"})
-                signals_df = _safe_merge_asof(signals_df, live_view, on="timestamp", direction="backward")
+                signals_df = _safe_merge_asof(
+                    signals_df,
+                    live_view,
+                    on="timestamp",
+                    direction="backward",
+                    tolerance=self.btc_live_merge_tolerance,
+                )
                 signals_df = self._coalesce_suffix_columns(self._dedupe_columns(signals_df))
 
         # Synthetic live feature backfill when btc_live_snapshot.csv is empty
@@ -311,7 +323,13 @@ class ContractTargetBuilder:
                     if c in technical_regime_df.columns
                 ]
                 regime_view = technical_regime_df[regime_cols].sort_values(ts_col).rename(columns={ts_col: "timestamp"})
-                signals_df = _safe_merge_asof(signals_df, regime_view, on="timestamp", direction="backward")
+                signals_df = _safe_merge_asof(
+                    signals_df,
+                    regime_view,
+                    on="timestamp",
+                    direction="backward",
+                    tolerance=self.technical_merge_tolerance,
+                )
                 signals_df = self._coalesce_suffix_columns(self._dedupe_columns(signals_df))
         history_df = history_df.copy()
         history_df["token_id"] = history_df["token_id"].astype(str)

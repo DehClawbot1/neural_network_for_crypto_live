@@ -2134,6 +2134,7 @@ def main_loop():
         if drawdown >= max_session_drawdown_usdc and not session_kill_switch_active:
             session_kill_switch_active = True
             session_kill_switch_reason = f"session_drawdown_limit_hit ({drawdown:.4f} >= {max_session_drawdown_usdc:.4f})"
+            logging.error("Session kill switch activated: %s", session_kill_switch_reason)
 
     def _inject_always_on_signal(signals_df: pd.DataFrame, markets_df: pd.DataFrame, btc_context: dict | None = None):
         nonlocal always_on_slug
@@ -2424,6 +2425,7 @@ def main_loop():
                                 "session_reconciliation_mismatch_limit_hit "
                                 f"({session_reconciliation_mismatch_count} >= {max_session_reconciliation_mismatches})"
                             )
+                            logging.error("Session kill switch activated: %s", session_kill_switch_reason)
                         pre_cycle_entry_freeze = True
                         pre_cycle_freeze_reason = "precycle_reconciliation_mismatch"
                         pre_cycle_freeze_detail = {
@@ -3616,6 +3618,7 @@ def main_loop():
                                 "session_reconciliation_mismatch_limit_hit "
                                 f"({session_reconciliation_mismatch_count} >= {max_session_reconciliation_mismatches})"
                             )
+                            logging.error("Session kill switch activated: %s", session_kill_switch_reason)
                         live_entry_freeze = True
                         freeze_reason = mismatch_summary.get("source") or "state_mismatch"
                         freeze_detail = mismatch_summary.get("detail", {}) or {}
@@ -3844,6 +3847,7 @@ def main_loop():
                             "session_failed_entry_limit_hit "
                             f"({session_failed_entries} >= {max_session_failed_entries})"
                         )
+                        logging.error("Session kill switch activated: %s", session_kill_switch_reason)
 
                 if _candidate_skip_logging and payload["final_decision"] == "REJECTED":
                     try:
@@ -4098,10 +4102,16 @@ def main_loop():
                     )
                     continue
                 if trading_mode == "live" and live_entry_freeze:
+                    freeze_reason_detail = (
+                        freeze_detail.get("reason")
+                        if isinstance(freeze_detail, dict)
+                        else None
+                    )
                     logging.warning(
-                        "Skipping new live entry for %s because entry freeze is active (reason=%s, local_count=%s, live_count=%s)",
+                        "Skipping new live entry for %s because entry freeze is active (reason=%s, detail=%s, local_count=%s, live_count=%s)",
                         token_id,
                         freeze_reason or "state_mismatch",
+                        freeze_reason_detail,
                         freeze_detail.get("local_count"),
                         freeze_detail.get("live_count"),
                     )
@@ -4110,6 +4120,7 @@ def main_loop():
                         "freeze",
                         gate="freeze",
                         freeze_reason=freeze_reason or "state_mismatch",
+                        freeze_reason_detail=freeze_reason_detail,
                         local_count=freeze_detail.get("local_count"),
                         live_count=freeze_detail.get("live_count"),
                     )
