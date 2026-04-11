@@ -1,6 +1,21 @@
 import pandas as pd
 
 
+def _safe_numeric_series(frame: pd.DataFrame, column_name: str, default=0.0) -> pd.Series:
+    if frame is None or frame.empty:
+        return pd.Series(dtype=float)
+    if column_name not in frame.columns:
+        return pd.Series([default] * len(frame), index=frame.index, dtype=float)
+    raw = frame.loc[:, column_name]
+    if isinstance(raw, pd.DataFrame):
+        picked = raw.apply(
+            lambda row: next((value for value in row.tolist() if pd.notna(value)), default),
+            axis=1,
+        )
+        return pd.to_numeric(picked, errors="coerce").fillna(default)
+    return pd.to_numeric(raw, errors="coerce").fillna(default)
+
+
 class Stage3HybridScorer:
     """
     Hybrid scorer combining tabular outputs, temporal outputs, and execution/risk penalties.
@@ -54,11 +69,11 @@ class Stage3HybridScorer:
             regime_multiplier = pd.Series([1.0] * len(out), index=out.index)
         regime_multiplier = regime_multiplier.astype(float).clip(lower=0.55, upper=1.15)
 
-        out["p_win"] = out["p_tp_before_sl"].astype(float)
+        out["p_win"] = _safe_numeric_series(out, "p_tp_before_sl", 0.0)
         out["p_loss"] = 1.0 - out["p_win"]
-        out["expected_payoff"] = out["expected_return"].astype(float).clip(lower=0.0)
-        out["expected_loss"] = out["lower_confidence_bound"].astype(float).abs()
-        out["temporal_boost"] = out["temporal_expected_return"].astype(float)
+        out["expected_payoff"] = _safe_numeric_series(out, "expected_return", 0.0).clip(lower=0.0)
+        out["expected_loss"] = _safe_numeric_series(out, "lower_confidence_bound", 0.0).abs()
+        out["temporal_boost"] = _safe_numeric_series(out, "temporal_expected_return", 0.0)
         out["supervised_edge"] = out["p_win"] * (out["expected_payoff"] + out["temporal_boost"].clip(lower=0.0) * 0.35)
         out["execution_quality_score"] = (
             wallet_alpha.astype(float).clip(lower=0.0)
@@ -72,8 +87,8 @@ class Stage3HybridScorer:
         out["hybrid_edge"] = out["risk_adjusted_ev"] * (1.0 + out["execution_quality_score"].clip(lower=0.0)) * regime_multiplier
 
         if "temporal_p_tp_before_sl" in out.columns:
-            out["rf_probability"] = out["p_tp_before_sl"].astype(float)
-            out["nn_probability"] = out["temporal_p_tp_before_sl"].astype(float)
+            out["rf_probability"] = _safe_numeric_series(out, "p_tp_before_sl", 0.0)
+            out["nn_probability"] = _safe_numeric_series(out, "temporal_p_tp_before_sl", 0.0)
             out["ensemble_agreement"] = (
                 (out["rf_probability"] >= self.agreement_threshold)
                 & (out["nn_probability"] >= self.agreement_threshold)
@@ -84,7 +99,7 @@ class Stage3HybridScorer:
                 & (out["ensemble_probability"] >= self.agreement_threshold)
             ).astype(int)
         else:
-            out["rf_probability"] = out["p_tp_before_sl"].astype(float)
+            out["rf_probability"] = _safe_numeric_series(out, "p_tp_before_sl", 0.0)
             out["nn_probability"] = out.get("temporal_p_tp_before_sl", 0.5)
             if not isinstance(out["nn_probability"], pd.Series):
                 out["nn_probability"] = pd.Series([float(out["nn_probability"])] * len(out), index=out.index)

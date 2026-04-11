@@ -26,6 +26,13 @@ def _safe_numeric_feature_series(frame: pd.DataFrame, column_name: str) -> pd.Se
     return pd.to_numeric(raw, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
 
+def _build_numeric_feature_matrix(frame: pd.DataFrame, feature_names: list[str]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {col: _safe_numeric_feature_series(frame, col) for col in feature_names},
+        index=frame.index,
+    )
+
+
 class ModelInference:
     """
     Load trained supervised models and emit inference-oriented outputs.
@@ -74,9 +81,7 @@ class ModelInference:
         missing = {col: 0.0 for col in feature_names if col not in work.columns}
         if missing: work = work.assign(**missing) # BUG FIX 8: Prevent DF Fragmentation
 
-        x = pd.DataFrame(index=work.index)
-        for col in feature_names:
-            x[col] = _safe_numeric_feature_series(work, col)
+        x = _build_numeric_feature_matrix(work, feature_names)
 
         preprocessor = saved.get("preprocessor") or saved.get("transformer") or saved.get("scaler")
         if preprocessor is not None:

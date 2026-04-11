@@ -61,3 +61,17 @@ def test_stage1_inference_run_handles_duplicate_output_columns():
 
     assert "edge_score" in out.columns
     assert len(out.index) == 1
+
+
+def test_stage2_temporal_inference_prepare_matrix_avoids_fragmentation_warning():
+    inference = Stage2TemporalInference()
+    feature_names = [f"feature_{idx}" for idx in range(120)]
+    frame = pd.DataFrame(
+        [[float(idx) for idx in range(120)]],
+        columns=feature_names,
+    )
+    saved = {"features": feature_names}
+
+    matrix = inference._prepare_matrix(saved, frame)
+
+    assert matrix.shape == (1, 120)

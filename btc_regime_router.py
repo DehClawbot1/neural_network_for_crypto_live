@@ -26,6 +26,19 @@ def _clip01(value):
     return float(np.clip(_safe_float(value, 0.0), 0.0, 1.0))
 
 
+def _safe_numeric_series(frame: pd.DataFrame, column_name: str, default=np.nan) -> pd.Series:
+    if column_name not in frame.columns:
+        return pd.Series([default] * len(frame), index=frame.index)
+    raw = frame.loc[:, column_name]
+    if isinstance(raw, pd.DataFrame):
+        picked = raw.apply(
+            lambda row: next((value for value in row.tolist() if pd.notna(value)), default),
+            axis=1,
+        )
+        return pd.to_numeric(picked, errors="coerce")
+    return pd.to_numeric(raw, errors="coerce")
+
+
 def _bias_alignment_score(trend_bias: str, live_bias: str) -> float:
     trend = str(trend_bias or "NEUTRAL").strip().upper()
     live = str(live_bias or "NEUTRAL").strip().upper()
@@ -160,26 +173,27 @@ def apply_regime_model_blend(frame: pd.DataFrame) -> pd.DataFrame:
         out["stage1_return_std"] = np.nan
 
     for model_name in ("legacy", "stage1", "stage2"):
-        out[f"btc_market_regime_weight_{model_name}"] = pd.to_numeric(
-            out.get(f"btc_market_regime_weight_{model_name}", np.nan),
-            errors="coerce",
+        out[f"btc_market_regime_weight_{model_name}"] = _safe_numeric_series(
+            out,
+            f"btc_market_regime_weight_{model_name}",
+            np.nan,
         ).fillna(REGIME_MODEL_WEIGHTS["calm"][model_name])
 
     for model_name, cols in model_columns.items():
-        p_tp_series = pd.to_numeric(out[cols["p_tp"]], errors="coerce")
-        return_series = pd.to_numeric(out[cols["expected_return"]], errors="coerce")
+        p_tp_series = _safe_numeric_series(out, cols["p_tp"], np.nan)
+        return_series = _safe_numeric_series(out, cols["expected_return"], np.nan)
         out[cols["p_tp"]] = p_tp_series
         out[cols["expected_return"]] = return_series
         if cols["edge"] in out.columns:
-            out[cols["edge"]] = pd.to_numeric(out[cols["edge"]], errors="coerce")
+            out[cols["edge"]] = _safe_numeric_series(out, cols["edge"], np.nan)
         else:
             out[cols["edge"]] = p_tp_series * return_series
 
     available_mask = pd.DataFrame(index=out.index)
     for model_name, cols in model_columns.items():
-        p_tp_values = pd.to_numeric(out[cols["p_tp"]], errors="coerce")
-        expected_values = pd.to_numeric(out[cols["expected_return"]], errors="coerce")
-        edge_values = pd.to_numeric(out[cols["edge"]], errors="coerce")
+        p_tp_values = _safe_numeric_series(out, cols["p_tp"], np.nan)
+        expected_values = _safe_numeric_series(out, cols["expected_return"], np.nan)
+        edge_values = _safe_numeric_series(out, cols["edge"], np.nan)
         available_mask[model_name] = (
             (p_tp_values.notna() | expected_values.notna())
             & ~(
@@ -210,8 +224,8 @@ def apply_regime_model_blend(frame: pd.DataFrame) -> pd.DataFrame:
     return_components = []
     for model_name, cols in model_columns.items():
         weight_col = f"btc_market_regime_weight_{model_name}"
-        p_tp_values = pd.to_numeric(out[cols["p_tp"]], errors="coerce").fillna(0.0)
-        expected_values = pd.to_numeric(out[cols["expected_return"]], errors="coerce").fillna(0.0)
+        p_tp_values = _safe_numeric_series(out, cols["p_tp"], 0.0).fillna(0.0)
+        expected_values = _safe_numeric_series(out, cols["expected_return"], 0.0).fillna(0.0)
         p_tp_blend += p_tp_values * out[weight_col]
         return_blend += expected_values * out[weight_col]
         edge_blend += (p_tp_values * expected_values) * out[weight_col]
@@ -224,15 +238,15 @@ def apply_regime_model_blend(frame: pd.DataFrame) -> pd.DataFrame:
         weighted_return_std += out[f"btc_market_regime_weight_{model_name}"] * (centered ** 2)
     weighted_return_std = np.sqrt(weighted_return_std.clip(lower=0.0))
 
-    stage1_return_std = pd.to_numeric(out.get("stage1_return_std", 0.0), errors="coerce").fillna(0.0)
+    stage1_return_std = _safe_numeric_series(out, "stage1_return_std", 0.0).fillna(0.0)
     return_std = np.maximum(weighted_return_std, stage1_return_std * out["btc_market_regime_weight_stage1"].fillna(0.0))
 
-    stage1_lcb = pd.to_numeric(out.get("stage1_lower_confidence_bound", np.nan), errors="coerce").fillna(
-        pd.to_numeric(out[model_columns["stage1"]["expected_return"]], errors="coerce").fillna(0.0)
+    stage1_lcb = _safe_numeric_series(out, "stage1_lower_confidence_bound", np.nan).fillna(
+        _safe_numeric_series(out, model_columns["stage1"]["expected_return"], 0.0).fillna(0.0)
     )
-    conservative_return_blend += pd.to_numeric(out[model_columns["legacy"]["expected_return"]], errors="coerce").fillna(0.0) * out["btc_market_regime_weight_legacy"]
+    conservative_return_blend += _safe_numeric_series(out, model_columns["legacy"]["expected_return"], 0.0).fillna(0.0) * out["btc_market_regime_weight_legacy"]
     conservative_return_blend += stage1_lcb * out["btc_market_regime_weight_stage1"]
-    conservative_return_blend += pd.to_numeric(out[model_columns["stage2"]["expected_return"]], errors="coerce").fillna(0.0) * out["btc_market_regime_weight_stage2"]
+    conservative_return_blend += _safe_numeric_series(out, model_columns["stage2"]["expected_return"], 0.0).fillna(0.0) * out["btc_market_regime_weight_stage2"]
 
     out["regime_blended_p_tp_before_sl"] = p_tp_blend.clip(0.0, 1.0)
     out["regime_blended_expected_return"] = return_blend
