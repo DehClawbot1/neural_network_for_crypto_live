@@ -78,6 +78,36 @@ class ContractTargetBuilder:
                 return pd.to_datetime(series, utc=True, errors="coerce", format="mixed")
         return raw.dt.tz_convert("UTC")
 
+    def _dedupe_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+        return df.loc[:, ~df.columns.duplicated()].copy()
+
+    def _coalesce_suffix_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+        out = df.copy()
+        suffix_map: dict[str, list[str]] = {}
+        for column in list(out.columns):
+            match = re.match(r"^(?P<base>.+?)(?P<suffix>_(?:x|y|trade|target|weather_snapshot))$", str(column))
+            if not match:
+                continue
+            suffix_map.setdefault(match.group("base"), []).append(column)
+        for base_name, suffix_columns in suffix_map.items():
+            ordered_columns = []
+            if base_name in out.columns:
+                ordered_columns.append(base_name)
+            ordered_columns.extend([column for column in suffix_columns if column in out.columns])
+            if not ordered_columns:
+                continue
+            coalesce_frame = out[ordered_columns].copy()
+            out[base_name] = coalesce_frame.apply(
+                lambda row: next((value for value in row.tolist() if pd.notna(value)), pd.NA),
+                axis=1,
+            )
+            out = out.drop(columns=[column for column in suffix_columns if column in out.columns])
+        return self._dedupe_columns(out)
+
     def _path_stats(self, entry_price, path_prices, tp_move, sl_move):
         if path_prices.empty:
             return None, None, None, None
@@ -91,7 +121,15 @@ class ContractTargetBuilder:
         return tp_before_sl, mfe, mae, target_up
 
     def build(self, forward_minutes=15, max_hold_minutes=60, tp_move=0.04, sl_move=0.03):
-        signals_df = self._safe_read(self.signals_file)
+        signals_df = self._safe_read(self.historical_dataset_file)
+        if signals_df.empty:
+            signals_df = HistoricalDatasetBuilder(
+                logs_dir=self.logs_dir,
+                shared_logs_dir=self.shared_logs_dir,
+                brain_context=self.brain_context,
+            ).build()
+        if signals_df.empty:
+            signals_df = self._safe_read(self.signals_file)
         if signals_df.empty:
             signals_df = self._safe_read(self.raw_candidates_file)
         markets_df = self._safe_read(self.markets_file)
@@ -100,6 +138,7 @@ class ContractTargetBuilder:
         technical_regime_df = self._safe_read(self.technical_regime_file)
 
         signals_df = enrich_frame_with_entry_snapshots(signals_df, logs_dir=self.shared_logs_dir)
+        signals_df = self._coalesce_suffix_columns(self._dedupe_columns(signals_df))
         if self.brain_context is not None and not signals_df.empty:
             signals_df = filter_frame_for_brain(signals_df, self.brain_context)
 
@@ -159,6 +198,7 @@ class ContractTargetBuilder:
                 ]
                 live_view = btc_live_df[live_cols].sort_values(ts_col).rename(columns={ts_col: "timestamp"})
                 signals_df = _safe_merge_asof(signals_df, live_view, on="timestamp", direction="backward")
+                signals_df = self._coalesce_suffix_columns(self._dedupe_columns(signals_df))
 
         # Synthetic live feature backfill when btc_live_snapshot.csv is empty
         if btc_live_df.empty and "btc_price" in signals_df.columns:
@@ -250,6 +290,7 @@ class ContractTargetBuilder:
                 ]
                 regime_view = technical_regime_df[regime_cols].sort_values(ts_col).rename(columns={ts_col: "timestamp"})
                 signals_df = _safe_merge_asof(signals_df, regime_view, on="timestamp", direction="backward")
+                signals_df = self._coalesce_suffix_columns(self._dedupe_columns(signals_df))
         history_df = history_df.copy()
         history_df["token_id"] = history_df["token_id"].astype(str)
         history_df["timestamp"] = pd.to_datetime(history_df["timestamp"], utc=True, errors="coerce")
@@ -326,7 +367,7 @@ class ContractTargetBuilder:
         result = pd.DataFrame(rows)
         if self.brain_context is not None and not result.empty:
             result = filter_frame_for_brain(result, self.brain_context)
-        return result
+        return self._coalesce_suffix_columns(self._dedupe_columns(result))
 
     def write(self, forward_minutes=15, max_hold_minutes=60, tp_move=0.04, sl_move=0.03):
         df = self.build(

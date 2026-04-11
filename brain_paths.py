@@ -34,7 +34,9 @@ class BrainContext:
 
 
 def _normalize_text(value: Any) -> str:
-    return str(value or "").strip().lower()
+    if value is None or pd.isna(value):
+        return ""
+    return str(value).strip().lower()
 
 
 def normalize_market_family(value: Any) -> str:
@@ -79,7 +81,7 @@ def infer_market_family_from_row(row: dict[str, Any] | pd.Series | None) -> str:
         row_dict.get("model_kind"),
         row_dict.get("brain_id"),
     ]
-    combined = " | ".join(str(part or "") for part in text_parts)
+    combined = " | ".join("" if part is None or pd.isna(part) else str(part) for part in text_parts)
     if _looks_like_weather_temperature_text(combined):
         return WEATHER_FAMILY
     return BTC_FAMILY

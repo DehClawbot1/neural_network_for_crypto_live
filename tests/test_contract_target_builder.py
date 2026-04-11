@@ -136,6 +136,47 @@ class TestContractTargetBuilder(unittest.TestCase):
             self.assertEqual(round(float(df.iloc[0]["wallet_quality_score"]), 2), 0.78)
             self.assertEqual(df.iloc[0]["trader_wallet"], "0xabc")
 
+    def test_build_prefers_historical_dataset_backbone_for_feature_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp)
+            pd.DataFrame([
+                {
+                    "market": "BTC Test",
+                    "timestamp": "2026-03-22T00:00:00Z",
+                    "token_id": "1",
+                    "side": "YES",
+                    "confidence": 0.8,
+                    "wallet_trade_count_30d": None,
+                    "btc_live_index_price": None,
+                }
+            ]).to_csv(logs / "signals.csv", index=False)
+            pd.DataFrame([
+                {
+                    "market_title": "BTC Test",
+                    "timestamp": "2026-03-22T00:00:00Z",
+                    "token_id": "1",
+                    "outcome_side": "YES",
+                    "wallet_trade_count_30d": 7.0,
+                    "btc_live_index_price": 68111.0,
+                    "spread": 0.02,
+                }
+            ]).to_csv(logs / "historical_dataset.csv", index=False)
+            pd.DataFrame([
+                {"question": "BTC Test", "yes_token_id": "1", "no_token_id": "2"}
+            ]).to_csv(logs / "markets.csv", index=False)
+            pd.DataFrame([
+                {"token_id": "1", "timestamp": "2026-03-22T00:00:00Z", "price": 0.40},
+                {"token_id": "1", "timestamp": "2026-03-22T00:10:00Z", "price": 0.50},
+                {"token_id": "1", "timestamp": "2026-03-22T00:20:00Z", "price": 0.60},
+            ]).to_csv(logs / "clob_price_history.csv", index=False)
+
+            df = ContractTargetBuilder(logs_dir=logs).build()
+
+            self.assertFalse(df.empty)
+            self.assertEqual(float(df.iloc[0]["wallet_trade_count_30d"]), 7.0)
+            self.assertEqual(float(df.iloc[0]["btc_live_index_price"]), 68111.0)
+            self.assertEqual(float(df.iloc[0]["spread"]), 0.02)
+
 
 if __name__ == "__main__":
     unittest.main()

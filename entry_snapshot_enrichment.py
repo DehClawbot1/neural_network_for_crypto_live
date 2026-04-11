@@ -186,7 +186,9 @@ def enrich_frame_with_entry_snapshots(base_df: pd.DataFrame, logs_dir="logs") ->
         left = merged[snapshot_col]
         right = merged[merged_col]
         if pd.api.types.is_numeric_dtype(left):
-            merged[snapshot_col] = left.fillna(right)
+            numeric_left = pd.to_numeric(left, errors="coerce")
+            numeric_right = pd.to_numeric(right, errors="coerce")
+            merged[snapshot_col] = numeric_left.where(numeric_left.notna(), numeric_right)
         else:
             merged[snapshot_col] = left.where(left.notna() & (left.astype(str) != ""), right)
 
