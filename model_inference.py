@@ -13,6 +13,19 @@ except Exception:  # pragma: no cover
         return None
 
 
+def _safe_numeric_feature_series(frame: pd.DataFrame, column_name: str) -> pd.Series:
+    raw = frame.loc[:, column_name]
+    if isinstance(raw, pd.DataFrame):
+        if raw.empty:
+            return pd.Series([0.0] * len(frame), index=frame.index, dtype=float)
+        picked = raw.apply(
+            lambda row: next((value for value in row.tolist() if pd.notna(value)), 0.0),
+            axis=1,
+        )
+        return pd.to_numeric(picked, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return pd.to_numeric(raw, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+
 class ModelInference:
     """
     Load trained supervised models and emit inference-oriented outputs.
@@ -53,7 +66,7 @@ class ModelInference:
     def _prepare_matrix(self, saved, frame: pd.DataFrame):
         if saved is None:
             return None
-        feature_names = list(saved.get("features", []))
+        feature_names = list(dict.fromkeys(saved.get("features", [])))
         if not feature_names:
             return None
 
@@ -61,9 +74,9 @@ class ModelInference:
         missing = {col: 0.0 for col in feature_names if col not in work.columns}
         if missing: work = work.assign(**missing) # BUG FIX 8: Prevent DF Fragmentation
 
-        x = work[feature_names].copy()
-        for col in x.columns:
-            x[col] = pd.to_numeric(x[col], errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        x = pd.DataFrame(index=work.index)
+        for col in feature_names:
+            x[col] = _safe_numeric_feature_series(work, col)
 
         preprocessor = saved.get("preprocessor") or saved.get("transformer") or saved.get("scaler")
         if preprocessor is not None:
@@ -109,7 +122,7 @@ class ModelInference:
                 _report_inference_error("model_inference.regressor", exc, context="expected_return_zero_fallback")
                 out["expected_return"] = 0.0
 
-        p_tp = pd.to_numeric(out["p_tp_before_sl"], errors="coerce").replace([np.inf, -np.inf], 0.0).fillna(0.0)
-        exp_ret = pd.to_numeric(out["expected_return"], errors="coerce").replace([np.inf, -np.inf], 0.0).fillna(0.0)
+        p_tp = _safe_numeric_feature_series(out, "p_tp_before_sl")
+        exp_ret = _safe_numeric_feature_series(out, "expected_return")
         out["edge_score"] = p_tp * exp_ret
         return out

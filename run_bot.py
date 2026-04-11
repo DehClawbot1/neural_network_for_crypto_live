@@ -34,6 +34,7 @@ from brain_paths import list_brain_contexts
 from brain_coverage_report import build_btc_brain_coverage_report, format_btc_brain_coverage_line
 from leaderboard_service import PolymarketLeaderboardService
 from model_registry import ModelRegistry
+from rl_bootstrap import bootstrap_split_rl_aliases
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -240,6 +241,20 @@ def ensure_optional_rl_model():
     legacy_exists = LEGACY_WEIGHTS_PATH.exists()
     entry_exists = ENTRY_WEIGHTS_PATH.exists()
     position_exists = POSITION_WEIGHTS_PATH.exists()
+
+    if legacy_exists and (not entry_exists or not position_exists):
+        created_aliases = bootstrap_split_rl_aliases(
+            legacy_weights_path=LEGACY_WEIGHTS_PATH,
+            entry_weights_path=ENTRY_WEIGHTS_PATH,
+            position_weights_path=POSITION_WEIGHTS_PATH,
+        )
+        if created_aliases:
+            print("[+] Bootstrapped dedicated RL policy aliases from the legacy shared PPO:")
+            for alias_path in created_aliases:
+                print(f"    - {alias_path}")
+            entry_exists = ENTRY_WEIGHTS_PATH.exists()
+            position_exists = POSITION_WEIGHTS_PATH.exists()
+            print("")
 
     if entry_exists or position_exists:
         if entry_exists:

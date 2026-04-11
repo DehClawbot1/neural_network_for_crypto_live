@@ -13,6 +13,19 @@ except Exception:  # pragma: no cover
         return None
 
 
+def _safe_numeric_feature_series(frame: pd.DataFrame, column_name: str) -> pd.Series:
+    raw = frame.loc[:, column_name]
+    if isinstance(raw, pd.DataFrame):
+        if raw.empty:
+            return pd.Series([0.0] * len(frame), index=frame.index, dtype=float)
+        picked = raw.apply(
+            lambda row: next((value for value in row.tolist() if pd.notna(value)), 0.0),
+            axis=1,
+        )
+        return pd.to_numeric(picked, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return pd.to_numeric(raw, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+
 class Stage2TemporalInference:
     def __init__(self, weights_dir="weights", *, brain_context=None, brain_id=None, market_family=None, shared_logs_dir="logs", shared_weights_dir="weights"):
         if brain_context is None and (brain_id or market_family):
@@ -42,7 +55,7 @@ class Stage2TemporalInference:
     def _prepare_matrix(self, saved, frame: pd.DataFrame):
         if saved is None:
             return None
-        feature_names = list(saved.get("features", []))
+        feature_names = list(dict.fromkeys(saved.get("features", [])))
         if not feature_names:
             return None
 
@@ -51,13 +64,9 @@ class Stage2TemporalInference:
         if missing:
             work = pd.concat([work, pd.DataFrame({c: [0.0] * len(work) for c in missing}, index=work.index)], axis=1)
 
-        x = work[feature_names].copy()
-        for col in x.columns:
-            x[col] = (
-                pd.to_numeric(x[col], errors="coerce")
-                .replace([np.inf, -np.inf], np.nan)
-                .fillna(0.0)
-            )
+        x = pd.DataFrame(index=work.index)
+        for col in feature_names:
+            x[col] = _safe_numeric_feature_series(work, col)
 
         preprocessor = saved.get("preprocessor") or saved.get("transformer") or saved.get("scaler")
         if preprocessor is not None:
@@ -108,4 +117,6 @@ class Stage2TemporalInference:
                 _report_inference_error("stage2_temporal_inference.regressor", exc, context="temporal_expected_return_zero_fallback")
                 out["temporal_expected_return"] = 0.0
 
+        out["temporal_p_tp_before_sl"] = _safe_numeric_feature_series(out, "temporal_p_tp_before_sl")
+        out["temporal_expected_return"] = _safe_numeric_feature_series(out, "temporal_expected_return")
         return out

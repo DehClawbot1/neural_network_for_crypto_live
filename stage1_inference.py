@@ -14,6 +14,19 @@ except Exception:  # pragma: no cover
         return None
 
 
+def _safe_numeric_feature_series(frame: pd.DataFrame, column_name: str) -> pd.Series:
+    raw = frame.loc[:, column_name]
+    if isinstance(raw, pd.DataFrame):
+        if raw.empty:
+            return pd.Series([0.0] * len(frame), index=frame.index, dtype=float)
+        picked = raw.apply(
+            lambda row: next((value for value in row.tolist() if pd.notna(value)), 0.0),
+            axis=1,
+        )
+        return pd.to_numeric(picked, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return pd.to_numeric(raw, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+
 class Stage1Inference:
     def __init__(self, weights_dir="weights", *, brain_context=None, brain_id=None, market_family=None, shared_logs_dir="logs", shared_weights_dir="weights"):
         if brain_context is None and (brain_id or market_family):
@@ -43,7 +56,7 @@ class Stage1Inference:
     def _prepare_matrix(self, saved, frame: pd.DataFrame):
         if saved is None:
             return None
-        feature_names = list(saved.get("features", []))
+        feature_names = list(dict.fromkeys(saved.get("features", [])))
         if not feature_names:
             return None
 
@@ -52,13 +65,9 @@ class Stage1Inference:
         if missing:
             work = work.assign(**missing)
 
-        x = work[feature_names].copy()
-        for col in x.columns:
-            x[col] = (
-                pd.to_numeric(x[col], errors="coerce")
-                .replace([np.inf, -np.inf], np.nan)
-                .fillna(0.0)
-            )
+        x = pd.DataFrame(index=work.index)
+        for col in feature_names:
+            x[col] = _safe_numeric_feature_series(work, col)
 
         preprocessor = saved.get("preprocessor") or saved.get("transformer") or saved.get("scaler")
         if preprocessor is not None:
@@ -123,7 +132,10 @@ class Stage1Inference:
 
         calibration = reg_saved.get("return_calibration") if isinstance(reg_saved, dict) else {}
         uncertainty_floor = float(calibration.get("uncertainty_floor", 0.02) or 0.02)
-        out["return_std"] = np.maximum(abs(out["expected_return"].astype(float)) * 0.35, uncertainty_floor)
-        out["lower_confidence_bound"] = out["expected_return"].astype(float) - out["return_std"].astype(float)
-        out["edge_score"] = out["p_tp_before_sl"].astype(float) * out["lower_confidence_bound"].astype(float)
+        expected_return = _safe_numeric_feature_series(out, "expected_return")
+        p_tp = _safe_numeric_feature_series(out, "p_tp_before_sl")
+        return_std = np.maximum(abs(expected_return) * 0.35, uncertainty_floor)
+        out["return_std"] = return_std
+        out["lower_confidence_bound"] = expected_return - return_std
+        out["edge_score"] = p_tp * _safe_numeric_feature_series(out, "lower_confidence_bound")
         return out

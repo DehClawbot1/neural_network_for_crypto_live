@@ -97,6 +97,7 @@ from weather_temperature_markets import fetch_weather_temperature_markets
 from brain_paths import active_runtime_identity, resolve_brain_context
 from brain_log_routing import append_csv_with_brain_mirrors
 from model_registry import ModelRegistry
+from duplicate_column_audit import audit_duplicate_columns
 try:
     from inference_runtime_guard import (
         reset_cycle as _reset_inference_runtime_guard,
@@ -124,6 +125,7 @@ RAW_CANDIDATES_FILE = "logs/raw_candidates.csv"
 MARKETS_FILE = "logs/markets.csv"
 CANDIDATE_DECISIONS_FILE = "logs/candidate_decisions.csv"
 CANDIDATE_CYCLE_STATS_FILE = "logs/candidate_cycle_stats.csv"
+DUPLICATE_COLUMN_AUDIT_FILE = "logs/duplicate_column_audit.csv"
 ALWAYS_ON_STATE_FILE = Path("logs/always_on_slug_state.json")
 UPDOWN_SLUG_RE = re.compile(r"^btc-updown-(?P<minutes>\d+)m-(?P<epoch>\d{9,})$")
 SOURCE_WALLET_LOG_COLUMNS = [
@@ -1204,6 +1206,8 @@ _shutdown_requested = False
 
 def _request_shutdown(signum, frame):
     global _shutdown_requested
+    if _shutdown_requested:
+        return
     sig_name = signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum)
     logging.info("Received %s — finishing current cycle then shutting down...", sig_name)
     _shutdown_requested = True
@@ -2292,12 +2296,31 @@ def main_loop():
     while not _shutdown_requested:
         try:
             cycle_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+            cycle_duplicate_steps = []
             live_positions_df_for_cycle = pd.DataFrame()
             trajectory_metrics = {}
             pre_cycle_entry_freeze = False
             pre_cycle_freeze_reason = None
             pre_cycle_freeze_detail = {}
             _reset_inference_runtime_guard()
+
+            def _audit_duplicate_step(frame, step_name, **extra):
+                duplicates = audit_duplicate_columns(
+                    frame,
+                    step_name=step_name,
+                    cycle_id=cycle_id,
+                    report_path=DUPLICATE_COLUMN_AUDIT_FILE,
+                    extra=extra,
+                )
+                if duplicates:
+                    cycle_duplicate_steps.append(
+                        {
+                            "step_name": step_name,
+                            "duplicate_columns": ",".join(item["column"] for item in duplicates),
+                            "duplicate_column_count": len(duplicates),
+                        }
+                    )
+                return duplicates
             reset_failed_each_cycle = _is_truthy(os.getenv("RESET_FAILED_ORDERS_EACH_CYCLE", "false"))
             if (
                 reset_failed_each_cycle
@@ -2427,6 +2450,7 @@ def main_loop():
             closed_markets = fetch_btc_markets(closed=True)
             if not open_markets.empty and not closed_markets.empty:
                 markets_df = pd.concat([open_markets, closed_markets], ignore_index=True).drop_duplicates(subset=["market_id"])
+                _audit_duplicate_step(markets_df, "markets_initial_concat", source="open+closed_btc")
             else:
                 markets_df = open_markets if not open_markets.empty else closed_markets
             # Also fetch btc-updown rotating markets (they don't appear in bulk API)
@@ -2438,6 +2462,7 @@ def main_loop():
                             markets_df = _updown_df
                         else:
                             markets_df = pd.concat([markets_df, _updown_df], ignore_index=True)
+                            _audit_duplicate_step(markets_df, "markets_add_updown", prefix=_updown_prefix)
                             if "market_id" in markets_df.columns:
                                 markets_df = markets_df.drop_duplicates(subset=["market_id"], keep="last")
                         logging.info("Added %d %s rotating markets to universe.", len(_updown_df), _updown_prefix)
@@ -2451,6 +2476,7 @@ def main_loop():
                             markets_df = weather_markets_df
                         else:
                             markets_df = pd.concat([markets_df, weather_markets_df], ignore_index=True)
+                            _audit_duplicate_step(markets_df, "markets_add_weather", source="weather_temperature")
                             dedupe_field = "market_id" if "market_id" in markets_df.columns else "condition_id"
                             if dedupe_field in markets_df.columns:
                                 markets_df = markets_df.drop_duplicates(subset=[dedupe_field], keep="last")
@@ -2493,6 +2519,7 @@ def main_loop():
                 if not order_flow_signals_df.empty:
                     if signals_df is not None and not signals_df.empty:
                         signals_df = pd.concat([signals_df, order_flow_signals_df], ignore_index=True)
+                        _audit_duplicate_step(signals_df, "signals_add_order_flow", source="order_flow")
                     else:
                         signals_df = order_flow_signals_df
 
@@ -2522,6 +2549,7 @@ def main_loop():
                             signals_df = weather_signals_df
                         else:
                             signals_df = pd.concat([signals_df, weather_signals_df], ignore_index=True)
+                            _audit_duplicate_step(signals_df, "signals_add_weather", source="weather_wallet_state")
                         signals_df = _dedupe_signals_df(signals_df)
                         logging.info("Added %d weather temperature wallet-state signals.", len(weather_signals_df))
                         autonomous_monitor.write_heartbeat(
@@ -2553,7 +2581,13 @@ def main_loop():
                     else:
                         logging.debug("macro_context key %r has non-scalar type %s — skipped for signal injection.", _mk, type(_mv).__name__)
                 if _safe_ctx:
-                    signals_df = pd.concat([signals_df, pd.DataFrame({k: [v] * len(signals_df) for k, v in _safe_ctx.items()}, index=signals_df.index)], axis=1)
+                    for _ctx_key, _ctx_value in _safe_ctx.items():
+                        if _ctx_key in signals_df.columns:
+                            _existing = _frame_column_as_series(signals_df, _ctx_key, np.nan)
+                            signals_df = signals_df.loc[:, signals_df.columns != _ctx_key].copy()
+                            signals_df[_ctx_key] = _existing.fillna(_ctx_value)
+                        else:
+                            signals_df[_ctx_key] = _ctx_value
             # --------------------------------------------------
             
             if always_on_enabled and always_on_only and signals_df is not None and not signals_df.empty:
@@ -2595,6 +2629,7 @@ def main_loop():
                     missing_df = fetch_markets_by_slugs(sorted(missing_slugs))
                     if missing_df is not None and not missing_df.empty:
                         markets_df = pd.concat([markets_df, missing_df], ignore_index=True).drop_duplicates(subset=["slug"])
+                        _audit_duplicate_step(markets_df, "markets_universe_sync", source="missing_slug_recovery")
                         if markets_df is not None and not markets_df.empty: markets_df = markets_df.loc[:, ~markets_df.columns.duplicated()]
                         recovered_slugs = {
                             str(slug).strip().lower()
@@ -2663,6 +2698,12 @@ def main_loop():
             def _annotate_scored_candidates(frame, *, default_model_family: str, default_model_version: str, brain_context):
                 if frame is None or frame.empty:
                     return pd.DataFrame()
+                _audit_duplicate_step(
+                    frame,
+                    "annotate_scored_candidates_input",
+                    source=default_model_family,
+                    brain_id=brain_context.brain_id if brain_context is not None else None,
+                )
                 out = frame.loc[:, ~frame.columns.duplicated()].copy()
                 if "entry_model_family" not in out.columns:
                     out["entry_model_family"] = default_model_family
@@ -2711,6 +2752,7 @@ def main_loop():
 
             if btc_entry_signals_df is not None and not btc_entry_signals_df.empty:
                 features_df = feature_builder.build_features(btc_entry_signals_df, markets_df)
+                _audit_duplicate_step(features_df, "features_build_btc", source="feature_builder")
                 if features_df is not None:
                     features_df = features_df.loc[:, ~features_df.columns.duplicated()].copy()
                 if features_df is not None and not features_df.empty:
@@ -2778,6 +2820,7 @@ def main_loop():
                             except Exception:
                                 pass
                 inferred_df = model_inference.run(features_df)
+                _audit_duplicate_step(inferred_df, "inference_legacy_run", source="model_inference")
                 inferred_df["legacy_p_tp_before_sl"] = _frame_numeric_series(
                     inferred_df, "p_tp_before_sl", 0.0
                 ).fillna(0.0)
@@ -2791,6 +2834,7 @@ def main_loop():
                 ).fillna(0.0)
 
                 inferred_df = stage1_inference.run(inferred_df)
+                _audit_duplicate_step(inferred_df, "inference_stage1_run", source="stage1_inference")
                 inferred_df["stage1_p_tp_before_sl"] = _frame_numeric_series(
                     inferred_df, "p_tp_before_sl", 0.0
                 ).fillna(0.0)
@@ -2812,6 +2856,7 @@ def main_loop():
                 ).fillna(0.0)
 
                 inferred_df = stage2_inference.run(inferred_df)
+                _audit_duplicate_step(inferred_df, "inference_stage2_run", source="stage2_temporal_inference")
                 inferred_df["temporal_expected_return"] = clip_expected_return_series(
                     _frame_numeric_series(inferred_df, "temporal_expected_return", 0.0).fillna(0.0)
                 )
@@ -2887,6 +2932,7 @@ def main_loop():
             ]
             if scored_frames:
                 scored_df = pd.concat(scored_frames, ignore_index=True, sort=False)
+                _audit_duplicate_step(scored_df, "scored_concat", source="btc_weather_union")
                 scored_df = scored_df.loc[:, ~scored_df.columns.duplicated()].copy()
             else:
                 scored_df = pd.DataFrame()
@@ -4548,9 +4594,19 @@ def main_loop():
                 "entries_sent": _candidate_stats.get("entries_sent", 0),
                 "fills_received": _candidate_stats.get("fills_received", 0),
                 "reject_breakdown": json.dumps(_candidate_skip_counts, sort_keys=True),
+                "duplicate_column_step_count": len(cycle_duplicate_steps),
+                "duplicate_column_steps": json.dumps(cycle_duplicate_steps, sort_keys=True),
             }
             append_csv_record(CANDIDATE_CYCLE_STATS_FILE, cycle_stats_row)
             logging.info("CANDIDATE_CYCLE_SUMMARY %s", json.dumps(cycle_stats_row, separators=(",", ":")))
+            if cycle_duplicate_steps:
+                logging.warning(
+                    "Duplicate column audit detected %d step(s) this cycle. See %s",
+                    len(cycle_duplicate_steps),
+                    DUPLICATE_COLUMN_AUDIT_FILE,
+                )
+            else:
+                logging.info("Duplicate column audit clear for cycle %s.", cycle_id)
 
             # 4B. Open-position management path for hold / reduce / exit
             # FIX H3: Build price map by token_id for reliable matching
