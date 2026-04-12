@@ -18,6 +18,8 @@ def test_entry_rule_relaxation_can_allow_borderline_candidate():
     rule = EntryRuleLayer(min_score=0.20, max_spread=0.30, min_liquidity=0.50, min_liquidity_score=0.05)
     row = {
         "confidence": 0.15,
+        "edge_score": 0.03,
+        "expected_return": 0.02,
         "spread": 0.33,
         "liquidity": 0.20,
         "entry_score_relax": 0.10,

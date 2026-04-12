@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 from brain_paths import filter_frame_for_brain, resolve_brain_context
+from feature_treatment_policy import get_treatment
 from model_feature_catalog import SEQUENCE_BASE_COLUMNS
 
 
@@ -34,6 +35,27 @@ class SequenceFeatureBuilder:
             return pd.read_csv(path, engine="python", on_bad_lines="skip")
         except Exception:
             return pd.DataFrame()
+
+    @staticmethod
+    def _neutral_prior(base_col: str):
+        treatment = get_treatment(base_col)
+        if treatment.kind == "boolean":
+            return 0.0
+        if treatment.kind == "clip01":
+            if "quality" in base_col or "confidence" in base_col or "stability" in base_col:
+                return 0.5
+            return 0.0
+        if treatment.kind in {"standardize", "robust_scale", "raw"}:
+            if "rsi" in base_col:
+                return 50.0 if base_col.endswith("_14") else 0.0
+            if "confidence_multiplier" in base_col:
+                return 1.0
+            if "weight_" in base_col:
+                return 1.0 / 3.0
+            return 0.0
+        if treatment.kind == "log_scale":
+            return 0.0
+        return 0.0
 
     def build(self, lags=(1, 2, 3, 5, 10)):
         target_df = self._safe_read(self.contract_targets_file)
@@ -87,12 +109,17 @@ class SequenceFeatureBuilder:
             group = group.copy().reset_index(drop=True)
             new_cols = {}
             for col in base_cols:
+                current_series = pd.to_numeric(group[col], errors="coerce")
+                current_fallback = current_series.ffill().bfill().fillna(self._neutral_prior(col))
                 for lag in lags:
-                    new_cols[f"{col}_lag_{lag}"] = group[col].shift(lag)
+                    lagged = pd.to_numeric(group[col].shift(lag), errors="coerce")
+                    new_cols[f"{col}_lag_{lag}"] = lagged.where(lagged.notna(), current_fallback)
             if "trader_wallet" in group.columns:
-                new_cols["recent_token_activity_5"] = group["trader_wallet"].rolling(5).count()
+                new_cols["recent_token_activity_5"] = group["trader_wallet"].rolling(5).count().fillna(0.0)
             if "side" in group.columns:
-                new_cols["recent_yes_ratio_5"] = (group["side"].astype(str).str.upper() == "YES").rolling(5).mean()
+                new_cols["recent_yes_ratio_5"] = (
+                    (group["side"].astype(str).str.upper() == "YES").rolling(5).mean().fillna(0.5)
+                )
             group = pd.concat([group, pd.DataFrame(new_cols, index=group.index)], axis=1)
             parts.append(group)
 
@@ -137,7 +164,26 @@ class SequenceFeatureBuilder:
         label_cols = [column for column in ["forward_return_15m", "tp_before_sl_60m", "target_up"] if column in result.columns]
         if label_cols:
             labeled_mask = result[label_cols].notna().any(axis=1)
-            result = result[labeled_mask].reset_index(drop=True)
+            labeled_count = labeled_mask.sum()
+            if labeled_count > 0:
+                # Enough labeled rows exist — filter to keep only labeled rows for
+                # supervised training. Unlabeled rows are dropped since the Stage 2
+                # model needs ground-truth targets.
+                result = result[labeled_mask].reset_index(drop=True)
+            else:
+                # No labeled rows at all (e.g. contract_targets has no matching
+                # token_id/timestamp overlaps with the historical dataset yet —
+                # common early in a live session before trades have closed).
+                # Keep the full sequence dataset so the features are available for
+                # unsupervised pre-training / feature inspection; the model trainer
+                # will skip supervised steps when targets are absent.
+                logging.warning(
+                    "SequenceFeatureBuilder: 0 labeled rows after merge with "
+                    "contract_targets (%d label cols present but all NaN). "
+                    "Keeping %d unlabeled rows for feature availability.",
+                    len(label_cols),
+                    len(result),
+                )
         if self.brain_context is not None and not result.empty:
             result = filter_frame_for_brain(result, self.brain_context)
         logging.info(
@@ -154,5 +200,8 @@ class SequenceFeatureBuilder:
         # survive cycles where no valid sequence rows were produced.
         if df is None:
             df = pd.DataFrame()
+        if not df.empty:
+            from model_feature_safety import clean_dataframe_for_training
+            df = clean_dataframe_for_training(df, context="sequence_dataset")
         df.to_csv(self.output_file, index=False)
         return df

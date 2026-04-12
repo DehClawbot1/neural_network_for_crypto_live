@@ -117,20 +117,23 @@ class SignalEngine:
                 heuristic_confidence += 0.04
         elif ta_conflict:
             heuristic_confidence -= min(0.12, max(0.06, trend_confluence * 0.12))
+        # Model confidence: profitability-first — expected_return and edge_score
+        # carry 55 % of the weight; p_tp (model probability) carries 45 %.
         model_confidence = np.clip(
-            (p_tp * 0.70)
-            + np.clip(expected_return * 5.0, -1.0, 1.0) * 0.15
-            + np.clip(edge_score * 8.0, -1.0, 1.0) * 0.15,
+            (p_tp * 0.45)
+            + np.clip(expected_return * 5.0, -1.0, 1.0) * 0.30
+            + np.clip(edge_score * 8.0, -1.0, 1.0) * 0.25,
             0.0,
             1.0,
         )
 
-        confidence = float(np.clip((heuristic_confidence * 0.45) + (model_confidence * 0.55), 0.0, 1.0))
+        confidence = float(np.clip((heuristic_confidence * 0.35) + (model_confidence * 0.65), 0.0, 1.0))
         if expected_return == 0.0 and p_tp == 0.0:
-            confidence = heuristic_confidence  # BUG FIX 4: Restore 100% heuristic weight if AI is offline
+            confidence = heuristic_confidence  # Restore 100 % heuristic weight if AI is offline
         confidence = float(np.clip(_safe_float(confidence, default=0.0), 0.0, 1.0))
 
-        # If the model says the trade is weak, do not let the heuristic alone escalate it.
+        # Profitability-first caps: if the model says return/edge is negative
+        # the signal cannot graduate beyond WATCH regardless of heuristic score.
         if expected_return <= 0 or edge_score <= 0 or p_tp < 0.52:
             confidence = min(confidence, 0.59)
         if expected_return < 0 and p_tp < 0.48:
@@ -156,11 +159,21 @@ class SignalEngine:
         if entry_intent == "CLOSE_LONG":
             confidence = max(confidence, 0.65 if bool(row.get("source_wallet_exit_signal", False)) else 0.50)
 
-        if confidence < 0.45:
+        # Action code: profitability-weighted score determines the tier.
+        # Combine profitability (expected_return, edge) with the blended
+        # confidence so that high-return trades can graduate even when
+        # heuristic confidence is moderate.
+        _profit_score = float(np.clip(
+            np.clip(expected_return * 5.0, -1.0, 1.0) * 0.40
+            + np.clip(edge_score * 8.0, -1.0, 1.0) * 0.30
+            + confidence * 0.30,
+            0.0, 1.0,
+        ))
+        if _profit_score < 0.25:
             action_code = 0
-        elif confidence < 0.60:
+        elif _profit_score < 0.45:
             action_code = 1
-        elif confidence < 0.78:
+        elif _profit_score < 0.70:
             action_code = 2
         else:
             action_code = 3

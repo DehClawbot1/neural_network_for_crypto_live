@@ -864,24 +864,34 @@ class WeatherTemperatureStrategy:
                 p_tp = 0.50
             else:
                 p_tp = fair_side
+                # Profitability-first: edge and expected_return carry 48 %,
+                # probability (p_tp, stability) carries 28 %, wallet 24 %.
+                _edge_norm = _clip01(max(edge, 0.0) / max(self.min_forecast_edge * 2.0, 0.02))
                 model_confidence = _clip01(
-                    (wallet_quality * 0.22)
-                    + (direction_conf * 0.16)
-                    + (agreement_score * 0.10)
+                    (_edge_norm * 0.28)
+                    + (_clip01(max(expected_return, 0.0) * 4.0) * 0.20)
                     + (p_tp * 0.18)
-                    + (_clip01(max(edge, 0.0) / max(self.min_forecast_edge * 2.0, 0.02)) * 0.18)
-                    + (stability_score * 0.08)
-                    + (liquidity_score * 0.04)
-                    + (spread_score * 0.04)
+                    + (stability_score * 0.10)
+                    + (wallet_quality * 0.10)
+                    + (direction_conf * 0.06)
+                    + (agreement_score * 0.04)
+                    + (liquidity_score * 0.02)
+                    + (spread_score * 0.02)
                 )
                 if edge <= 0 or not bool(raw.get("forecast_ready", False)):
                     model_confidence = min(model_confidence, 0.44)
                 confidence = model_confidence
-                if confidence < 0.45:
+                # Action code: profitability-weighted score drives the tier
+                _weather_profit_score = _clip01(
+                    _edge_norm * 0.40
+                    + _clip01(max(expected_return, 0.0) * 4.0) * 0.30
+                    + confidence * 0.30
+                )
+                if _weather_profit_score < 0.25:
                     action_code = 0
-                elif confidence < 0.60:
+                elif _weather_profit_score < 0.45:
                     action_code = 1
-                elif confidence < 0.78:
+                elif _weather_profit_score < 0.70:
                     action_code = 2
                 else:
                     action_code = 3

@@ -115,6 +115,21 @@ class HistoricalDatasetBuilder:
             out = out.drop(columns=[column for column in suffix_columns if column in out.columns])
         return self._dedupe_columns(out)
 
+    def _concat_frame_parts(self, parts: list[pd.DataFrame], fallback: pd.DataFrame) -> pd.DataFrame:
+        cleaned_parts: list[pd.DataFrame] = []
+        for part in parts or []:
+            if part is None or part.empty:
+                continue
+            cleaned = part.dropna(axis=1, how="all")
+            if cleaned.empty:
+                continue
+            cleaned_parts.append(cleaned)
+        if not cleaned_parts:
+            return fallback
+        if len(cleaned_parts) == 1:
+            return cleaned_parts[0].copy()
+        return pd.concat(cleaned_parts, ignore_index=True, sort=False)
+
     def _parse_logged_timestamp_series(self, series: pd.Series) -> pd.Series:
         local_tz = os.getenv("BOT_LOG_LOCAL_TIMEZONE", "Europe/Lisbon")
         raw = pd.to_datetime(series, errors="coerce", utc=False, format="mixed")
@@ -441,8 +456,7 @@ class HistoricalDatasetBuilder:
                         cols = [c for c in ["timestamp", market_name_col, "liquidity", "volume", "last_trade_price", "url", "best_bid", "best_ask", "slug", "condition_id", "end_date"] if c in market_history.columns]
                         merged = self._safe_merge_asof(group, market_history[cols], on="timestamp")
                         merged_parts.append(self._coalesce_suffix_columns(self._dedupe_columns(merged)))
-                    merged_parts = [part for part in merged_parts if part is not None and not part.empty]
-                    dataset = pd.concat(merged_parts, ignore_index=True) if merged_parts else dataset
+                    dataset = self._concat_frame_parts(merged_parts, dataset)
                     dataset = self._coalesce_suffix_columns(dataset)
                     dataset = self._dedupe_columns(dataset)
                 else:
@@ -481,7 +495,7 @@ class HistoricalDatasetBuilder:
                         merged_parts.append(group)
                         continue
                     merged_parts.append(self._coalesce_suffix_columns(self._dedupe_columns(self._safe_merge_asof(group, history, on="timestamp"))))
-                dataset = pd.concat(merged_parts, ignore_index=True) if merged_parts else dataset
+                dataset = self._concat_frame_parts(merged_parts, dataset)
                 dataset = self._coalesce_suffix_columns(dataset)
                 dataset = self._dedupe_columns(dataset)
 
@@ -803,9 +817,12 @@ class HistoricalDatasetBuilder:
         return dataset
 
     def write(self):
+        from model_feature_safety import clean_dataframe_for_training
+
         dataset = self.build()
         if dataset.empty:
             return dataset
+        dataset = clean_dataframe_for_training(dataset, context="historical_dataset")
         dataset.to_csv(self.output_file, index=False)
         logging.info("Saved historical dataset to %s", self.output_file)
         return dataset

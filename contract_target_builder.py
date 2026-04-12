@@ -417,5 +417,7 @@ class ContractTargetBuilder:
             sl_move=sl_move,
         )
         if not df.empty:
+            from model_feature_safety import clean_dataframe_for_training
+            df = clean_dataframe_for_training(df, context="contract_targets")
             df.to_csv(self.output_file, index=False)
         return df

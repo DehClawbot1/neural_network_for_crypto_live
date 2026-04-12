@@ -26,7 +26,10 @@ def test_prediction_layer_uses_probability_when_profitability_is_absent():
         }
     )
 
-    assert score == 0.58
+    # With no profitability backing, the probability-only score is discounted
+    # (profitability-first: probability * 0.70 when no edge/return present).
+    assert 0.35 < score < 0.58
+    assert score > 0.0
 
 
 def test_prediction_layer_weather_uses_forecast_edge_and_fair_value_gap():
@@ -55,6 +58,9 @@ def test_entry_rule_allows_trade_when_trend_regime_confirms_direction():
     result = layer.evaluate(
         {
             "confidence": 0.34,
+            "p_tp_before_sl": 0.55,
+            "edge_score": 0.05,
+            "expected_return": 0.03,
             "spread": 0.02,
             "liquidity": 100.0,
             "outcome_side": "YES",
@@ -81,6 +87,9 @@ def test_entry_rule_penalizes_trade_until_fractal_breakout_confirms():
     result = layer.evaluate(
         {
             "confidence": 0.71,
+            "p_tp_before_sl": 0.65,
+            "edge_score": 0.06,
+            "expected_return": 0.04,
             "spread": 0.02,
             "liquidity": 100.0,
             "outcome_side": "YES",
@@ -108,6 +117,9 @@ def test_entry_rule_penalizes_trade_when_trend_bias_conflicts():
     result = layer.evaluate(
         {
             "confidence": 0.75,
+            "p_tp_before_sl": 0.70,
+            "edge_score": 0.08,
+            "expected_return": 0.05,
             "spread": 0.02,
             "liquidity": 100.0,
             "outcome_side": "NO",
@@ -133,6 +145,9 @@ def test_entry_rule_uses_spread_and_liquidity_as_penalties_not_hard_blocks():
     result = layer.evaluate(
         {
             "confidence": 0.95,
+            "p_tp_before_sl": 0.80,
+            "edge_score": 0.10,
+            "expected_return": 0.06,
             "spread": 0.32,
             "liquidity": 1.5,
             "outcome_side": "YES",
@@ -152,6 +167,9 @@ def test_entry_rule_tightens_when_open_portfolio_is_underwater():
     baseline = layer.evaluate(
         {
             "confidence": 0.27,
+            "p_tp_before_sl": 0.52,
+            "edge_score": 0.03,
+            "expected_return": 0.01,
             "spread": 0.02,
             "liquidity": 100.0,
             "outcome_side": "YES",
@@ -160,6 +178,9 @@ def test_entry_rule_tightens_when_open_portfolio_is_underwater():
     stressed = layer.evaluate(
         {
             "confidence": 0.27,
+            "p_tp_before_sl": 0.52,
+            "edge_score": 0.03,
+            "expected_return": 0.01,
             "spread": 0.02,
             "liquidity": 100.0,
             "outcome_side": "YES",

@@ -188,11 +188,19 @@ def _load_trade_outcomes(logs_dir: Path) -> pd.DataFrame:
 # ── main builder ────────────────────────────────────────────────────
 
 class LearningRowBuilder:
-    """Build one canonical learning row per executed trade."""
+    """Build one canonical learning row per executed trade.
+
+    Writes three CSV files:
+    - learning_dataset.csv          (all families, for backward compat)
+    - btc/learning_dataset.csv      (BTC family only)
+    - weather_temperature/learning_dataset.csv  (weather family only)
+    """
 
     def __init__(self, logs_dir: str = "logs"):
         self.logs_dir = Path(logs_dir)
         self.output_file = self.logs_dir / "learning_dataset.csv"
+        self.btc_output_file = self.logs_dir / "btc" / "learning_dataset.csv"
+        self.weather_output_file = self.logs_dir / "weather_temperature" / "learning_dataset.csv"
 
     def build(self) -> pd.DataFrame:
         # 1. trade outcomes are the spine
@@ -287,9 +295,35 @@ class LearningRowBuilder:
         return outcomes
 
     def write(self) -> pd.DataFrame:
+        from model_feature_safety import clean_dataframe_for_training
+
         df = self.build()
         if df.empty:
             return df
+        df = clean_dataframe_for_training(df, context="learning_dataset")
+
+        # Write combined file (all families)
         df.to_csv(self.output_file, index=False)
         logger.info("Saved learning dataset to %s", self.output_file)
+
+        # Write per-family split files
+        family_col = "market_family" if "market_family" in df.columns else None
+        if family_col:
+            _weather_mask = df[family_col].astype(str).str.startswith("weather_temperature")
+            _btc_df = df[~_weather_mask].copy()
+            _weather_df = df[_weather_mask].copy()
+        else:
+            _btc_df = df.copy()
+            _weather_df = pd.DataFrame()
+
+        if not _btc_df.empty:
+            self.btc_output_file.parent.mkdir(parents=True, exist_ok=True)
+            _btc_df.to_csv(self.btc_output_file, index=False)
+            logger.info("Saved BTC learning dataset to %s (%d rows)", self.btc_output_file, len(_btc_df))
+
+        if not _weather_df.empty:
+            self.weather_output_file.parent.mkdir(parents=True, exist_ok=True)
+            _weather_df.to_csv(self.weather_output_file, index=False)
+            logger.info("Saved weather learning dataset to %s (%d rows)", self.weather_output_file, len(_weather_df))
+
         return df

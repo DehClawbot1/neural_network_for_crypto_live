@@ -24,6 +24,14 @@ from trade_quality import enrich_quality_frame
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 
+def _safe_int(value, default: int = 0) -> int:
+    """Parse value as int, tolerating float-strings like '2029.0' from CSV reads."""
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return int(default)
+
+
 class Retrainer:
     """
     Outcome-driven retraining trigger for paper/research mode.
@@ -48,7 +56,7 @@ class Retrainer:
         self.closed_trade_threshold = closed_trade_threshold
         self.replay_threshold = replay_threshold
         state_payload = self._load_state_payload()
-        self._last_retrained_closed_count = int(state_payload.get("last_retrained_closed_count", 0) or 0)
+        self._last_retrained_closed_count = _safe_int(state_payload.get("last_retrained_closed_count", 0))
         self._last_retrained_at = str(state_payload.get("last_retrained_at") or "")
 
     def _safe_read(self, path):
@@ -142,10 +150,10 @@ class Retrainer:
             "candidate_beats_champion": candidate_beats_champion,
             "average_pnl": round(self._safe_float(candidate_row.get("average_pnl"), 0.0), 4),
             "profit_factor": round(self._safe_float(candidate_row.get("profit_factor"), 0.0), 4),
-            "live_closed_trades": int(candidate_row.get("live_closed_trades", 0) or 0),
-            "live_recent_closed_rows": int(candidate_row.get("live_recent_closed_rows", 0) or 0),
-            "live_recent_quality_scope_closed_trades": int(candidate_row.get("live_recent_quality_scope_closed_trades", 0) or 0),
-            "live_recent_reconciliation_close_count": int(candidate_row.get("live_recent_reconciliation_close_count", 0) or 0),
+            "live_closed_trades": _safe_int(candidate_row.get("live_closed_trades", 0)),
+            "live_recent_closed_rows": _safe_int(candidate_row.get("live_recent_closed_rows", 0)),
+            "live_recent_quality_scope_closed_trades": _safe_int(candidate_row.get("live_recent_quality_scope_closed_trades", 0)),
+            "live_recent_reconciliation_close_count": _safe_int(candidate_row.get("live_recent_reconciliation_close_count", 0)),
             "live_average_pnl": round(self._safe_float(candidate_row.get("live_average_pnl"), 0.0), 4),
             "live_profit_factor": round(self._safe_float(candidate_row.get("live_profit_factor"), 0.0), 4),
             "live_recent_reconciliation_close_ratio": round(self._safe_float(candidate_row.get("live_recent_reconciliation_close_ratio"), 0.0), 4),
@@ -266,10 +274,10 @@ class Retrainer:
             "profit_factor": self._safe_float(candidate_row.get("profit_factor"), 0.0),
             "max_drawdown": self._safe_float(candidate_row.get("max_drawdown"), 0.0),
             "test_accuracy": self._safe_float(candidate_row.get("test_accuracy"), 0.0),
-            "live_closed_trades": int(candidate_row.get("live_closed_trades", 0) or 0),
-            "live_recent_closed_rows": int(candidate_row.get("live_recent_closed_rows", 0) or 0),
-            "live_recent_quality_scope_closed_trades": int(candidate_row.get("live_recent_quality_scope_closed_trades", 0) or 0),
-            "live_recent_reconciliation_close_count": int(candidate_row.get("live_recent_reconciliation_close_count", 0) or 0),
+            "live_closed_trades": _safe_int(candidate_row.get("live_closed_trades", 0)),
+            "live_recent_closed_rows": _safe_int(candidate_row.get("live_recent_closed_rows", 0)),
+            "live_recent_quality_scope_closed_trades": _safe_int(candidate_row.get("live_recent_quality_scope_closed_trades", 0)),
+            "live_recent_reconciliation_close_count": _safe_int(candidate_row.get("live_recent_reconciliation_close_count", 0)),
             "live_win_rate": self._safe_float(candidate_row.get("live_win_rate"), 0.0),
             "live_average_pnl": self._safe_float(candidate_row.get("live_average_pnl"), 0.0),
             "live_profit_factor": self._safe_float(candidate_row.get("live_profit_factor"), 0.0),
@@ -301,11 +309,11 @@ class Retrainer:
         return merged
 
     def _format_live_window_context(self, candidate_row) -> str:
-        recent_closed_rows = int(candidate_row.get("live_recent_closed_rows", 0) or 0)
+        recent_closed_rows = _safe_int(candidate_row.get("live_recent_closed_rows", 0))
         if recent_closed_rows <= 0:
             return ""
-        reconciliation_count = int(candidate_row.get("live_recent_reconciliation_close_count", 0) or 0)
-        quality_scope_count = int(candidate_row.get("live_recent_quality_scope_closed_trades", 0) or 0)
+        reconciliation_count = _safe_int(candidate_row.get("live_recent_reconciliation_close_count", 0))
+        quality_scope_count = _safe_int(candidate_row.get("live_recent_quality_scope_closed_trades", 0))
         return (
             f"{reconciliation_count}/{recent_closed_rows} recent closes were reconciliation-driven; "
             f"evaluating quality gates on the remaining {quality_scope_count}."
@@ -419,7 +427,7 @@ class Retrainer:
                 f"average_pnl {candidate_average_pnl:.4f} <= required {min_average_pnl:.4f}"
             )
 
-        live_closed_trades = int(candidate_row.get("live_closed_trades", 0) or 0)
+        live_closed_trades = _safe_int(candidate_row.get("live_closed_trades", 0))
         live_profit_factor = self._safe_float(candidate_row.get("live_profit_factor"), 0.0)
         live_average_pnl = self._safe_float(candidate_row.get("live_average_pnl"), 0.0)
         live_learning_eligible_ratio = self._safe_float(candidate_row.get("live_learning_eligible_ratio"), 0.0)

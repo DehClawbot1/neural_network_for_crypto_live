@@ -26,6 +26,13 @@ class PositionTelemetry:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.snapshots_file = self.logs_dir / "position_snapshots.csv"
         self.portfolio_file = self.logs_dir / "portfolio_equity_curve.csv"
+        # Per-family equity curves — never mix BTC and weather PnL
+        _btc_dir = self.logs_dir / "btc"
+        _weather_dir = self.logs_dir / "weather_temperature"
+        _btc_dir.mkdir(parents=True, exist_ok=True)
+        _weather_dir.mkdir(parents=True, exist_ok=True)
+        self.btc_portfolio_file = _btc_dir / "portfolio_equity_curve.csv"
+        self.weather_portfolio_file = _weather_dir / "portfolio_equity_curve.csv"
 
     def _position_key(self, row: pd.Series | dict) -> str:
         getter = row.get if hasattr(row, "get") else lambda key, default=None: default
@@ -169,15 +176,8 @@ class PositionTelemetry:
                 df[col] = np.nan
         return df[keep].copy()
 
-    def capture_positions(self, positions_df: pd.DataFrame | None):
-        if positions_df is None or positions_df.empty:
-            return
-
-        now = datetime.now(timezone.utc).isoformat()
-        df = self._project_snapshot_frame(positions_df, timestamp=now)
-        safe_csv_append(self.snapshots_file, df)
-
-        portfolio_row = pd.DataFrame(
+    def _build_portfolio_row(self, df: pd.DataFrame, now: str) -> pd.DataFrame:
+        row = pd.DataFrame(
             [
                 {
                     "timestamp": now,
@@ -194,8 +194,35 @@ class PositionTelemetry:
                 }
             ]
         )
-        portfolio_row["total_pnl"] = portfolio_row["realized_pnl"] + portfolio_row["unrealized_pnl"]
+        row["total_pnl"] = row["realized_pnl"] + row["unrealized_pnl"]
+        return row
+
+    def capture_positions(self, positions_df: pd.DataFrame | None):
+        if positions_df is None or positions_df.empty:
+            return
+
+        now = datetime.now(timezone.utc).isoformat()
+        df = self._project_snapshot_frame(positions_df, timestamp=now)
+        safe_csv_append(self.snapshots_file, df)
+
+        # Combined portfolio curve (all families)
+        portfolio_row = self._build_portfolio_row(df, now)
         safe_csv_append(self.portfolio_file, portfolio_row)
+
+        # Per-family equity curves — BTC and weather tracked separately
+        _family_col = "market_family" if "market_family" in df.columns else None
+        if _family_col:
+            _weather_mask = df[_family_col].astype(str).str.startswith("weather_temperature")
+            _btc_df = df[~_weather_mask]
+            _weather_df = df[_weather_mask]
+        else:
+            _btc_df = df
+            _weather_df = pd.DataFrame()
+
+        if not _btc_df.empty:
+            safe_csv_append(self.btc_portfolio_file, self._build_portfolio_row(_btc_df, now))
+        if not _weather_df.empty:
+            safe_csv_append(self.weather_portfolio_file, self._build_portfolio_row(_weather_df, now))
 
     def load_snapshots(self, hours: int = 24) -> pd.DataFrame:
         if not self.snapshots_file.exists():

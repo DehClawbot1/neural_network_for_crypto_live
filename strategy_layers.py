@@ -51,7 +51,12 @@ class PredictionLayer:
             default=0.0,
         )
 
-        probability_signal = max(confidence, p_tp, 0.0)
+        # Probability signal: model p_tp is primary; confidence is a soft
+        # fallback only when no model probability output is available.
+        probability_signal = max(p_tp, 0.0)
+        if probability_signal <= 0.0:
+            probability_signal = max(confidence * 0.60, 0.0)
+
         profitability_signal = max(
             _bounded_positive_metric(row.get("edge_score", 0.0), scale=8.0),
             _bounded_positive_metric(row.get("hybrid_edge", 0.0), scale=8.0),
@@ -80,15 +85,14 @@ class PredictionLayer:
             )
         profitability_signal = max(profitability_signal, market_inefficiency_signal)
 
+        # Profitability-first blend: profitability drives 70 % of the score,
+        # probability (model p_tp / forecast) provides 30 % confirmation.
         if profitability_signal > 0.0 and probability_signal > 0.0:
-            score = max(
-                profitability_signal,
-                min(1.0, (profitability_signal * 0.60) + (probability_signal * 0.40)),
-            )
+            score = min(1.0, (profitability_signal * 0.70) + (probability_signal * 0.30))
         elif profitability_signal > 0.0:
             score = profitability_signal
         elif probability_signal > 0.0:
-            score = probability_signal
+            score = probability_signal * 0.70  # no profitability backing → discount
         else:
             score = 0.0
 
@@ -508,11 +512,15 @@ class ExitRuleLayer:
         self.stop_loss = stop_loss
         self.confidence_floor = confidence_floor
 
-    def exit_reason(self, pnl: float, confidence: float) -> str | None:
+    def exit_reason(self, pnl: float, confidence: float, expected_return: float = 0.0, edge_score: float = 0.0) -> str | None:
         if pnl >= self.take_profit:
             return "take_profit"
         if pnl <= self.stop_loss:
             return "stop_loss"
-        if confidence < self.confidence_floor:
+        # Profitability-first: exit early if both expected_return and
+        # edge have turned negative, even when confidence is still above floor.
+        if expected_return < -0.01 and edge_score < -0.01:
+            return "profitability_drop"
+        if confidence < self.confidence_floor and expected_return <= 0:
             return "confidence_drop"
         return None

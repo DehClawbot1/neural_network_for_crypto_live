@@ -92,5 +92,7 @@ def test_sequence_builder_falls_back_to_contract_targets_when_no_historical_data
 
         result = SequenceFeatureBuilder(logs_dir=logs).build(lags=(1,))
 
-        assert len(result) == 2
+        assert len(result) == 3
         assert "entry_price_lag_1" in result.columns
+        assert result["entry_price_lag_1"].notna().all()
+        assert result["spread_lag_1"].notna().all()

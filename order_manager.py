@@ -385,6 +385,18 @@ class OrderManager:
             row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": "invalid_price"}
             self._append(self.orders_file, row)
             return row, None
+        # Polymarket CLOB hard limits: price must be in [0.01, 0.99].
+        # Clamp rather than reject so marginally out-of-bounds prices (e.g. 0.992
+        # from a stale orderbook snapshot) don't count as failed entries.
+        _POLY_PRICE_MIN = float(os.getenv("POLY_PRICE_MIN", "0.01"))
+        _POLY_PRICE_MAX = float(os.getenv("POLY_PRICE_MAX", "0.99"))
+        if price < _POLY_PRICE_MIN or price > _POLY_PRICE_MAX:
+            clamped_price = max(_POLY_PRICE_MIN, min(_POLY_PRICE_MAX, price))
+            logging.warning(
+                "Price %.6f out of Polymarket bounds [%.2f, %.2f] for token %s — clamping to %.6f",
+                price, _POLY_PRICE_MIN, _POLY_PRICE_MAX, str(token_id)[:16], clamped_price,
+            )
+            price = clamped_price
         if requested_size is None or requested_size <= 0.0:
             row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": "invalid_size"}
             self._append(self.orders_file, row)

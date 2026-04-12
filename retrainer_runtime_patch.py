@@ -150,8 +150,8 @@ class IncrementalRetrainer(_legacy_retrainer.Retrainer):
 
     def _write_status(self, closed_rows: int, replay_rows: int, action: str):
         state = self._read_status_state()
-        last_trained_closed_rows = int(state.get("last_trained_closed_rows", 0) or 0)
-        last_trained_replay_rows = int(state.get("last_trained_replay_rows", 0) or 0)
+        last_trained_closed_rows = int(float(state.get("last_trained_closed_rows", 0) or 0))
+        last_trained_replay_rows = int(float(state.get("last_trained_replay_rows", 0) or 0))
         last_retrained_at = state.get("last_retrained_at")
         self.status_file.write_text(action + "\n", encoding="utf-8")
         self._append_csv_row(
@@ -175,8 +175,8 @@ class IncrementalRetrainer(_legacy_retrainer.Retrainer):
         closed_rows = len(closed_df)
         replay_rows = len(replay_df)
         status = self._read_status_state()
-        last_trained_closed_rows = int(status.get("last_trained_closed_rows", 0) or 0)
-        last_trained_replay_rows = int(status.get("last_trained_replay_rows", 0) or 0)
+        last_trained_closed_rows = int(float(status.get("last_trained_closed_rows", 0) or 0))
+        last_trained_replay_rows = int(float(status.get("last_trained_replay_rows", 0) or 0))
         last_retrained_at = pd.to_datetime(status.get("last_retrained_at"), errors="coerce", utc=True)
 
         new_closed_rows = max(0, closed_rows - last_trained_closed_rows)

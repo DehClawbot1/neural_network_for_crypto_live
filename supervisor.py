@@ -94,7 +94,7 @@ from trading_mode_preset import select_trading_mode, apply_preset, PRESETS
 from btc_trade_feedback import BTCTradeFeedback
 from weather_temperature_strategy import WeatherTemperatureStrategy
 from weather_temperature_markets import fetch_weather_temperature_markets
-from brain_paths import active_runtime_identity, resolve_brain_context
+from brain_paths import active_runtime_identity, resolve_brain_context, infer_market_family_from_row
 from brain_log_routing import append_csv_with_brain_mirrors
 from model_registry import ModelRegistry
 from duplicate_column_audit import audit_duplicate_columns
@@ -863,13 +863,51 @@ def summarize_open_position_context(positions_df: pd.DataFrame | None = None, ac
 
 
 def attach_open_position_context(signals_df: pd.DataFrame, positions_df: pd.DataFrame | None = None, active_trades=None):
+    """Attach open-position pressure to each signal row.
+
+    Critically, each market family only sees the portfolio pressure from its
+    own family — BTC signals must not be penalised by weather drawdown and
+    vice versa.  We build per-family context and broadcast row-by-row.
+    """
     if signals_df is None or signals_df.empty:
         return signals_df, summarize_open_position_context(positions_df=positions_df, active_trades=active_trades)
-    context = summarize_open_position_context(positions_df=positions_df, active_trades=active_trades)
+
+    # Build a full-portfolio context for the heartbeat / monitoring
+    global_context = summarize_open_position_context(positions_df=positions_df, active_trades=active_trades)
+
     work = signals_df.copy()
-    for key, value in context.items():
-        work[key] = value
-    return work, context
+    if "market_family" not in work.columns:
+        # No family info — fall back to global context
+        for key, value in global_context.items():
+            work[key] = value
+        return work, global_context
+
+    # Filter positions_df by market_family
+    def _family_positions(family_prefix: str) -> pd.DataFrame | None:
+        if positions_df is not None and not positions_df.empty and "market_family" in positions_df.columns:
+            mask = positions_df["market_family"].astype(str).str.startswith(family_prefix)
+            subset = positions_df[mask]
+            return subset if not subset.empty else None
+        if active_trades:
+            family_trades = [t for t in active_trades if str(getattr(t, "market_family", "") or "").startswith(family_prefix)]
+            return _active_trades_to_positions_frame(family_trades) if family_trades else None
+        return None
+
+    _weather_prefix = "weather_temperature"
+    _btc_pos = _family_positions("btc") or _family_positions("")  # btc = anything not weather
+    _weather_pos = _family_positions(_weather_prefix)
+
+    _btc_ctx = summarize_open_position_context(positions_df=_btc_pos)
+    _weather_ctx = summarize_open_position_context(positions_df=_weather_pos)
+
+    # Attach per-row context matching each signal's family
+    for key in global_context:
+        btc_val = _btc_ctx.get(key, 0)
+        weather_val = _weather_ctx.get(key, 0)
+        is_weather = work["market_family"].astype(str).str.startswith(_weather_prefix)
+        work[key] = is_weather.map({True: weather_val, False: btc_val})
+
+    return work, global_context
 
 
 def choose_action(
@@ -988,14 +1026,17 @@ def choose_action(
             max(0.02, float(getattr(TradingConfig, "ENTRY_INACTIVITY_CONFIDENCE_BOOST", 0.08))),
         )
     if (entry_brain is not None or legacy_brain is not None) and allow_rule_fallback_with_rl_hold:
+        # Profitability-first: check expected_return and edge BEFORE confidence.
+        expected_return = _safe_float(signal_row.get("expected_return", 0.0), default=0.0)
+        if expected_return <= aggressive_expected_return_floor:
+            return 0
+        edge_score = _safe_float(signal_row.get("edge_score", 0.0), default=0.0)
+        if edge_score <= 0.0 and expected_return <= 0.0:
+            return 0
         confidence = _safe_float(signal_row.get("confidence", 0.0), default=float("nan"))
         if not np.isfinite(confidence) or confidence <= 0.0:
             confidence = _safe_float(PredictionLayer.select_signal_score(signal_row), default=0.0)
         if confidence >= rl_hold_min_confidence and rule_allows_entry:
-            expected_return = _safe_float(signal_row.get("expected_return", 0.0), default=0.0)
-            if expected_return <= aggressive_expected_return_floor:
-                return 0
-            edge_score = _safe_float(signal_row.get("edge_score", 0.0), default=0.0)
             return 2 if edge_score >= 0.04 else 1
 
     # FIX V5: If RL models are loaded and fallback is disabled / conditions not met, keep HOLD.
@@ -2044,7 +2085,11 @@ def main_loop():
             logging.warning("Failed to persist always-on slug state (%s): %s", resolved_slug, exc)
 
     entry_max_market_staleness_sec = float(os.getenv("ENTRY_MAX_MARKET_STALENESS_SEC", "90") or 90)
-    entry_cycle_staleness_grace_sec = float(os.getenv("ENTRY_CYCLE_STALENESS_GRACE_SEC", "300") or 300)
+    # Grace period for live mode: signal_observed_at is stamped at cycle start, so
+    # candidates evaluated late in a long cycle (balance checks, reconciliation, many
+    # candidates) will be rejected if this is too small. 1800 s = 30-minute window
+    # keeps signals valid across typical research-pipeline cadences.
+    entry_cycle_staleness_grace_sec = float(os.getenv("ENTRY_CYCLE_STALENESS_GRACE_SEC", "1800") or 1800)
     entry_require_market_timestamp = _is_truthy(os.getenv("ENTRY_REQUIRE_MARKET_TIMESTAMP", "false"))
     # LIVE-TRADE FIX: calibration gate disabled by default — it blocked all entries when
     # there is no historical edge data in the DB (fresh account / first run).
@@ -2056,7 +2101,7 @@ def main_loop():
     # LIVE-TRADE FIX: raised drawdown limit from $8 → $50 and recon mismatches 4 → 20
     # to avoid the kill-switch firing on normal account activity / first fills.
     max_session_drawdown_usdc = float(os.getenv("SESSION_MAX_DRAWDOWN_USDC", "50.0") or 50.0)
-    max_session_failed_entries = max(1, int(os.getenv("SESSION_MAX_FAILED_ENTRIES", "15") or 15))
+    max_session_failed_entries = max(1, int(os.getenv("SESSION_MAX_FAILED_ENTRIES", "50") or 50))
     max_session_reconciliation_mismatches = max(1, int(os.getenv("SESSION_MAX_RECON_MISMATCHES", "20") or 20))
     session_start_balance = None
     session_peak_balance = None
@@ -2064,6 +2109,11 @@ def main_loop():
     session_reconciliation_mismatch_count = 0
     session_kill_switch_active = False
     session_kill_switch_reason = None
+    session_kill_switch_activated_at = None  # UTC timestamp when kill switch last triggered
+    # Auto-reset cooldown: after this many minutes of the kill switch being active,
+    # it can reset itself IF the only trigger was failed-entry-limit (not drawdown/recon).
+    # Set to 0 to disable auto-reset.
+    session_kill_switch_reset_minutes = max(0, int(os.getenv("SESSION_KILL_SWITCH_RESET_MINUTES", "30") or 30))
 
     def _classify_precycle_reconciliation_report(recon_report: dict) -> dict:
         report = recon_report or {}
@@ -2119,7 +2169,7 @@ def main_loop():
             return default_baseline
 
     def _update_session_drawdown(balance_now):
-        nonlocal session_start_balance, session_peak_balance, session_kill_switch_active, session_kill_switch_reason
+        nonlocal session_start_balance, session_peak_balance, session_kill_switch_active, session_kill_switch_reason, session_kill_switch_activated_at
         if balance_now is None:
             return
         balance_now = _safe_float(balance_now, default=0.0)
@@ -2133,6 +2183,7 @@ def main_loop():
         drawdown = session_peak_balance - balance_now
         if drawdown >= max_session_drawdown_usdc and not session_kill_switch_active:
             session_kill_switch_active = True
+            session_kill_switch_activated_at = pd.Timestamp.utcnow()
             session_kill_switch_reason = f"session_drawdown_limit_hit ({drawdown:.4f} >= {max_session_drawdown_usdc:.4f})"
             logging.error("Session kill switch activated: %s", session_kill_switch_reason)
 
@@ -2373,6 +2424,29 @@ def main_loop():
                 except Exception:
                     pass
 
+            # Auto-reset the kill switch after a cooldown period, but ONLY if the
+            # trigger was the failed-entry limit (not drawdown or reconciliation).
+            # Drawdown and recon triggers indicate real account risk and must not auto-reset.
+            if (
+                session_kill_switch_active
+                and session_kill_switch_reset_minutes > 0
+                and session_kill_switch_activated_at is not None
+                and "session_failed_entry_limit_hit" in str(session_kill_switch_reason or "")
+                and "session_drawdown_limit_hit" not in str(session_kill_switch_reason or "")
+                and "session_reconciliation_mismatch_limit_hit" not in str(session_kill_switch_reason or "")
+            ):
+                _minutes_since_kill = (pd.Timestamp.utcnow() - session_kill_switch_activated_at).total_seconds() / 60.0
+                if _minutes_since_kill >= session_kill_switch_reset_minutes:
+                    logging.warning(
+                        "Auto-resetting session kill switch after %.1f min cooldown (was: %s). "
+                        "Resetting failed_entries counter.",
+                        _minutes_since_kill, session_kill_switch_reason,
+                    )
+                    session_kill_switch_active = False
+                    session_kill_switch_reason = None
+                    session_kill_switch_activated_at = None
+                    session_failed_entries = 0
+
             if session_kill_switch_active:
                 pre_cycle_entry_freeze = True
                 pre_cycle_freeze_reason = "session_kill_switch"
@@ -2421,6 +2495,7 @@ def main_loop():
                             and not session_kill_switch_active
                         ):
                             session_kill_switch_active = True
+                            session_kill_switch_activated_at = pd.Timestamp.utcnow()
                             session_kill_switch_reason = (
                                 "session_reconciliation_mismatch_limit_hit "
                                 f"({session_reconciliation_mismatch_count} >= {max_session_reconciliation_mismatches})"
@@ -2755,7 +2830,17 @@ def main_loop():
                     out["performance_governor_level"] = 0
                 else:
                     out["performance_governor_level"] = _frame_numeric_series(out, "performance_governor_level", 0.0).fillna(0).astype(int)
-                out["market_family"] = out.apply(lambda row: build_quality_context(row.to_dict()).get("market_family", row.get("market_family", "other")), axis=1)
+                # Re-infer market_family from market title/slug so a stale CSV tag
+                # (e.g. "weather_temperature" on a Trump politics market contaminated
+                # via the brain_id inference loop) cannot propagate forward.
+                out["market_family"] = out.apply(
+                    lambda row: infer_market_family_from_row({
+                        k: row.get(k) for k in (
+                            "market", "market_title", "question", "slug", "market_slug",
+                        )
+                    }),
+                    axis=1,
+                )
                 out["horizon_bucket"] = out.apply(lambda row: build_quality_context(row.to_dict()).get("horizon_bucket", row.get("horizon_bucket", "unknown")), axis=1)
                 out["liquidity_bucket"] = out.apply(lambda row: build_quality_context(row.to_dict()).get("liquidity_bucket", row.get("liquidity_bucket", "unknown")), axis=1)
                 out["volatility_bucket"] = out.apply(lambda row: build_quality_context(row.to_dict()).get("volatility_bucket", row.get("volatility_bucket", "unknown")), axis=1)
@@ -2999,8 +3084,50 @@ def main_loop():
 
             if scored_df.empty:
                 logging.info("No scored signals generated. Checking active positions...")
-            sort_cols = [c for c in ["risk_adjusted_ev", "entry_ev", "execution_quality_score", "edge_score", "p_tp_before_sl", "confidence", "normalized_trade_size"] if c in scored_df.columns]
-            scored_df = scored_df.sort_values(by=sort_cols, ascending=[False] * len(sort_cols))
+
+            # ── Per-family ranking ──────────────────────────────────────────
+            # BTC and weather signals MUST NOT be ranked against each other:
+            # their scoring metrics are on different scales and semantics.
+            # Sort each family independently using its own key columns, then
+            # interleave round-robin so neither family starves the other.
+            def _sort_family(df: pd.DataFrame, family_prefix: str) -> pd.DataFrame:
+                if df.empty:
+                    return df
+                if family_prefix == "weather_temperature":
+                    _sort_keys = [c for c in [
+                        "weather_forecast_edge", "weather_forecast_margin_score",
+                        "weather_forecast_stability_score", "forecast_p_hit_interval",
+                        "edge_score", "confidence",
+                    ] if c in df.columns]
+                else:
+                    _sort_keys = [c for c in [
+                        "risk_adjusted_ev", "entry_ev", "execution_quality_score",
+                        "edge_score", "p_tp_before_sl", "confidence", "normalized_trade_size",
+                    ] if c in df.columns]
+                if _sort_keys:
+                    df = df.sort_values(by=_sort_keys, ascending=[False] * len(_sort_keys))
+                if "token_id" in df.columns:
+                    df = df.groupby("token_id").head(3).reset_index(drop=True)
+                return df
+
+            _weather_mask = scored_df["market_family"].astype(str).str.startswith("weather_temperature") if "market_family" in scored_df.columns else pd.Series(False, index=scored_df.index)
+            _btc_ranked = _sort_family(scored_df[~_weather_mask].copy(), "btc")
+            _weather_ranked = _sort_family(scored_df[_weather_mask].copy(), "weather_temperature")
+
+            # Round-robin interleave: BTC slot, weather slot, BTC slot, …
+            _interleaved: list = []
+            _bi, _wi = 0, 0
+            _bl, _wl = len(_btc_ranked), len(_weather_ranked)
+            while _bi < _bl or _wi < _wl:
+                if _bi < _bl:
+                    _interleaved.append(_btc_ranked.iloc[_bi])
+                    _bi += 1
+                if _wi < _wl:
+                    _interleaved.append(_weather_ranked.iloc[_wi])
+                    _wi += 1
+            scored_df = pd.DataFrame(_interleaved).reset_index(drop=True) if _interleaved else scored_df
+            # ───────────────────────────────────────────────────────────────
+
             calibration_baseline = _load_calibration_baseline() if enable_calibration_gate else calibration_min_edge
             open_token_ids, open_condition_ids, open_market_slugs = _extract_open_market_universe(markets_df)
             if open_market_slugs:
@@ -3012,32 +3139,33 @@ def main_loop():
             else:
                 logging.warning("Open market universe is empty this cycle; skipping candidate entries.")
 
-            # Suppress duplicate entries / repeated token spam
-            if "token_id" in scored_df.columns:
-                # Keep top 3 per token (was top 1 — too aggressive)
-                scored_df = scored_df.groupby("token_id").head(3).reset_index(drop=True)
-
-            # 3. Log top-ranked paper opportunities (research output, not betting advice)
-            top_n = min(5, len(scored_df))
-            logging.info("Top %s paper-trading opportunities this cycle:", top_n)
-            print("\n=== TOP PAPER-TRADING OPPORTUNITIES ===")
-            for rank, (_, ranked_row) in enumerate(scored_df.head(top_n).iterrows(), start=1):
-                ranked_side = (
-                    ranked_row.get("side")
-                    if pd.notna(ranked_row.get("side"))
-                    else ranked_row.get("outcome_side", ranked_row.get("side"))
-                )
-                summary_line = (
-                    f"{rank}. {ranked_row.get('signal_label')} | "
-                    f"confidence={_safe_float(ranked_row.get('decision_score', ranked_row.get('confidence', PredictionLayer.select_signal_score(ranked_row))), default=0.0):.2f} | "
-                    f"market={ranked_row.get('market_title')} | "
-                    f"side={ranked_side}"
-                )
-                logging.info(" - %s", summary_line)
-                print(summary_line)
-                print(f"   reason: {ranked_row.get('reason')}")
-                log_ranked_signal(ranked_row.to_dict())
-            print("======================================\n")
+            # 3. Log top-ranked paper opportunities per family (research output, not betting advice)
+            for _log_family, _log_label in [("btc", "BTC"), ("weather_temperature", "WEATHER")]:
+                _log_df = _btc_ranked if _log_family == "btc" else _weather_ranked
+                top_n = min(5, len(_log_df))
+                if top_n == 0:
+                    continue
+                logging.info("Top %s %s paper-trading opportunities this cycle:", top_n, _log_label)
+                if _log_label == "BTC":
+                    print(f"\n=== TOP {_log_label} PAPER-TRADING OPPORTUNITIES ===")
+                for rank, (_, ranked_row) in enumerate(_log_df.head(top_n).iterrows(), start=1):
+                    ranked_side = (
+                        ranked_row.get("side")
+                        if pd.notna(ranked_row.get("side"))
+                        else ranked_row.get("outcome_side", ranked_row.get("side"))
+                    )
+                    summary_line = (
+                        f"{rank}. [{_log_label}] {ranked_row.get('signal_label')} | "
+                        f"confidence={_safe_float(ranked_row.get('decision_score', ranked_row.get('confidence', PredictionLayer.select_signal_score(ranked_row))), default=0.0):.2f} | "
+                        f"market={ranked_row.get('market_title')} | "
+                        f"side={ranked_side}"
+                    )
+                    logging.info(" - %s", summary_line)
+                    print(summary_line)
+                    print(f"   reason: {ranked_row.get('reason')}")
+                    log_ranked_signal(ranked_row.to_dict())
+                if _log_label == "WEATHER":
+                    print("======================================\n")
 
             last_entry_age_minutes = minutes_since_last_entry(db)
             cadence_boost_active = (
@@ -3051,9 +3179,10 @@ def main_loop():
             active_trade_keys = set()
             current_open_exposure = 0.0
             current_weather_active_trade_count = 0
+            current_btc_active_trade_count = 0
 
             def _refresh_local_active_trade_state():
-                nonlocal current_active_trades, active_trade_keys, current_open_exposure, current_weather_active_trade_count
+                nonlocal current_active_trades, active_trade_keys, current_open_exposure, current_weather_active_trade_count, current_btc_active_trade_count
                 current_active_trades = [
                     trade
                     for trade in trade_manager.active_trades.values()
@@ -3077,6 +3206,7 @@ def main_loop():
                     for trade in current_active_trades
                     if str(getattr(trade, "market_family", "") or "").strip().lower().startswith("weather_temperature")
                 )
+                current_btc_active_trade_count = len(current_active_trades) - current_weather_active_trade_count
 
             _refresh_local_active_trade_state()
             governor_state = performance_governor.evaluate()
@@ -3614,6 +3744,7 @@ def main_loop():
                             and not session_kill_switch_active
                         ):
                             session_kill_switch_active = True
+                            session_kill_switch_activated_at = pd.Timestamp.utcnow()
                             session_kill_switch_reason = (
                                 "session_reconciliation_mismatch_limit_hit "
                                 f"({session_reconciliation_mismatch_count} >= {max_session_reconciliation_mismatches})"
@@ -3632,9 +3763,15 @@ def main_loop():
                             freeze_detail.get("live_only"),
                         )
                         autonomous_monitor.write_heartbeat("reconciliation", status="error", message="entry_freeze_state_mismatch", extra=freeze_detail)
-                    elif previous_entry_freeze_active:
+                    elif previous_entry_freeze_active and not live_entry_freeze:
                         session_reconciliation_mismatch_count = 0
                         logging.info("Entry freeze cleared (previous_reason=%s)", previous_entry_freeze_reason or "state_mismatch")
+                    elif previous_entry_freeze_active and live_entry_freeze:
+                        logging.info(
+                            "Reconciliation mismatch freeze cleared, but entry freeze remains active (reason=%s, detail=%s).",
+                            freeze_reason or "state_mismatch",
+                            freeze_detail.get("reason") if isinstance(freeze_detail, dict) else None,
+                        )
 
             previous_entry_freeze_active = live_entry_freeze
             previous_entry_freeze_reason = freeze_reason
@@ -3670,7 +3807,7 @@ def main_loop():
                 precomputed_calibrated_edge: float | None = None,
                 **extra,
             ):
-                nonlocal session_failed_entries, session_kill_switch_active, session_kill_switch_reason
+                nonlocal session_failed_entries, session_kill_switch_active, session_kill_switch_reason, session_kill_switch_activated_at
 
                 reject_reason_norm = str(reject_reason or "").strip().lower() or None
                 reject_category = _reject_category(reject_reason_norm) if reject_reason_norm else None
@@ -3843,6 +3980,7 @@ def main_loop():
                     session_failed_entries += 1
                     if session_failed_entries >= max_session_failed_entries and not session_kill_switch_active:
                         session_kill_switch_active = True
+                        session_kill_switch_activated_at = pd.Timestamp.utcnow()
                         session_kill_switch_reason = (
                             "session_failed_entry_limit_hit "
                             f"({session_failed_entries} >= {max_session_failed_entries})"
@@ -3977,13 +4115,25 @@ def main_loop():
                         max_positions=_max_pos,
                     )
                     continue
-                if market_family.startswith("weather_temperature") and current_weather_active_trade_count >= int(getattr(weather_temperature_strategy, "max_concurrent_positions", 6) or 6):
+                # Per-family caps — BTC and weather slots are independent
+                _max_btc_pos = int(os.getenv("MAX_CONCURRENT_BTC_POSITIONS", str(max(_max_pos, 4))) or _max_pos)
+                _max_weather_pos = int(getattr(weather_temperature_strategy, "max_concurrent_positions", 6) or 6)
+                if market_family.startswith("weather_temperature") and current_weather_active_trade_count >= _max_weather_pos:
                     _log_candidate_skip(
                         signal_row,
                         "weather_max_concurrent_positions_reached",
                         gate="capacity",
                         active_weather_positions=current_weather_active_trade_count,
-                        max_weather_positions=int(getattr(weather_temperature_strategy, "max_concurrent_positions", 6) or 6),
+                        max_weather_positions=_max_weather_pos,
+                    )
+                    continue
+                if not market_family.startswith("weather_temperature") and current_btc_active_trade_count >= _max_btc_pos:
+                    _log_candidate_skip(
+                        signal_row,
+                        "btc_max_concurrent_positions_reached",
+                        gate="capacity",
+                        active_btc_positions=current_btc_active_trade_count,
+                        max_btc_positions=_max_btc_pos,
                     )
                     continue
                 
@@ -4131,6 +4281,7 @@ def main_loop():
                         "freeze",
                         gate="kill_switch",
                         freeze_reason=session_kill_switch_reason or "session_limit_hit",
+                        freeze_reason_detail=session_kill_switch_reason or "session_limit_hit",
                     )
                     continue
                 _passed_gates.append("dedupe")
@@ -4289,17 +4440,29 @@ def main_loop():
                                 conflicting_outcome_side=conflicting_payload.get("outcome_side"),
                             )
                             continue
+                    # Governor gate: profitability-first — use a blended score
+                    # of expected_return, edge, and confidence.
                     governor_min_conf = float(governor_state.get("min_confidence", 0.0) or 0.0)
-                    if governor_min_conf > 0 and confidence < governor_min_conf:
-                        _log_candidate_skip(
-                            signal_row,
-                            "performance_governor_min_confidence",
-                            gate="performance_governor",
-                            model_action=action_map.get(action_val, "UNKNOWN"),
+                    if governor_min_conf > 0:
+                        _gov_er = _safe_float(signal_row.get("expected_return", 0.0), default=0.0)
+                        _gov_edge = _safe_float(signal_row.get("edge_score", 0.0), default=0.0)
+                        _gov_profit_score = float(np.clip(
+                            np.clip(_gov_er * 5.0, -1.0, 1.0) * 0.40
+                            + np.clip(_gov_edge * 8.0, -1.0, 1.0) * 0.30
+                            + confidence * 0.30,
+                            0.0, 1.0,
+                        ))
+                        if _gov_profit_score < governor_min_conf:
+                            _log_candidate_skip(
+                                signal_row,
+                                "performance_governor_min_confidence",
+                                gate="performance_governor",
+                                model_action=action_map.get(action_val, "UNKNOWN"),
                                 governor_level=_safe_int(governor_state.get("governor_level", 0), 0),
-                            required_confidence=round(governor_min_conf, 4),
-                        )
-                        continue
+                                required_confidence=round(governor_min_conf, 4),
+                                profit_score=round(_gov_profit_score, 4),
+                            )
+                            continue
                     governor_min_liquidity = float(governor_state.get("min_liquidity_score", 0.0) or 0.0)
                     liquidity_score = _safe_float(
                         signal_row.get("liquidity_score", signal_row.get("liquidity_depth_score", signal_row.get("market_liquidity_score", 1.0))),
@@ -4445,6 +4608,22 @@ def main_loop():
                         )
                         continue
 
+                    # Near-resolved market veto: don't buy YES at > 95¢.
+                    # At 0.96+ there's ≤ 4¢ upside against full $1 downside — no edge,
+                    # and submitting > 0.99 causes Polymarket 400 errors that trigger
+                    # the session kill switch. Configurable via ENTRY_MAX_FILL_PRICE.
+                    _entry_max_fill_price = float(os.getenv("ENTRY_MAX_FILL_PRICE", "0.95") or 0.95)
+                    if float(fill_price) > _entry_max_fill_price:
+                        _log_candidate_skip(
+                            signal_row,
+                            "near_resolved_market",
+                            gate="pricing",
+                            fill_price=round(float(fill_price), 4),
+                            max_fill_price=_entry_max_fill_price,
+                            model_action=action_map.get(action_val, "UNKNOWN"),
+                        )
+                        continue
+
                     _candidate_stats["candidates_tradable"] += 1
 
 
@@ -4485,18 +4664,39 @@ def main_loop():
                             continue
                         entry_order_id = (entry_row or {}).get("order_id") or (entry_response or {}).get("orderID") or (entry_response or {}).get("order_id") or (entry_response or {}).get("id")
                         if not entry_order_id:
-                            logging.info("Live entry rejected/skipped for token_id=%s reason=%s", token_id, (entry_row or {}).get("reason"))
-                            # If order is rejected/skipped, we should potentially revert trade creation in TradeManager
-                            # For simplicity, we'll let process_exits handle cleanup later if trade is not filled
+                            _exchange_reason = str((entry_row or {}).get("reason") or "").strip().lower()
+                            logging.info("Live entry rejected/skipped for token_id=%s reason=%s", token_id, _exchange_reason)
+                            # Pre-flight rejections (insufficient funds, circuit breaker, invalid price, etc.)
+                            # are local decisions — they never reached Polymarket and should NOT count
+                            # toward the session kill-switch failed-entry limit.
+                            # Only genuine API failures (status=FAILED from Polymarket 400/500) count.
+                            _PREFLIGHT_REASONS = {
+                                "insufficient_funds", "insufficient_token_inventory",
+                                "missing_readiness", "missing_token_readiness",
+                                "invalid_price", "invalid_size", "invalid_amount",
+                                "circuit_breaker_failed_orders", "duplicate_idempotency_key",
+                                "below_clob_minimum_1usd", "non_tradable_orderbook",
+                                "orderbook_not_available", "dust_already_cleared_recently",
+                            }
+                            _is_preflight = any(p in _exchange_reason for p in _PREFLIGHT_REASONS)
+                            _entry_status = str((entry_row or {}).get("status") or "").strip().upper()
+                            # Actual API failures have status FAILED (exception from Polymarket)
+                            # vs pre-flight have status REJECTED (caught locally before API call)
+                            _is_api_failure = _entry_status == "FAILED"
+                            _kill_switch_reason = (
+                                "live_entry_rejected_or_missing_order_id"
+                                if _is_api_failure and not _is_preflight
+                                else "live_entry_preflight_rejected"
+                            )
                             _record_candidate_decision(
                                 signal_row,
                                 final_decision="REJECTED",
-                                reject_reason="live_entry_rejected_or_missing_order_id",
+                                reject_reason=_kill_switch_reason,
                                 gate="execution",
                                 model_action=action_map.get(action_val, "UNKNOWN"),
                                 proposed_size_usdc=size_usdc,
                                 available_balance=_available_bal,
-                                exchange_reason=(entry_row or {}).get("reason"),
+                                exchange_reason=_exchange_reason,
                             )
                             continue
                         

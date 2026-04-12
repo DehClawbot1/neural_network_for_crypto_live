@@ -350,13 +350,17 @@ class OrderBookGuard:
         midpoint = analysis.get("midpoint")
 
         if best_ask is not None:
-            check["recommended_entry_price"] = best_ask  # Realistic: you pay the ask
+            # Cap at 0.99 — Polymarket CLOB hard maximum. best_ask can be > 0.99 for
+            # near-resolved markets; submitting those prices causes 400 errors and
+            # increments the session failed-entry counter toward the kill-switch.
+            check["recommended_entry_price"] = min(0.99, float(best_ask))
         elif midpoint is not None:
-            check["recommended_entry_price"] = midpoint
+            check["recommended_entry_price"] = min(0.99, float(midpoint))
         if best_bid is not None:
-            check["recommended_exit_price"] = best_bid  # Realistic: you hit the bid
+            # Floor at 0.01 — Polymarket CLOB hard minimum.
+            check["recommended_exit_price"] = max(0.01, float(best_bid))
         elif midpoint is not None:
-            check["recommended_exit_price"] = midpoint
+            check["recommended_exit_price"] = max(0.01, float(midpoint))
 
         # Estimate spread cost for the intended trade
         if spread is not None and intended_size_usdc > 0 and best_ask and best_ask > 0:

@@ -69,17 +69,17 @@ def infer_market_family_from_row(row: dict[str, Any] | pd.Series | None) -> str:
     explicit = normalize_market_family(row_dict.get("market_family"))
     if explicit:
         return explicit
+    # NOTE: only market-content fields are used for inference.
+    # brain_id / artifact_group / model_kind are intentionally EXCLUDED because they
+    # can contain the substring "weather_temperature" (e.g. "weather_temperature_brain")
+    # and would cause any row ever touched by the weather brain to be mis-classified —
+    # a self-reinforcing contamination loop.
     text_parts = [
         row_dict.get("market"),
         row_dict.get("market_title"),
         row_dict.get("question"),
         row_dict.get("slug"),
         row_dict.get("market_slug"),
-        row_dict.get("signal_label"),
-        row_dict.get("entry_model_family"),
-        row_dict.get("artifact_group"),
-        row_dict.get("model_kind"),
-        row_dict.get("brain_id"),
     ]
     combined = " | ".join("" if part is None or pd.isna(part) else str(part) for part in text_parts)
     if _looks_like_weather_temperature_text(combined):
@@ -158,7 +158,35 @@ def filter_frame_for_brain(df: pd.DataFrame, brain_context: BrainContext) -> pd.
     out = ensure_market_family_column(df)
     family_series = out["market_family"].fillna("").astype(str).str.lower()
     if brain_context.family_prefix == WEATHER_FAMILY:
-        mask = family_series.str.startswith(WEATHER_FAMILY)
+        # Primary filter: market_family tag starts with "weather_temperature".
+        # Secondary guard: also verify the market title actually looks like weather.
+        # This prevents contaminated rows (where a non-weather market was mis-tagged
+        # by the brain_id inference loop) from leaking into the weather brain's data.
+        tag_mask = family_series.str.startswith(WEATHER_FAMILY)
+        def _title_confirms_weather(row) -> bool:
+            text_parts = [
+                row.get("market"), row.get("market_title"),
+                row.get("question"), row.get("slug"), row.get("market_slug"),
+            ]
+            combined = " | ".join(
+                "" if part is None or (isinstance(part, float) and pd.isna(part)) else str(part)
+                for part in text_parts
+            ).strip(" |")
+            if not combined:
+                # No market title available — nothing to contradict the tag, keep the row.
+                return True
+            return _looks_like_weather_temperature_text(combined)
+        content_mask = out.apply(_title_confirms_weather, axis=1)
+        mask = tag_mask & content_mask
+        dropped = int(tag_mask.sum()) - int(mask.sum())
+        if dropped > 0:
+            import logging as _logging
+            _logging.warning(
+                "filter_frame_for_brain[weather]: dropped %d row(s) whose market_family "
+                "tag was 'weather_temperature' but market title did not confirm it "
+                "(likely contamination via brain_id inference loop).",
+                dropped,
+            )
         out = out[mask].copy()
         out["market_family"] = WEATHER_FAMILY
     else:
