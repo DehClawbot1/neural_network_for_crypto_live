@@ -1099,4 +1099,17 @@ class HistoricalDatasetBuilder:
         dataset = clean_dataframe_for_training(dataset, context="historical_dataset")
         dataset.to_csv(self.output_file, index=False)
         logging.info("Saved historical dataset to %s", self.output_file)
+        
+        # Phase 5: Version every dataset (store raw source snapshots with timestamps)
+        try:
+            import datetime
+            ts_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
+            vintage_dir = self.logs_dir / "vintages"
+            vintage_dir.mkdir(parents=True, exist_ok=True)
+            vintage_path = vintage_dir / f"historical_dataset_{ts_str}.csv"
+            dataset.to_csv(vintage_path, index=False)
+            logging.info("Saved PiT dataset vintage to %s", vintage_path)
+        except Exception as exc:
+            logging.warning("Failed to save vintage: %s", exc)
+            
         return dataset

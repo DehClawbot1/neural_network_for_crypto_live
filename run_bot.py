@@ -30,6 +30,7 @@ from supervisor_ui_patch import apply_supervisor_ui_patch
 from retrainer import Retrainer
 from real_pipeline import run_research_pipeline
 from execution_client import ExecutionClient
+from deployment_gate import DeploymentGate, DeploymentStage, get_deployment_gate, reset_gate_singleton
 from brain_paths import list_brain_contexts
 from brain_coverage_report import build_btc_brain_coverage_report, format_btc_brain_coverage_line
 from leaderboard_service import PolymarketLeaderboardService
@@ -85,8 +86,18 @@ def _supports_unicode_stdout() -> bool:
     return "utf" in encoding
 
 def print_banner():
+    gate = get_deployment_gate()
+    stage_label = gate.stage.value.upper()
+    mode_desc = {
+        "replay":      "HISTORICAL REPLAY — no exchange contact",
+        "paper":       "PAPER TRADING — live data, no real orders",
+        "shadow-live": "SHADOW LIVE — order logic runs, orders simulated",
+        "micro-live":  "MICRO LIVE — REAL MONEY, $5 max per position",
+        "scaled-live": "SCALED LIVE — REAL MONEY, normal risk limits",
+    }.get(gate.stage.value, gate.stage.value.upper())
     print("\n=== NEURAL NETWORK FOR CRYPTO ===")
-    print("Mode: LIVE-TEST / REAL-TIME DATA")
+    print(f"Stage: {stage_label} | {mode_desc}")
+    print(f"Env:   {gate.env.value.upper()}")
     if is_interactive():
         print("Credentials: FROM USER INPUT (interactive mode)")
     else:
@@ -99,23 +110,28 @@ def _preflight_env_check():
     errors = []
     warnings = []
 
-    trading_mode = os.getenv("TRADING_MODE", "").strip().lower()
-    if not trading_mode:
-        errors.append("TRADING_MODE is not set (must be 'live')")
-    elif trading_mode != "live":
-        errors.append(f"TRADING_MODE='{trading_mode}' — this launcher requires 'live'")
+    gate = get_deployment_gate()
 
-    if trading_mode == "live":
+    # DEPLOYMENT_STAGE must be set explicitly; default is "paper" (not live).
+    raw_stage = os.getenv("DEPLOYMENT_STAGE", "").strip()
+    if not raw_stage:
+        warnings.append(
+            "DEPLOYMENT_STAGE is not set — defaulting to 'paper'. "
+            "Set DEPLOYMENT_STAGE=paper explicitly to suppress this warning."
+        )
+
+    # Live credentials are only required when the stage contacts the exchange.
+    if gate.can_place_orders:
         for var in ("PRIVATE_KEY", "POLYMARKET_FUNDER"):
             val = os.getenv(var, "").strip()
             if not val and not (var == "POLYMARKET_FUNDER" and is_interactive()):
-                errors.append(f"{var} is not set")
+                errors.append(f"{var} is not set (required for stage={gate.stage.value!r})")
 
         sig_type = os.getenv("POLYMARKET_SIGNATURE_TYPE", "").strip()
         if sig_type and sig_type not in ("0", "1", "2"):
             errors.append(f"POLYMARKET_SIGNATURE_TYPE='{sig_type}' — must be 0, 1, or 2")
 
-    # Recommended env vars
+    # Recommended env vars (all stages)
     for var, desc in [
         ("POLYMARKET_HOST", "Polymarket CLOB host URL"),
         ("POLYMARKET_CHAIN_ID", "Polygon chain ID"),
@@ -273,23 +289,10 @@ def ensure_optional_rl_model():
         print(f"    (Will resume training from these weights on retrain)\n")
         return True
 
-    # â"€â"€ BUG FIX A: Bootstrap initial RL weights so they persist â"€â"€
-    print("[!] No RL weights found. Training initial bootstrap weights (1000 steps)...")
-    print("    This is a one-time operation. Future runs will resume from saved weights.")
-    try:
-        os.makedirs("weights", exist_ok=True)
-        train_model(timesteps=1000)
-        if LEGACY_WEIGHTS_PATH.exists():
-            print(f"[+] Initial RL weights saved to {LEGACY_WEIGHTS_PATH}")
-            print("    Future retrains will resume from these weights (not start from scratch).\n")
-            return True
-        else:
-            print("[!] RL training completed but weights file not found. Continuing with supervised mode.\n")
-            return True
-    except Exception as exc:
-        print(f"[!] Initial RL training failed: {exc}")
-        print("[+] Continuing with supervised-first mode (RL is optional).\n")
-        return True
+    print("[!] FATAL: No RL weights found.")
+    print("    A deployed process must not bootstrap missing artifacts.")
+    print("    Train and promote models in staging before running this stage.\n")
+    return False
 
 
 def maybe_retrain_before_start():
@@ -420,19 +423,27 @@ def log_active_model_champions():
 
 
 def start_supervisor():
+    gate = get_deployment_gate()
     apply_supervisor_ui_patch(supervisor_module)
     print("[5/5] Starting supervisor...")
     print("[+] Status: RUNNING")
     print("[+] Press Ctrl+C to stop the bot gracefully.\n")
-    print("[+] Expected behavior (LIVE MODE):")
-    print("    - fetch BTC-related market / account activity")
-    print("    - score opportunities through the signal + inference pipeline")
-    print("    - submit REAL LIVE orders via Polymarket CLOB API")
-    print("    - wait for fill confirmation before registering a position")
-    print("    - manage open positions and exit via RL / rule-based decisions")
-    print("    - retrain RL model from closed trade outcomes")
-    print("    - write execution and episode logs")
-    print("    - recheck on the configured supervisor cadence and repeat")
+    print(f"[+] Deployment stage: {gate.stage.value.upper()} (env={gate.env.value})")
+    if gate.uses_real_money:
+        print("[!] WARNING: REAL MONEY orders will be placed. Max position: "
+              f"${gate.max_position_usdc:.0f}")
+    elif gate.orders_are_simulated:
+        print("[~] Shadow mode: order logic runs but orders are simulated (not submitted).")
+    elif gate.can_place_orders:
+        print("[~] Order placement enabled.")
+    else:
+        print("[~] No orders will be placed (paper/replay stage).")
+
+    if gate.can_train:
+        print("[~] Model retraining enabled (non-live stage).")
+    else:
+        print("[~] Model retraining DISABLED (live stage — use offline retrainer).")
+
     print("\n[+] Open the dashboard in another terminal with:")
     print("    streamlit run dashboard.py\n")
 
@@ -483,26 +494,51 @@ def ensure_signature_type():
 
 def main():
     try:
+        # DeploymentGate.from_env() is called here (via get_deployment_gate()).
+        # It validates promotion gates and exits(1) if stage/env combination is invalid.
+        gate = get_deployment_gate()
         print_banner()
 
         if not ensure_environment():
             sys.exit(1)
 
-        ensure_signature_type()
+        # Signature type prompt is only relevant when we need exchange credentials.
+        if gate.can_place_orders:
+            ensure_signature_type()
 
-        if not ensure_live_client_ready():
-            sys.exit(1)
+            if not ensure_live_client_ready():
+                sys.exit(1)
+        else:
+            print("[2/5] Skipping live client check (stage does not contact exchange)\n")
 
-        if not ensure_optional_rl_model():
-            sys.exit(1)
+        # RL model training / bootstrap is forbidden in live stages.
+        # A live process must never train a model.
+        if gate.can_train:
+            if not ensure_optional_rl_model():
+                sys.exit(1)
+            maybe_retrain_before_start()
+        else:
+            print("[3/5] Skipping RL bootstrap — training forbidden at "
+                  f"stage={gate.stage.value!r}\n")
+            print("[3.5/5] Skipping pre-start retraining — forbidden at "
+                  f"stage={gate.stage.value!r}\n")
 
-        maybe_retrain_before_start()
         build_research_artifacts()
         log_live_leaderboard_status()
         log_active_model_champions()
 
         if load_brain() is None:
-            print("[!] RL model not available. Starting with supervised-first mode only.\n")
+            if gate.is_live:
+                # In live stages, a missing RL model is a hard fault — no fallback.
+                print(
+                    "[!] FATAL: RL model not available at stage="
+                    f"{gate.stage.value!r}. "
+                    "A live process must not invent fallback logic for missing artifacts.\n"
+                    "Build and promote the RL model in staging before going live.\n"
+                )
+                sys.exit(1)
+            else:
+                print("[!] RL model not available. Starting with supervised-first mode only.\n")
 
         start_supervisor()
     except KeyboardInterrupt:

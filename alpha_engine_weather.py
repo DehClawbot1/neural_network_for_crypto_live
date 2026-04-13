@@ -113,23 +113,10 @@ class WeatherUncertaintyModel:
 
     def predict(self, row: dict[str, Any]) -> float:
         """
-        Heuristic uncertainty penalty until real model is trained.
-        Higher = more uncertain = worse to trade.
+        Phase 5: Manual uncertainty heuristic stripped. 
+        Will return 0.0 until a unified uncertainty ML model is provided.
         """
-        ensemble_spread = _safe_float(row.get("ensemble_spread"), 0.0)
-        source_disagreement = _safe_float(row.get("source_disagreement"), 0.0)
-        time_to_resolution = _safe_float(row.get("time_to_resolution_hours"), 24.0)
-
-        # Normalize: larger spread + more disagreement + less time = more uncertainty
-        spread_penalty = float(np.clip(ensemble_spread / 10.0, 0.0, 1.0))
-        disagree_penalty = float(np.clip(source_disagreement, 0.0, 1.0))
-        # If very close to resolution, less time to correct — penalty grows
-        time_penalty = float(np.clip(1.0 - (time_to_resolution / 72.0), 0.0, 0.5))
-
-        return float(np.clip(
-            spread_penalty * 0.40 + disagree_penalty * 0.40 + time_penalty * 0.20,
-            0.0, 1.0,
-        ))
+        return 0.0
 
 
 # ---------------------------------------------------------------------------

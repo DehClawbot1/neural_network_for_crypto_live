@@ -33,6 +33,8 @@ _DISK_CACHE_COLS = [
     "forecast_uncertainty_c",
     "forecast_last_update_ts",
     "forecast_drift_c",
+    "forecast_issue_time",
+    "forecast_update_sequence",
 ]
 
 
@@ -114,6 +116,20 @@ class WeatherForecastService:
             merged.to_csv(self._disk_cache_path, index=False)
         except Exception as exc:
             logger.debug("WeatherForecastService: disk cache write failed: %s", exc)
+
+    def _write_vintage_log(self, key: tuple[str, str], entry: dict) -> None:
+        """Phase 5: Archive every forecast snapshot to prove PiT correctness."""
+        cache_key_str = f"{key[0]}|{key[1]}"
+        row = {"cache_key": cache_key_str}
+        for col in _DISK_CACHE_COLS:
+            if col != "cache_key":
+                row[col] = entry.get(col)
+        
+        archive_path = self._disk_cache_path.parent / "weather_forecast_archive.csv"
+        try:
+            pd.DataFrame([row]).to_csv(archive_path, mode="a", header=not archive_path.exists(), index=False)
+        except Exception as exc:
+            logger.debug("WeatherForecastService: vintage archive write failed: %s", exc)
 
     def geocode_location(self, location: str, country_hint: str | None = None) -> dict | None:
         normalized_location = str(location or "").strip()
@@ -265,8 +281,10 @@ class WeatherForecastService:
             uncertainty_c=uncertainty_c,
         )
         previous = self._forecast_memory.get(cache_key)
+        previous_seq = _safe_float(previous.get("forecast_update_sequence"), 0.0) if previous else 0.0
         previous_value = _safe_float(previous.get("forecast_max_temp_c"), None) if previous else None
         forecast_drift_c = 0.0 if previous_value is None else float(forecast_max_temp_c - previous_value)
+        
         out = {
             "weather_country": geo.get("country"),
             "weather_resolution_timezone": geo.get("timezone"),
@@ -280,9 +298,12 @@ class WeatherForecastService:
             "forecast_margin_to_upper_c": None if upper_c is None else round(float(upper_c - forecast_max_temp_c), 4),
             "forecast_uncertainty_c": round(float(uncertainty_c), 4),
             "forecast_last_update_ts": now_utc.isoformat(),
+            "forecast_issue_time": now_utc.isoformat(),
             "forecast_drift_c": round(float(forecast_drift_c), 4),
+            "forecast_update_sequence": previous_seq + 1,
         }
         self._forecast_memory[cache_key] = out
         self._forecast_cache[cache_key] = out
         self._write_disk_cache(cache_key, out)  # persist to disk — survives restart
+        self._write_vintage_log(cache_key, out) # Phase 5: pure historical logging
         return dict(out)

@@ -14,18 +14,18 @@ from return_calibration import calibrate_return_predictions
 logger = logging.getLogger(__name__)
 
 PROMOTABLE_GROUP_TO_FILENAME = {
-    "btc_tabular_classifier": "tp_classifier.joblib",
-    "btc_tabular_regressor": "return_regressor.joblib",
-    "weather_tabular_classifier": "tp_classifier.joblib",
-    "weather_tabular_regressor": "return_regressor.joblib",
+    "btc_tabular_classifier": "btc_tp_classifier.joblib",
+    "btc_tabular_regressor": "btc_return_regressor.joblib",
+    "weather_tabular_classifier": "weather_tp_classifier.joblib",
+    "weather_tabular_regressor": "weather_return_regressor.joblib",
     "stage1_classifier": "stage1_tp_classifier.joblib",
     "stage1_regressor": "stage1_return_regressor.joblib",
-    "weather_stage1_classifier": "stage1_tp_classifier.joblib",
-    "weather_stage1_regressor": "stage1_return_regressor.joblib",
+    "weather_stage1_classifier": "weather_stage1_tp_classifier.joblib",
+    "weather_stage1_regressor": "weather_stage1_return_regressor.joblib",
     "stage2_temporal_classifier": "stage2_temporal_classifier.joblib",
     "stage2_temporal_regressor": "stage2_temporal_regressor.joblib",
-    "weather_stage2_temporal_classifier": "stage2_temporal_classifier.joblib",
-    "weather_stage2_temporal_regressor": "stage2_temporal_regressor.joblib",
+    "weather_stage2_temporal_classifier": "weather_stage2_temporal_classifier.joblib",
+    "weather_stage2_temporal_regressor": "weather_stage2_temporal_regressor.joblib",
     "weather_temperature_classifier": "weather_temperature_model.joblib",
 }
 
@@ -142,22 +142,45 @@ def _replay_metrics(df: pd.DataFrame, *, selected_mask: pd.Series, return_col: s
 
 def _classifier_calibration_metrics(
     payload: dict, frame: pd.DataFrame, target_col: str
-) -> dict[str, float | None]:
-    """Compute Brier score + top-decile precision for classifier payloads."""
+) -> dict[str, Any]:
+    """Compute Brier score, top-decile precision, and calibration approximations."""
     features = list(payload.get("features") or [])
     model = payload.get("model")
     if not features or model is None or target_col not in frame.columns:
-        return {"brier_score": None, "top_decile_precision": None}
+        return {"brier_score": None, "top_decile_precision": None, "ece": None, "confidence_interval": None, "ev_interval": None}
     try:
         X = frame[features].apply(pd.to_numeric, errors="coerce").fillna(0.0)
         prob_preds = pd.Series(model.predict_proba(X)[:, 1], index=frame.index)
         y = pd.to_numeric(frame[target_col], errors="coerce").fillna(0).astype(int)
+        
+        brier = _brier_score_from_predictions(prob_preds, y)
+        tdp = _top_decile_precision(prob_preds, y)
+        
+        # Approximate ECE via 10 equal-width bins
+        ece = None
+        if len(y) > 50:
+            df_cal = pd.DataFrame({'p': prob_preds, 'y': y})
+            df_cal['bin'] = pd.cut(df_cal['p'], bins=10, labels=False)
+            bin_stats = df_cal.groupby('bin').agg(p_mean=('p', 'mean'), count=('p', 'count'), y_mean=('y', 'mean'))
+            if len(bin_stats) > 0:
+                total = len(y)
+                ece = float((bin_stats['count'] / total * (bin_stats['p_mean'] - bin_stats['y_mean']).abs()).sum())
+                
+        p_mean = float(prob_preds.mean())
+        p_std = float(prob_preds.std())
+        ci_lower = max(0.0, p_mean - 1.96 * p_std)
+        ci_upper = min(1.0, p_mean + 1.96 * p_std)
+        ci_str = f"[{ci_lower:.3f}, {ci_upper:.3f}]"
+        
         return {
-            "brier_score": _brier_score_from_predictions(prob_preds, y),
-            "top_decile_precision": _top_decile_precision(prob_preds, y),
+            "brier_score": brier,
+            "top_decile_precision": tdp,
+            "ece": ece,
+            "confidence_interval": ci_str,
+            "ev_interval": ci_str,
         }
     except Exception:
-        return {"brier_score": None, "top_decile_precision": None}
+        return {"brier_score": None, "top_decile_precision": None, "ece": None, "confidence_interval": None, "ev_interval": None}
 
 
 def _standard_result_row(
@@ -181,6 +204,14 @@ def _standard_result_row(
     profit_factor=None,
     replay_ev=None,
     artifact_path: str | None = None,
+    model_version: str = "",
+    training_window: str = "",
+    feature_schema_hash: str = "",
+    target_definition: str = "",
+    calibration_report: str = "",
+    backtest_report: str = "",
+    shadow_report: str = "",
+    approval_status: str = "pending",
     notes: str = "",
 ) -> dict[str, Any]:
     return {
@@ -203,6 +234,14 @@ def _standard_result_row(
         "profit_factor": profit_factor,
         "replay_ev": replay_ev,
         "artifact_path": str(artifact_path or ""),
+        "model_version": model_version,
+        "training_window": training_window,
+        "feature_schema_hash": feature_schema_hash,
+        "target_definition": target_definition,
+        "calibration_report": calibration_report,
+        "backtest_report": backtest_report,
+        "shadow_report": shadow_report,
+        "approval_status": approval_status,
         "promotion_status": "candidate",
         "promotion_reason": "",
         "beats_champion": None,
@@ -249,6 +288,10 @@ def _classifier_rows_for_slice(
     precision = float(tp / predicted_positive) if predicted_positive else None
     recall = float(tp / actual_positive) if actual_positive else None
     replay_ev, profit_factor = _replay_metrics(frame, selected_mask=(preds == 1))
+    
+    calib_metrics = _classifier_calibration_metrics(payload, frame, target_col)
+    import json
+    
     return _standard_result_row(
         run_id=run_id,
         model_kind=str(payload.get("model_kind") or "classifier"),
@@ -268,6 +311,11 @@ def _classifier_rows_for_slice(
         profit_factor=profit_factor,
         replay_ev=replay_ev,
         artifact_path=str(artifact_path),
+        model_version=str(payload.get("run_id") or run_id),
+        feature_schema_hash=str(hash(tuple(features))),
+        target_definition=target_col,
+        calibration_report=json.dumps(calib_metrics),
+        shadow_report="{}",
     )
 
 
@@ -322,6 +370,11 @@ def _regressor_rows_for_slice(
         profit_factor=profit_factor,
         replay_ev=replay_ev,
         artifact_path=str(artifact_path),
+        model_version=str(payload.get("run_id") or run_id),
+        feature_schema_hash=str(hash(tuple(features))),
+        target_definition=target_col,
+        calibration_report="{}",
+        shadow_report="{}",
     )
 
 
@@ -438,13 +491,19 @@ def candidate_beats_champion(candidate: dict[str, Any], champion: dict[str, Any]
     champion_pf = _safe_float(champion.get("profit_factor"), default=float("-inf"))
     candidate_replay = _safe_float(candidate.get("replay_ev"), default=float("-inf"))
     champion_replay = _safe_float(champion.get("replay_ev"), default=float("-inf"))
-    # If champion has positive EV and candidate does not → block
-    if champion_replay > 0 and candidate_replay <= 0:
+    # Phase 14 anti-failure: accuracy↑ but EV↓ → block
+    candidate_pf = _safe_float(candidate.get("profit_factor"), default=float("-inf"))
+    champion_pf = _safe_float(champion.get("profit_factor"), default=float("-inf"))
+    candidate_replay = _safe_float(candidate.get("replay_ev"), default=float("-inf"))
+    champion_replay = _safe_float(champion.get("replay_ev"), default=float("-inf"))
+    
+    # Phase 4 Strict logic: MUST survive cost model and walk-forward
+    if candidate_replay <= 0.0 or candidate_pf < 1.0:
         return False
-    # Prefer higher replay EV
+        
+    # Prefer higher replay EV or PF
     if candidate_replay < champion_replay - 1e-6:
         return False
-    # Prefer higher profit factor
     if candidate_pf < champion_pf - 1e-6:
         return False
 
@@ -481,6 +540,19 @@ def promotion_gate_passed(row: dict[str, Any], *, min_test_rows: int = 10) -> tu
     regularization = str(row.get("regularization") or "").strip().lower()
     if nonzero_feature_count is not None and "l1" in regularization and nonzero_feature_count <= 0:
         return False, "degenerate_sparse_model"
+        
+    # Phase 4 strict governance: models must survive shadow.
+    try:
+        import json
+        shadow_rpt = json.loads(str(row.get("shadow_report") or "{}"))
+        shadow_samples = int(shadow_rpt.get("samples", 0))
+    except Exception:
+        shadow_samples = 0
+        
+    if shadow_samples < 50:
+        # Prevent straight-to-live promotion.
+        return False, f"shadow_samples_below_50_{shadow_samples}"
+        
     return True, ""
 
 

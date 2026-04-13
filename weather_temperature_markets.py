@@ -244,6 +244,10 @@ def _market_to_weather_row(market: dict) -> dict:
         "weather_lower_c": parsed.get("weather_lower_c"),
         "weather_upper_c": parsed.get("weather_upper_c"),
         "weather_interval_width_c": parsed.get("weather_interval_width_c"),
+        
+        # Phase 5: Point-in-time correctness additions
+        "weather_exact_market_text": question,
+        "resolution_rule": str(market.get("description") or "").strip(),
     }
 
 

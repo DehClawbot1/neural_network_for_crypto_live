@@ -7,12 +7,18 @@ from pathlib import Path
 
 
 INFERENCE_MODEL_FILENAMES = (
-    "tp_classifier.joblib",
-    "return_regressor.joblib",
+    "btc_tp_classifier.joblib",
+    "btc_return_regressor.joblib",
+    "weather_tp_classifier.joblib",
+    "weather_return_regressor.joblib",
     "stage1_tp_classifier.joblib",
     "stage1_return_regressor.joblib",
+    "weather_stage1_tp_classifier.joblib",
+    "weather_stage1_return_regressor.joblib",
     "stage2_temporal_classifier.joblib",
     "stage2_temporal_regressor.joblib",
+    "weather_stage2_temporal_classifier.joblib",
+    "weather_stage2_temporal_regressor.joblib",
     "weather_temperature_model.joblib",
 )
 

@@ -32,7 +32,7 @@ class SignalEngine:
     Safer signal scorer.
 
     Important changes:
-    - blend heuristic and model confidence instead of taking the max
+    - removed heuristic confidence overrides (Phase 5 strict ML reliance)
     - cap confidence when expected_return/edge is not actually trade-worthy
     - prevent weak or negative model outputs from graduating into strong signals
     """
@@ -102,23 +102,8 @@ class SignalEngine:
             + wallet_state_confidence * 0.08
         )
 
-        heuristic_confidence = (
-            whale_pressure * 0.40
-            + market_structure_score * 0.35
-            + (1.0 - volatility_risk) * 0.15
-            + (1.0 - time_decay_score) * 0.10
-            + network_activity_score * 0.03
-            + network_regime_bonus
-        )
-        heuristic_confidence = float(np.clip((heuristic_confidence * 0.82) + (wallet_state_score * 0.18), 0.0, 1.0))
-        if ta_support:
-            heuristic_confidence += min(0.08, trend_confluence * 0.08)
-            if fractal_trigger_ready:
-                heuristic_confidence += 0.04
-        elif ta_conflict:
-            heuristic_confidence -= min(0.12, max(0.06, trend_confluence * 0.12))
-        # Model confidence: profitability-first — expected_return and edge_score
-        # carry 55 % of the weight; p_tp (model probability) carries 45 %.
+        # Phase 5: Removed entirely. The system must rely on pure model output.
+        # AI dictates direction and profitability mapping directly.
         model_confidence = np.clip(
             (p_tp * 0.45)
             + np.clip(expected_return * 5.0, -1.0, 1.0) * 0.30
@@ -127,10 +112,9 @@ class SignalEngine:
             1.0,
         )
 
-        confidence = float(np.clip((heuristic_confidence * 0.35) + (model_confidence * 0.65), 0.0, 1.0))
+        confidence = float(model_confidence)
         if expected_return == 0.0 and p_tp == 0.0:
-            confidence = heuristic_confidence  # Restore 100 % heuristic weight if AI is offline
-        confidence = float(np.clip(_safe_float(confidence, default=0.0), 0.0, 1.0))
+            confidence = 0.0  # Phase 5: No AI = No Trade (no heuristic recovery)
 
         # Profitability-first caps: if the model says return/edge is negative
         # the signal cannot graduate beyond WATCH regardless of heuristic score.
