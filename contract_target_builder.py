@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 from pathlib import Path
@@ -6,6 +7,9 @@ import pandas as pd
 from brain_paths import filter_frame_for_brain, resolve_brain_context
 from entry_snapshot_enrichment import enrich_frame_with_entry_snapshots
 from historical_dataset_builder import HistoricalDatasetBuilder
+from label_builder import LabelBuilder
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_merge_asof(left, right, on, **kwargs):
@@ -59,6 +63,7 @@ class ContractTargetBuilder:
         self.technical_merge_tolerance = pd.Timedelta(
             os.getenv("TECHNICAL_REGIME_MERGE_TOLERANCE", "12h") or "12h"
         )
+        self._resolution_store = None  # lazy-loaded WeatherResolutionStore
 
     def _safe_read(self, path):
         if not path.exists():
@@ -67,6 +72,19 @@ class ContractTargetBuilder:
             return pd.read_csv(path, engine="python", on_bad_lines="skip")
         except Exception:
             return pd.DataFrame()
+
+    def _get_resolution_store(self):
+        """Lazy-load WeatherResolutionStore (avoids import-time circular deps)."""
+        if self._resolution_store is None:
+            try:
+                from weather_resolution_store import WeatherResolutionStore
+                self._resolution_store = WeatherResolutionStore(logs_dir=str(self.shared_logs_dir))
+            except Exception as exc:
+                logger.debug("WeatherResolutionStore unavailable: %s", exc)
+                self._resolution_store = object()  # sentinel — don't retry
+        # Return None if it's the sentinel (failed to load)
+        from weather_resolution_store import WeatherResolutionStore
+        return self._resolution_store if isinstance(self._resolution_store, WeatherResolutionStore) else None
 
     def _select_token_id(self, signal_row, market_row):
         side = str(signal_row.get("side", signal_row.get("outcome", signal_row.get("outcome_side", "YES")))).upper()
@@ -378,31 +396,32 @@ class ContractTargetBuilder:
             if forward_window.empty:
                 forward_window = full_future_window.head(1)
 
-            forward_return = (float(forward_window["price"].iloc[-1]) - entry_price) / entry_price
-            # tp_before_sl/mfe/mae must be computed against the full max-hold path
-            path_moves = full_future_window["price"].astype(float)
-            moves = [(float(price) - entry_price) / entry_price for price in path_moves] # BUG FIX 5: Normalize to ROI
-            mfe = max(moves) if moves else None
-            mae = min(moves) if moves else None
-            tp_hit_idx = next((i for i, move in enumerate(moves) if move >= tp_move), None)
-            sl_hit_idx = next((i for i, move in enumerate(moves) if move <= -sl_move), None)
-            tp_before_sl = int(tp_hit_idx is not None and (sl_hit_idx is None or tp_hit_idx < sl_hit_idx))
-            target_up = int((float(path_moves.iloc[-1]) - entry_price) > 0)
-
             row = signal_row.to_dict()
+            market_family = str(row.get("market_family", "")).lower()
+
+            lb = LabelBuilder(
+                signal_row=row,
+                entry_price=entry_price,
+                forward_window=forward_window,
+                full_future_window=full_future_window,
+                tp_move=tp_move,
+                sl_move=sl_move,
+                market_family=market_family,
+                resolution_store=self._get_resolution_store(),
+            )
+            label_targets = lb.build()
+            label_targets.pop("_target_up_internal", None)
+
             row.update(
                 {
                     "token_id": token_id,
                     "entry_price": entry_price,
                     "anchor_timestamp": anchor_row.get("timestamp"),
-                    "forward_return_15m": forward_return,
-                    "tp_before_sl_60m": tp_before_sl,
-                    "mfe_60m": mfe,
-                    "mae_60m": mae,
-                    "target_up": target_up,
+                    **label_targets,
                 }
             )
             rows.append(row)
+
 
         result = pd.DataFrame(rows)
         if self.brain_context is not None and not result.empty:

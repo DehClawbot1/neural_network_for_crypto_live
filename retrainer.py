@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -12,6 +13,8 @@ from brain_training_orchestrator import (
     evaluate_brain_candidate_rows,
     register_and_promote_brain_models,
     train_brain_models,
+    train_execution_engine,
+    train_meta_decision_engine,
 )
 from model_artifact_staging import (
     PROMOTABLE_MODEL_FILENAMES,
@@ -564,7 +567,108 @@ class Retrainer:
         candidate_row["promotion_block_reason"] = ""
         return True, self._register_attempt(candidate_row)
 
+    # ── Phase 8 — Shadow Mode ────────────────────────────────────────────────
+    def _run_shadow_mode(self, candidate_weights_dir: Path) -> int:
+        """
+        Score live/recent candidates with the challenger model in shadow mode.
+        Does NOT generate trades.  Logs counterfactual decisions to
+        logs/shadow_challenger_log.csv for upstream review.
+        Returns count of rows scored.
+        """
+        shadow_log = self.logs_dir / "shadow_challenger_log.csv"
+        raw_csv = self.logs_dir.parent / "raw_candidates.csv"  # shared logs dir
+        if not raw_csv.exists():
+            raw_csv = self.logs_dir / "raw_candidates.csv"
+        if not raw_csv.exists():
+            return 0
+        try:
+            df = pd.read_csv(raw_csv, engine="python", on_bad_lines="skip")
+        except Exception:
+            return 0
+        if df.empty:
+            return 0
+
+        # Take only the most recent candidates (last 100)
+        df = df.tail(100).copy()
+        # Try to load challenger model from candidate_weights_dir
+        challenger_artifact = None
+        for fname in ["tp_classifier.joblib", "stage1_tp_classifier.joblib"]:
+            path = candidate_weights_dir / fname
+            if path.exists():
+                try:
+                    import joblib
+                    payload = joblib.load(path)
+                    challenger_artifact = payload if isinstance(payload, dict) else None
+                    if challenger_artifact:
+                        break
+                except Exception:
+                    pass
+
+        rows = []
+        scored = 0
+        for _, row in df.iterrows():
+            shadow_row = {
+                "shadow_scored_at": datetime.now(timezone.utc).isoformat(),
+                "token_id": row.get("token_id", ""),
+                "market_family": row.get("market_family", ""),
+                "signal_label": row.get("signal_label", ""),
+                "current_price": row.get("current_price", ""),
+                "challenger_action": "unavailable",
+                "challenger_prob": None,
+            }
+            if challenger_artifact is not None:
+                try:
+                    features = list(challenger_artifact.get("features") or [])
+                    model = challenger_artifact.get("model")
+                    if features and model:
+                        X = pd.DataFrame([{f: row.get(f, 0.0) for f in features}])
+                        prob = float(model.predict_proba(X)[0][1])
+                        shadow_row["challenger_prob"] = round(prob, 6)
+                        shadow_row["challenger_action"] = "buy" if prob >= 0.55 else "skip"
+                except Exception:
+                    pass
+            rows.append(shadow_row)
+            scored += 1
+
+        if rows:
+            try:
+                import pandas as pd  # already imported
+                existing = pd.read_csv(shadow_log, engine="python", on_bad_lines="skip") if shadow_log.exists() else pd.DataFrame()
+                new_df = pd.DataFrame(rows)
+                merged = pd.concat([existing, new_df], ignore_index=True) if not existing.empty else new_df
+                merged.tail(2000).to_csv(shadow_log, index=False)  # keep last 2000 shadow score rows
+            except Exception as exc:
+                logging.warning("Shadow mode log write failed: %s", exc)
+        logging.info("Shadow mode: scored %d candidates with challenger", scored)
+        return scored
+
+    # ── Phase 11 — Drift Trigger ─────────────────────────────────────────────
+    def _check_drift_trigger(self) -> bool:
+        """
+        Check DriftMonitor for any drift.  Returns True if drift detected
+        and retraining should be triggered, False otherwise.
+        """
+        try:
+            from drift_monitor import DriftMonitor
+            monitor = DriftMonitor(logs_dir=str(self.logs_dir))
+            report = monitor.check_all()
+            if report.any_drift:
+                logging.warning(
+                    "Retrainer: drift detected — triggering retrain cycle. drift=%s",
+                    json.dumps(report.to_dict(), separators=(",", ":")),
+                )
+                return True
+        except Exception as exc:
+            logging.debug("Drift check unavailable (non-blocking): %s", exc)
+        return False
+
     def maybe_retrain(self, force=False, reason="scheduled_cycle_check"):
+        # Phase 11 — check drift first; drift overrides the count-based trigger
+        drift_triggered = self._check_drift_trigger()
+        if drift_triggered:
+            force = True
+            reason = "drift_detected"
+
         try:
             coverage = build_btc_brain_coverage_report(
                 shared_logs_dir=self.logs_dir,
@@ -659,6 +763,12 @@ class Retrainer:
         build_family_datasets(shared_logs_dir=self.logs_dir, shared_weights_dir=self.weights_dir)
         for context in list_brain_contexts(shared_logs_dir=self.logs_dir, shared_weights_dir=self.weights_dir):
             brain_candidate_dir = train_brain_models(context, candidate_prefix="base_retrain")
+            # Phase 8 — shadow mode: score recent candidates with challenger (non-blocking)
+            try:
+                shadow_count = self._run_shadow_mode(brain_candidate_dir)
+                logging.info("Shadow mode completed for %s: %d row(s) scored", context.market_family, shadow_count)
+            except Exception as _shadow_exc:
+                logging.warning("Shadow mode failed (non-blocking): %s", _shadow_exc)
             brain_run_id = pd.Timestamp.utcnow().strftime(f"retrain_{context.market_family}_%Y%m%d%H%M%S")
             brain_candidate_rows = evaluate_brain_candidate_rows(
                 context,
@@ -670,6 +780,10 @@ class Retrainer:
                 candidate_rows=brain_candidate_rows,
                 candidate_weights_dir=brain_candidate_dir,
             )
+            # Phase 6C — execution engine training (non-blocking)
+            train_execution_engine(context, brain_candidate_dir)
+            # Phase 6D — meta-decision engine training (non-blocking)
+            train_meta_decision_engine(context, brain_candidate_dir)
         candidate_weights_dir = build_candidate_weights_dir(self.weights_dir, prefix="base_retrain")
         train_model(timesteps=rl_timesteps, save_path=candidate_weights_dir / "ppo_polytrader")
         self._retrain_btc_forecast(candidate_weights_dir)

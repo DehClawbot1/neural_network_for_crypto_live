@@ -1,12 +1,16 @@
 from pathlib import Path
+import logging
 import warnings
 
 import pandas as pd
 from brain_paths import filter_frame_for_brain, normalize_market_family, resolve_brain_context
+from label_schema import primary_classifier_target
 from model_feature_catalog import DEFAULT_TABULAR_FEATURE_COLUMNS
 from model_feature_safety import drop_all_nan_features
 from feature_treatment_policy import features_for_scope, log_audit
 from return_calibration import fit_return_calibration, transform_return_targets
+
+_logger = logging.getLogger(__name__)
 
 
 def _load_sklearn_stage1():
@@ -194,8 +198,10 @@ class Stage1Models:
         sk = _load_sklearn_stage1()
         joblib = sk["joblib"]
 
-        if "tp_before_sl_60m" in df.columns:
-            y_cls = df["tp_before_sl_60m"].fillna(0).astype(int)
+        # ── Classifier ────────────────────────────────────────────────
+        target_col = self._select_primary_clf_target(df)
+        if target_col and target_col in df.columns:
+            y_cls = df[target_col].fillna(0).astype(int)
             cv_folds = self._safe_cv_folds(y_cls)
             clf = self._build_classifier(cv=cv_folds)
             with warnings.catch_warnings():
@@ -211,6 +217,7 @@ class Stage1Models:
                     "features": usable,
                     "model_kind": "stage1_classifier",
                     "feature_set": "tree_tabular",
+                    "target_col": target_col,
                     "scaling": "none",
                     "regularization": "tree_ensemble",
                     "market_family": self.market_family,
@@ -219,8 +226,10 @@ class Stage1Models:
             )
             self._write_feature_importance(usable, clf)
 
-        if "forward_return_15m" in df.columns:
-            target_returns = pd.to_numeric(df["forward_return_15m"], errors="coerce").fillna(0.0)
+        # ── Regressor ─────────────────────────────────────────────────
+        regressor_target = "path_return_15m" if "path_return_15m" in df.columns else "forward_return_15m"
+        if regressor_target in df.columns:
+            target_returns = pd.to_numeric(df[regressor_target], errors="coerce").fillna(0.0)
             return_calibration = fit_return_calibration(target_returns)
             reg = self._build_regressor()
             reg.fit(X, transform_return_targets(target_returns, return_calibration))
@@ -239,3 +248,26 @@ class Stage1Models:
             )
 
         return usable
+
+    def _select_primary_clf_target(self, df) -> "str | None":
+        """
+        Route to the correct primary classifier target.
+
+        BTC    -> path_tp_hit_60m  (fallback: tp_before_sl_60m)
+        Weather -> weather_contract_resolved_yes if >=30 resolved rows
+                   (no fallback to CLOB proxy -- bad label is worse than no label)
+        """
+        schema_target = primary_classifier_target(self.market_family)
+        if schema_target is None:
+            return "tp_before_sl_60m" if "tp_before_sl_60m" in df.columns else None
+        if self.market_family.startswith("btc"):
+            return schema_target if schema_target in df.columns else (
+                "tp_before_sl_60m" if "tp_before_sl_60m" in df.columns else None
+            )
+        if self.market_family.startswith("weather"):
+            if schema_target in df.columns and df[schema_target].notna().sum() >= 30:
+                _logger.info("Stage1 WeatherClassifier: using %s", schema_target)
+                return schema_target
+            _logger.info("Stage1 WeatherClassifier: insufficient resolved rows -- skipping")
+            return None
+        return "tp_before_sl_60m" if "tp_before_sl_60m" in df.columns else None

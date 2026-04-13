@@ -100,6 +100,37 @@ def _profit_factor_from_returns(series: pd.Series) -> float | None:
     return gross_profit / gross_loss
 
 
+def _brier_score_from_predictions(
+    prob_preds: pd.Series, actual: pd.Series
+) -> float | None:
+    """Brier score: mean((prob - outcome)^2). Lower is better."""
+    p = pd.to_numeric(prob_preds, errors="coerce").dropna()
+    y = pd.to_numeric(actual, errors="coerce").dropna()
+    common = p.index.intersection(y.index)
+    if len(common) < 10:
+        return None
+    return float(((p.loc[common] - y.loc[common]) ** 2).mean())
+
+
+def _top_decile_precision(
+    prob_preds: pd.Series, actual: pd.Series
+) -> float | None:
+    """
+    Precision in the top 10% of predicted probabilities.
+    This is the metric that matters most for slippage-adjusted PnL.
+    """
+    p = pd.to_numeric(prob_preds, errors="coerce").dropna()
+    y = pd.to_numeric(actual, errors="coerce").dropna()
+    common = p.index.intersection(y.index)
+    if len(common) < 20:
+        return None
+    threshold = p.loc[common].quantile(0.90)
+    top_mask = p.loc[common] >= threshold
+    if top_mask.sum() == 0:
+        return None
+    return float(y.loc[common][top_mask].mean())
+
+
 def _replay_metrics(df: pd.DataFrame, *, selected_mask: pd.Series, return_col: str = "forward_return_15m") -> tuple[float | None, float | None]:
     if return_col not in df.columns:
         return None, None
@@ -107,6 +138,26 @@ def _replay_metrics(df: pd.DataFrame, *, selected_mask: pd.Series, return_col: s
     if selected_returns.empty:
         return None, None
     return float(selected_returns.mean()), _profit_factor_from_returns(selected_returns)
+
+
+def _classifier_calibration_metrics(
+    payload: dict, frame: pd.DataFrame, target_col: str
+) -> dict[str, float | None]:
+    """Compute Brier score + top-decile precision for classifier payloads."""
+    features = list(payload.get("features") or [])
+    model = payload.get("model")
+    if not features or model is None or target_col not in frame.columns:
+        return {"brier_score": None, "top_decile_precision": None}
+    try:
+        X = frame[features].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+        prob_preds = pd.Series(model.predict_proba(X)[:, 1], index=frame.index)
+        y = pd.to_numeric(frame[target_col], errors="coerce").fillna(0).astype(int)
+        return {
+            "brier_score": _brier_score_from_predictions(prob_preds, y),
+            "top_decile_precision": _top_decile_precision(prob_preds, y),
+        }
+    except Exception:
+        return {"brier_score": None, "top_decile_precision": None}
 
 
 def _standard_result_row(
@@ -354,6 +405,15 @@ def primary_metric_name(row: dict[str, Any]) -> str:
 
 
 def candidate_beats_champion(candidate: dict[str, Any], champion: dict[str, Any] | None) -> bool:
+    """
+    Phase 8C — challenger must beat champion on:
+      1. Primary metric (accuracy or RMSE)
+      2. Profit factor (replay EV quality)
+      3. Replay EV
+      4. Brier score (calibration — lower is better)  [Phase 8 addition]
+      5. Top-decile precision                          [Phase 8 addition]
+    Anti-failure: never promote if accuracy↑ but EV↓  [Phase 14]
+    """
     if champion is None:
         return True
     metric = primary_metric_name(candidate)
@@ -365,23 +425,46 @@ def candidate_beats_champion(candidate: dict[str, Any], champion: dict[str, Any]
         return True
     if metric == "rmse":
         if candidate_metric < champion_metric:
-            return True
-        if candidate_metric > champion_metric:
+            pass  # candidate is better on primary, continue checks
+        elif candidate_metric > champion_metric:
             return False
     else:
-        if candidate_metric > champion_metric:
-            return True
         if candidate_metric < champion_metric:
             return False
+        # candidate_metric >= champion_metric: continue tie-breaking
+
+    # Phase 14 anti-failure: accuracy↑ but EV↓ → block
     candidate_pf = _safe_float(candidate.get("profit_factor"), default=float("-inf"))
     champion_pf = _safe_float(champion.get("profit_factor"), default=float("-inf"))
-    if candidate_pf > champion_pf:
-        return True
-    if candidate_pf < champion_pf:
-        return False
     candidate_replay = _safe_float(candidate.get("replay_ev"), default=float("-inf"))
     champion_replay = _safe_float(champion.get("replay_ev"), default=float("-inf"))
-    return candidate_replay >= champion_replay
+    # If champion has positive EV and candidate does not → block
+    if champion_replay > 0 and candidate_replay <= 0:
+        return False
+    # Prefer higher replay EV
+    if candidate_replay < champion_replay - 1e-6:
+        return False
+    # Prefer higher profit factor
+    if candidate_pf < champion_pf - 1e-6:
+        return False
+
+    # Phase 8 — Brier score: lower is better (better calibration)
+    candidate_brier = _safe_float(candidate.get("brier_score"), default=None)
+    champion_brier = _safe_float(champion.get("brier_score"), default=None)
+    if candidate_brier is not None and champion_brier is not None:
+        if candidate_brier > champion_brier + 0.02:
+            # Calibration worsened by >2 pp — block (Phase 14)
+            return False
+
+    # Phase 8 — Top-decile precision: higher is better
+    candidate_tdp = _safe_float(candidate.get("top_decile_precision"), default=None)
+    champion_tdp = _safe_float(champion.get("top_decile_precision"), default=None)
+    if candidate_tdp is not None and champion_tdp is not None:
+        if candidate_tdp < champion_tdp - 0.05:
+            # Top-decile precision dropped >5 pp — block
+            return False
+
+    return True
 
 
 def promotion_gate_passed(row: dict[str, Any], *, min_test_rows: int = 10) -> tuple[bool, str]:

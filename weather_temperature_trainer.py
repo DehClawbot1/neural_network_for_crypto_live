@@ -103,19 +103,51 @@ class WeatherTemperatureTrainer:
         except Exception:
             return pd.DataFrame()
 
-    def train(self):
+    def train(self, *, allow_warmstart: bool = True):
         df = self._safe_read()
-        if df.empty or "target_up" not in df.columns:
+        # Phase 5B fix: use real contract resolution, not CLOB direction proxy
+        _PRIMARY = "weather_contract_resolved_yes"
+        _FALLBACK = None  # No fallback to target_up — bad label is worse than no label
+        _MIN_RESOLVED = 30
+        # Improvement 1: warm-start below MIN_RESOLVED with weaker model + confidence cap
+        _WARMSTART_MIN = int(os.environ.get("WEATHER_WARMSTART_MIN", "10"))
+        _WARMSTART_CONFIDENCE_CAP = 0.60  # model predictions capped at 60% confidence
+
+        if df.empty:
             return None, None
         if self.brain_context is not None:
             df = filter_frame_for_brain(df, self.brain_context)
-            if df.empty or "target_up" not in df.columns:
+            if df.empty:
                 return None, None
 
         family_series = df.get("market_family", pd.Series("", index=df.index)).astype(str).str.lower()
         df = df[family_series.str.startswith("weather_temperature")].copy()
         if df.empty:
             return None, None
+
+        # Count resolved rows
+        resolved_count = int(df.get(_PRIMARY, pd.Series()).notna().sum()) if _PRIMARY in df.columns else 0
+
+        # Select resolution target: full mode vs warm-start
+        if _PRIMARY in df.columns and resolved_count >= _MIN_RESOLVED:
+            target_col = _PRIMARY
+            warmstart_mode = False
+        elif allow_warmstart and _PRIMARY in df.columns and resolved_count >= _WARMSTART_MIN:
+            target_col = _PRIMARY
+            warmstart_mode = True
+            import logging as _log
+            _log.getLogger(__name__).info(
+                "WeatherTemperatureTrainer: WARM-START mode (%d resolved rows, need %d for full). "
+                "Model will be weaker with confidence cap=%.2f.",
+                resolved_count, _MIN_RESOLVED, _WARMSTART_CONFIDENCE_CAP,
+            )
+        else:
+            import logging as _log
+            _log.getLogger(__name__).info(
+                "WeatherTemperatureTrainer: insufficient resolved rows (%d < warmstart_min=%d) — skipping.",
+                resolved_count, _WARMSTART_MIN,
+            )
+            return None, None  # wait for real resolution data
 
         candidates = [col for col in self.FEATURE_COLUMNS if col in df.columns]
         usable_features, _ = drop_all_nan_features(df, candidates, context="weather_temperature_trainer")
@@ -127,7 +159,7 @@ class WeatherTemperatureTrainer:
         if not usable_features:
             return None, None
         X = X[usable_features]
-        y = pd.to_numeric(df["target_up"], errors="coerce").fillna(0).astype(int)
+        y = pd.to_numeric(df[target_col], errors="coerce").fillna(0).astype(int)
 
         feature_medians = {
             feature: float(value)
@@ -160,7 +192,9 @@ class WeatherTemperatureTrainer:
                 "feature_set": "weather_temperature_hybrid",
                 "scaling": "median_fill_only",
                 "regularization": "centroid_distance",
-                "market_family": "weather_temperature",
+                "warmstart_mode": warmstart_mode,           # Improvement 1
+                "confidence_cap": _WARMSTART_CONFIDENCE_CAP if warmstart_mode else 1.0,  # Improvement 1
+                "resolved_rows_at_train": resolved_count,  # Improvement 1 — audit trail
             },
             self.model_file,
         )

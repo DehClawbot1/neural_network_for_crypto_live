@@ -4,6 +4,7 @@ import logging
 import math
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from statistics import NormalDist
 
 import pandas as pd
@@ -14,6 +15,25 @@ logger = logging.getLogger(__name__)
 
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+_DISK_CACHE_FILE = "weather_forecast_disk_cache.csv"
+
+# Columns persisted to disk (a superset of what we use)
+_DISK_CACHE_COLS = [
+    "cache_key",
+    "weather_country",
+    "weather_resolution_timezone",
+    "forecast_ready",
+    "forecast_source",
+    "forecast_stale",
+    "forecast_missing_reason",
+    "forecast_max_temp_c",
+    "forecast_p_hit_interval",
+    "forecast_margin_to_lower_c",
+    "forecast_margin_to_upper_c",
+    "forecast_uncertainty_c",
+    "forecast_last_update_ts",
+    "forecast_drift_c",
+]
 
 
 def _safe_float(value, default=None):
@@ -27,14 +47,73 @@ def _safe_float(value, default=None):
 
 
 class WeatherForecastService:
-    def __init__(self, timeout: int = 20):
+    def __init__(self, timeout: int = 20, logs_dir: str | None = None):
         self.timeout = timeout
         self.session = requests.Session()
         self._geocode_cache: dict[tuple[str, str], dict] = {}
-        self._forecast_cache: dict[tuple[str, str], dict] = {}
+        self._forecast_cache: dict[tuple[str, str], dict] = {}  # in-memory
         self._forecast_memory: dict[tuple[str, str], dict] = {}
         self.stale_minutes = max(5, int(os.getenv("WEATHER_FORECAST_STALE_MINUTES", "90") or 90))
         self.default_uncertainty_c = max(0.4, float(os.getenv("WEATHER_FORECAST_BASE_UNCERTAINTY_C", "1.6") or 1.6))
+        # Disk cache
+        _logs = Path(logs_dir or os.getenv("BOT_LOGS_DIR", "logs"))
+        _logs.mkdir(parents=True, exist_ok=True)
+        self._disk_cache_path = _logs / _DISK_CACHE_FILE
+        self._load_disk_cache()
+
+    # ------------------------------------------------------------------
+    # Disk cache — survives restarts
+    # ------------------------------------------------------------------
+
+    def _load_disk_cache(self) -> None:
+        if not self._disk_cache_path.exists():
+            return
+        try:
+            df = pd.read_csv(self._disk_cache_path, engine="python", on_bad_lines="skip")
+        except Exception as exc:
+            logger.warning("WeatherForecastService: cannot load disk cache: %s", exc)
+            return
+        loaded = 0
+        for _, row in df.iterrows():
+            cache_key_raw = str(row.get("cache_key") or "").strip()
+            if not cache_key_raw or "|" not in cache_key_raw:
+                continue
+            parts = cache_key_raw.split("|", 1)
+            key = (parts[0], parts[1])
+            entry = {col: row.get(col) for col in _DISK_CACHE_COLS if col != "cache_key"}
+            # Only populate in-memory cache if entry is not stale
+            last_ts_raw = entry.get("forecast_last_update_ts")
+            try:
+                last_ts = pd.to_datetime(last_ts_raw, utc=True, errors="coerce")
+                if pd.notna(last_ts):
+                    age = (datetime.now(timezone.utc) - last_ts.to_pydatetime()).total_seconds() / 60.0
+                    if age <= self.stale_minutes:
+                        entry["forecast_stale"] = False
+                    else:
+                        entry["forecast_stale"] = True
+            except Exception:
+                entry["forecast_stale"] = True
+            # Always populate; stale flag governs whether API call is made
+            self._forecast_cache[key] = entry
+            loaded += 1
+        logger.info("WeatherForecastService: loaded %d entries from disk cache at %s", loaded, self._disk_cache_path)
+
+    def _write_disk_cache(self, key: tuple[str, str], entry: dict) -> None:
+        cache_key_str = f"{key[0]}|{key[1]}"
+        row = {"cache_key": cache_key_str}
+        for col in _DISK_CACHE_COLS:
+            if col != "cache_key":
+                row[col] = entry.get(col)
+        try:
+            existing = pd.DataFrame()
+            if self._disk_cache_path.exists():
+                existing = pd.read_csv(self._disk_cache_path, engine="python", on_bad_lines="skip")
+            if not existing.empty and "cache_key" in existing.columns:
+                existing = existing[existing["cache_key"].astype(str) != cache_key_str]
+            merged = pd.concat([existing, pd.DataFrame([row])], ignore_index=True)
+            merged.to_csv(self._disk_cache_path, index=False)
+        except Exception as exc:
+            logger.debug("WeatherForecastService: disk cache write failed: %s", exc)
 
     def geocode_location(self, location: str, country_hint: str | None = None) -> dict | None:
         normalized_location = str(location or "").strip()
@@ -205,4 +284,5 @@ class WeatherForecastService:
         }
         self._forecast_memory[cache_key] = out
         self._forecast_cache[cache_key] = out
+        self._write_disk_cache(cache_key, out)  # persist to disk — survives restart
         return dict(out)

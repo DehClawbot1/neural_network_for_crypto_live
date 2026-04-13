@@ -285,6 +285,9 @@ def fetch_weather_temperature_markets(limit: int = 500, closed: bool = False, ma
         scanned_markets += len(markets)
         for market in markets:
             if not is_weather_temperature_market(market):
+                _q = str(market.get("question") or market.get("title") or "").strip()[:80]
+                if _q:
+                    logger.debug("Weather filter skip: %r", _q)
                 continue
             row = _market_to_weather_row(market)
             market_id = str(row.get("market_id") or "")

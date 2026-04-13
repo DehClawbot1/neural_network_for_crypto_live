@@ -159,27 +159,42 @@ def run_research_pipeline():
             raise PipelineTimeout(f"Pipeline budget exhausted at step '{step_name}' after {elapsed:.0f}s")
         logging.info("Pipeline budget: %.0fs elapsed, %.0fs remaining (at %s)", elapsed, remaining, step_name)
 
+    _pipeline_step = "init"
+
+    def _run_step(step_name, fn):
+        nonlocal _pipeline_step
+        _pipeline_step = step_name
+        try:
+            fn()
+        except (ValueError, TypeError) as _exc:
+            logging.error(
+                "Research pipeline step '%s' raised %s: %s",
+                step_name, type(_exc).__name__, _exc, exc_info=True,
+            )
+            raise
+
     try:
+        _pipeline_step = "resolve_contexts"
         btc_context = resolve_brain_context("btc", shared_logs_dir="logs", shared_weights_dir="weights")
         weather_context = resolve_brain_context("weather_temperature", shared_logs_dir="logs", shared_weights_dir="weights")
         logging.info("Building BTC direction targets...")
-        TargetBuilder().write(days=30, horizon_minutes=60)
+        _run_step("btc_targets", lambda: TargetBuilder().write(days=30, horizon_minutes=60))
         _check_budget("btc_targets")
 
         if os.getenv("ENABLE_LEGACY_BTC_DIRECTION_MODEL", "false").strip().lower() in {"1", "true", "yes", "on"}:
             logging.info("Building BTC-brain aligned dataset for legacy direction model...")
-            HistoricalDatasetBuilder(brain_context=btc_context).write()
-            DatasetAligner(logs_dir=str(btc_context.logs_dir), shared_logs_dir="logs").write()
+            _run_step("historical_dataset", lambda: HistoricalDatasetBuilder(brain_context=btc_context).write())
+            _run_step("dataset_aligner", lambda: DatasetAligner(logs_dir=str(btc_context.logs_dir), shared_logs_dir="logs").write())
             _check_budget("historical_dataset")
             logging.info("Training legacy supervised BTC direction model...")
-            SupervisedTrainer(logs_dir=str(btc_context.logs_dir), weights_dir=str(btc_context.weights_dir)).train()
-            Evaluator(logs_dir=str(btc_context.logs_dir), weights_dir=str(btc_context.weights_dir)).evaluate()
+            _run_step("supervised_trainer", lambda: SupervisedTrainer(logs_dir=str(btc_context.logs_dir), weights_dir=str(btc_context.weights_dir)).train())
+            _run_step("evaluator", lambda: Evaluator(logs_dir=str(btc_context.logs_dir), weights_dir=str(btc_context.weights_dir)).evaluate())
         else:
             logging.info("Skipping legacy btc_direction_model path; runtime scoring uses tp/return/stage1/stage2 artifacts.")
 
         _check_budget("pre_clob_fetch")
 
-        # ── BUG FIX (BUG 3): Cap number of tokens fetched ──
+        # ── Cap number of tokens fetched ──
         logging.info("Fetching token-level CLOB price history...")
         markets_df = pd.read_csv("logs/markets.csv", engine="python", on_bad_lines="skip") if HistoricalDatasetBuilder().logs_dir.joinpath("markets.csv").exists() else pd.DataFrame()
         token_ids = []
@@ -206,21 +221,21 @@ def run_research_pipeline():
             token_ids = token_ids[:MAX_CLOB_TOKENS]
 
         if token_ids:
-            CLOBHistoryClient().append_history(token_ids, days=MAX_CLOB_DAYS, interval="1m")
+            _run_step("clob_history", lambda: CLOBHistoryClient().append_history(token_ids, days=MAX_CLOB_DAYS, interval="1m"))
         _check_budget("clob_history")
 
         logging.info("Building contract-level labels and wallet alpha...")
-        WalletAlphaBuilder().write()
+        _run_step("wallet_alpha", lambda: WalletAlphaBuilder().write())
         _check_budget("wallet_alpha")
 
-        build_family_datasets(
+        _run_step("family_datasets", lambda: build_family_datasets(
             shared_logs_dir="logs",
             shared_weights_dir="weights",
             forward_minutes=15,
             max_hold_minutes=60,
             tp_move=0.04,
             sl_move=0.03,
-        )
+        ))
         _check_budget("brain_datasets")
 
         try:
@@ -263,19 +278,34 @@ def run_research_pipeline():
 
         _check_budget("alpha_merge")
         for context in (btc_context, weather_context):
-            candidate_weights_dir = train_brain_models(context, candidate_prefix="research")
-            _check_budget(f"{context.brain_id}_training")
+            _step_train = f"{context.brain_id}_training"
+            _step_registry = f"{context.brain_id}_registry"
+            _candidate_weights_dir_holder = [None]
+
+            def _do_train(ctx=context, _holder=_candidate_weights_dir_holder):
+                _holder[0] = train_brain_models(ctx, candidate_prefix="research")
+
+            _run_step(_step_train, _do_train)
+            candidate_weights_dir = _candidate_weights_dir_holder[0]
+            _check_budget(_step_train)
+
             run_id = pd.Timestamp.utcnow().strftime(f"research_{context.market_family}_%Y%m%d%H%M%S")
-            candidate_rows = evaluate_brain_candidate_rows(
-                context,
-                run_id=run_id,
-                candidate_weights_dir=candidate_weights_dir,
-            )
-            registered = register_and_promote_brain_models(
-                context,
-                candidate_rows=candidate_rows,
-                candidate_weights_dir=candidate_weights_dir,
-            )
+            _eval_rows_holder = [pd.DataFrame()]
+
+            def _do_eval(ctx=context, _rid=run_id, _cwd=candidate_weights_dir, _holder=_eval_rows_holder):
+                _holder[0] = evaluate_brain_candidate_rows(ctx, run_id=_rid, candidate_weights_dir=_cwd)
+
+            _run_step(f"{context.brain_id}_eval", _do_eval)
+            candidate_rows = _eval_rows_holder[0]
+
+            _reg_holder = [pd.DataFrame()]
+
+            def _do_register(ctx=context, _rows=candidate_rows, _cwd=candidate_weights_dir, _holder=_reg_holder):
+                _holder[0] = register_and_promote_brain_models(ctx, candidate_rows=_rows, candidate_weights_dir=_cwd)
+
+            _run_step(_step_registry, _do_register)
+            registered = _reg_holder[0]
+
             if not registered.empty and "promotion_status" in registered.columns:
                 promoted = registered[registered["promotion_status"].fillna("").astype(str) == "promoted"]
             else:
@@ -286,7 +316,7 @@ def run_research_pipeline():
                 len(registered.index) if not registered.empty else 0,
                 len(promoted.index) if not promoted.empty else 0,
             )
-            _check_budget(f"{context.brain_id}_registry")
+            _check_budget(_step_registry)
 
         btc_logs_dir = str(btc_context.logs_dir)
         _btc_only_steps = [
@@ -309,6 +339,12 @@ def run_research_pipeline():
 
     except PipelineTimeout as exc:
         logging.warning("Pipeline timeout: %s — partial artifacts are usable.", exc)
+    except (ValueError, TypeError) as exc:
+        logging.error(
+            "Research pipeline failed at step '%s': %s: %s",
+            _pipeline_step, type(exc).__name__, exc, exc_info=True,
+        )
+        raise
     finally:
         try:
             signal.alarm(0)

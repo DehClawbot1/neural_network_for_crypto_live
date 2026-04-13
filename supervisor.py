@@ -8,6 +8,7 @@ except ImportError:
     pass
 import json
 import signal
+import sys
 import time
 import logging
 import re
@@ -86,7 +87,7 @@ from wallet_state_engine import (
     should_convert_reduce_to_exit,
     source_wallet_signal_matches_trade,
 )
-from performance_governor import PerformanceGovernor
+from performance_governor import BaseGovernor, GlobalPerformanceGovernor, FamilyPerformanceGovernor, _LEVEL_POLICY_DEFAULT
 from trade_lifecycle_audit import TradeLifecycleAuditor
 from benchmark_strategy import BenchmarkStrategy
 from trade_quality import build_quality_context, resolve_entry_signal_label
@@ -894,7 +895,10 @@ def attach_open_position_context(signals_df: pd.DataFrame, positions_df: pd.Data
         return None
 
     _weather_prefix = "weather_temperature"
-    _btc_pos = _family_positions("btc") or _family_positions("")  # btc = anything not weather
+    # Cannot use Python `or` on DataFrames — use explicit None check instead.
+    _btc_pos = _family_positions("btc")
+    if _btc_pos is None:
+        _btc_pos = _family_positions("")   # fall back to everything-not-weather
     _weather_pos = _family_positions(_weather_prefix)
 
     _btc_ctx = summarize_open_position_context(positions_df=_btc_pos)
@@ -1644,12 +1648,20 @@ def main_loop():
     # Avoids redundant 404 API hits every cycle for inactive/resolved markets.
     _ob_no_book_cache: dict = {}  # {token_id: monotonic_timestamp}
     _OB_NO_BOOK_TTL = 1800.0   # 30 minutes — re-check expired markets occasionally
-    _money_mgr = MoneyManager()
+    _money_managers = {
+        "btc": MoneyManager("btc", 0.60),
+        "weather_temperature": MoneyManager("weather_temperature", 0.40)
+    }
     autonomous_monitor = AutonomousMonitor()
-    retrainer = Retrainer()
+    # Use the BTC brain-specific logs dir so the retrainer reads the correct
+    # replay buffer (logs/btc/path_replay_backtest.csv — 1,451 rows) instead
+    # of the root logs dir (logs/path_replay_backtest.csv — only 146 rows).
+    retrainer = Retrainer(logs_dir=str(btc_brain_context.logs_dir))
     feedback_learner = TradeFeedbackLearner()
     position_telemetry = PositionTelemetry()
-    performance_governor = PerformanceGovernor(logs_dir="logs")
+    global_governor = GlobalPerformanceGovernor(logs_dir="logs")
+    btc_governor = FamilyPerformanceGovernor("btc", logs_dir="logs")
+    weather_governor = FamilyPerformanceGovernor("weather_temperature", logs_dir="logs")
     lifecycle_auditor = TradeLifecycleAuditor(logs_dir="logs")
     benchmark_strategy = BenchmarkStrategy(logs_dir="logs")
     btc_trade_feedback = BTCTradeFeedback(logs_dir="logs")
@@ -2114,6 +2126,10 @@ def main_loop():
     # it can reset itself IF the only trigger was failed-entry-limit (not drawdown/recon).
     # Set to 0 to disable auto-reset.
     session_kill_switch_reset_minutes = max(0, int(os.getenv("SESSION_KILL_SWITCH_RESET_MINUTES", "30") or 30))
+    # Daily transaction counter — reset at UTC midnight, logged each cycle.
+    _daily_tx_target = int(os.getenv("DAILY_TX_TARGET", "1000") or 1000)
+    _daily_tx_count = 0
+    _daily_tx_date = pd.Timestamp.utcnow().date()
 
     def _classify_precycle_reconciliation_report(recon_report: dict) -> dict:
         report = recon_report or {}
@@ -3209,7 +3225,22 @@ def main_loop():
                 current_btc_active_trade_count = len(current_active_trades) - current_weather_active_trade_count
 
             _refresh_local_active_trade_state()
-            governor_state = performance_governor.evaluate()
+            # Guarantee governor_state is always bound — Python treats it as a local
+            # throughout this function because it is also assigned inside the candidate loop.
+            # If any evaluate() call raises, downstream code would hit UnboundLocalError.
+            governor_state = {**_LEVEL_POLICY_DEFAULT, "governor_level": "0", "reason": ""}
+            try:
+                _global_gov_state = global_governor.evaluate()
+                _btc_gov_state = btc_governor.evaluate()
+                _weather_gov_state = weather_governor.evaluate()
+                # Cycle-level default: most restrictive family state merged with global.
+                # Per-candidate code inside the loop re-derives this for the specific family.
+                governor_state = BaseGovernor.max_severity(
+                    BaseGovernor.max_severity(_btc_gov_state, _weather_gov_state),
+                    _global_gov_state,
+                )
+            except Exception as _gov_exc:
+                logging.warning("Governor evaluation failed (using safe default): %s", _gov_exc)
             btc_active_model_version = _get_active_model_version("btc")
             weather_active_model_version = _get_active_model_version("weather_temperature")
             try:
@@ -4062,11 +4093,37 @@ def main_loop():
                             _trade.close_reason = close_reason
 
             # FIX 1B: Normal entry loop
-            governor_top_signal_consumed_count = 0
-            for candidate_rank, (_, row) in enumerate(scored_df.iterrows(), start=1):
+            # Pre-filter: CLOSE_LONG signals were already handled by FIX 1A above.
+            # Letting them enter the entry loop wastes freshness + capacity gate
+            # evaluations before being discarded at the identity gate — historically
+            # accounting for ~3,600 wasted evaluations per 2-hour session.
+            if "entry_intent" in scored_df.columns:
+                _close_long_mask = scored_df["entry_intent"].str.upper() == "CLOSE_LONG"
+                _n_close_long_dropped = int(_close_long_mask.sum())
+                if _n_close_long_dropped > 0:
+                    logging.debug(
+                        "Entry loop pre-filter: dropped %d CLOSE_LONG rows already handled by exit pass",
+                        _n_close_long_dropped,
+                    )
+                _entry_loop_df = scored_df[~_close_long_mask]
+            else:
+                _entry_loop_df = scored_df
+
+            # Daily tx counter: reset at UTC midnight
+            _today_utc = pd.Timestamp.utcnow().date()
+            if _today_utc != _daily_tx_date:
+                _daily_tx_date = _today_utc
+                _daily_tx_count = 0
+
+            governor_top_signal_consumed_count = {"btc": 0, "weather_temperature": 0}
+            for candidate_rank, (_, row) in enumerate(_entry_loop_df.iterrows(), start=1):
                 if _shutdown_requested:
                     break
                 signal_row = row.to_dict()
+                signal_market_family = str(signal_row.get("market_family", ""))
+                _fam = "weather_temperature" if signal_market_family.startswith("weather_temperature") else "btc"
+                _family_gov_state = _weather_gov_state if _fam == "weather_temperature" else _btc_gov_state
+                governor_state = BaseGovernor.max_severity(_family_gov_state, _global_gov_state)
                 if cadence_boost_active and candidate_rank <= entry_aggression_top_k:
                     signal_row = apply_entry_cadence_boost(
                         signal_row,
@@ -4106,83 +4163,43 @@ def main_loop():
                     continue
                 _passed_gates.append("freshness")
 
-                if len(current_active_trades) >= _max_pos:
-                    _log_candidate_skip(
-                        signal_row,
-                        "max_concurrent_positions_reached",
-                        gate="capacity",
-                        active_positions=len(current_active_trades),
-                        max_positions=_max_pos,
-                    )
-                    continue
-                # Per-family caps — BTC and weather slots are independent
-                _max_btc_pos = int(os.getenv("MAX_CONCURRENT_BTC_POSITIONS", str(max(_max_pos, 4))) or _max_pos)
-                _max_weather_pos = int(getattr(weather_temperature_strategy, "max_concurrent_positions", 6) or 6)
-                if market_family.startswith("weather_temperature") and current_weather_active_trade_count >= _max_weather_pos:
-                    _log_candidate_skip(
-                        signal_row,
-                        "weather_max_concurrent_positions_reached",
-                        gate="capacity",
-                        active_weather_positions=current_weather_active_trade_count,
-                        max_weather_positions=_max_weather_pos,
-                    )
-                    continue
-                if not market_family.startswith("weather_temperature") and current_btc_active_trade_count >= _max_btc_pos:
-                    _log_candidate_skip(
-                        signal_row,
-                        "btc_max_concurrent_positions_reached",
-                        gate="capacity",
-                        active_btc_positions=current_btc_active_trade_count,
-                        max_btc_positions=_max_btc_pos,
-                    )
-                    continue
-                
-                _passed_gates.append("capacity")
-                if not market_key or not token_id or entry_intent == "CLOSE_LONG":
+                # ── GATE 2: MARKET VALIDITY ─────────────────────────────────────
+                # Identity + slug validity — cheap string checks before anything else.
+                if not market_key or not token_id:
                     _log_candidate_skip(
                         signal_row,
                         "invalid_candidate_identity_or_intent",
-                        gate="identity",
+                        gate="market_validity",
                         has_market_key=bool(market_key),
                         has_token_id=bool(token_id),
                         entry_intent=entry_intent,
                     )
                     continue
-
                 signal_condition_id = str(signal_row.get("condition_id") or "").strip().lower()
                 signal_slug = str(signal_row.get("market_slug") or "").strip().lower()
                 if signal_slug and _is_expired_updown_slug(signal_slug):
                     _log_candidate_skip(
                         signal_row,
                         "expired_market_slug",
-                        gate="freshness",
+                        gate="market_validity",
                         market_slug=signal_slug,
                     )
                     continue
+                _passed_gates.append("market_validity")
+
+                # ── GATE 3: OPEN UNIVERSE ────────────────────────────────────────
                 if not open_market_slugs:
-                    _log_candidate_skip(
-                        signal_row,
-                        "no_open_market_universe",
-                        gate="market_universe",
-                    )
+                    _log_candidate_skip(signal_row, "no_open_market_universe", gate="open_universe")
                     continue
                 signal_has_token = bool(token_id)
                 if signal_has_token:
-                    # Token ID is present: require it to be explicitly in the open set.
-                    # Do NOT allow slug/condition_id to rescue a dead token — that's the
-                    # leak that lets resolved-market tokens reach the orderbook guard.
                     in_open_universe = token_id in open_token_ids
                     if not in_open_universe:
-                        # Fallback: check if condition_id or slug is open AND the token_id
-                        # is one of that market's clob_token_ids in markets_df.
-                        # This handles the (rare) case where the scraper saw an older snapshot
-                        # and the token_id was not yet added to open_token_ids this cycle.
                         slug_or_cond_open = (
                             (signal_condition_id and signal_condition_id in open_condition_ids)
                             or (signal_slug and signal_slug in open_market_slugs)
                         )
                         if slug_or_cond_open:
-                            # Accept it — the parent market is open, likely a snapshot lag.
                             in_open_universe = True
                             logging.debug(
                                 "Universe fallback: token_id %s not in open_token_ids but "
@@ -4196,7 +4213,6 @@ def main_loop():
                                 token_id[:16] if len(token_id) > 16 else token_id,
                             )
                 else:
-                    # No token_id on signal: fall back to slug/condition_id only.
                     in_open_universe = (
                         (signal_condition_id and signal_condition_id in open_condition_ids)
                         or (signal_slug and signal_slug in open_market_slugs)
@@ -4205,50 +4221,23 @@ def main_loop():
                     _log_candidate_skip(
                         signal_row,
                         "token_not_in_open_market_universe",
-                        gate="market_universe",
+                        gate="open_universe",
                         open_market_count=len(open_market_slugs),
                         open_token_count=len(open_token_ids),
                     )
                     continue
-                _passed_gates.append("identity")
-                _passed_gates.append("market_universe")
-                wallet_state_gate_pass = bool(signal_row.get("wallet_state_gate_pass", True))
-                if entry_intent == "OPEN_LONG" and not wallet_state_gate_pass:
-                    if should_soften_wallet_state_conflict(signal_row):
-                        signal_row = signal_row.copy()
-                        signal_row["wallet_state_gate_soft_override"] = True
-                        signal_row["wallet_state_gate_original_pass"] = False
-                        signal_row["wallet_state_gate_pass"] = True
-                    else:
-                        _log_candidate_skip(
-                            signal_row,
-                            "wallet_state_gate_failed",
-                            gate="wallet_state",
-                            wallet_state_gate_reason=signal_row.get("wallet_state_gate_reason"),
-                            wallet_watchlist_approved=bool(signal_row.get("wallet_watchlist_approved", True)),
-                            wallet_quality_score=_safe_float(signal_row.get("wallet_quality_score", 0.0), default=0.0),
-                            wallet_fresh=bool(signal_row.get("source_wallet_fresh", False)),
-                            wallet_conflict_with_stronger=bool(signal_row.get("wallet_conflict_with_stronger", False)),
-                            wallet_agreement_score=_safe_float(signal_row.get("wallet_agreement_score", 0.0), default=0.0),
-                            wallet_stronger_conflict_score=_safe_float(signal_row.get("wallet_stronger_conflict_score", 0.0), default=0.0),
-                            wallet_support_strength=_safe_float(signal_row.get("wallet_support_strength", 0.0), default=0.0),
-                            source_wallet_direction_confidence=_safe_float(signal_row.get("source_wallet_direction_confidence", 0.0), default=0.0),
-                            source_wallet_position_event=signal_row.get("source_wallet_position_event"),
-                        )
-                        continue
+                _passed_gates.append("open_universe")
 
-                _passed_gates.append("wallet_state")
-                # FIX: Check dynamic active_trades to prevent Triple-Buy duplicates in the same loop
-                if market_key in active_trade_keys:
-                    logging.info("Prevented duplicate entry: Trade already open for %s.", market_key)
-                    _log_candidate_skip(signal_row, "duplicate_active_trade", gate="dedupe", market_key=market_key)
-                    continue
-                if token_id in _orderbook_unavailable_tokens:
+                # ── GATE 4: SESSION SAFETY ───────────────────────────────────────
+                # Kill switch and entry freeze evaluated BEFORE capacity/model to
+                # avoid wasting any compute on a fully-blocked session.
+                if session_kill_switch_active:
                     _log_candidate_skip(
                         signal_row,
-                        "orderbook_not_available_cached",
-                        gate="liquidity",
-                        token_id_cached=True,
+                        "kill_switch",
+                        gate="session_safety",
+                        freeze_reason=session_kill_switch_reason or "session_limit_hit",
+                        freeze_reason_detail=session_kill_switch_reason or "session_limit_hit",
                     )
                     continue
                 if trading_mode == "live" and live_entry_freeze:
@@ -4267,28 +4256,107 @@ def main_loop():
                     )
                     _log_candidate_skip(
                         signal_row,
-                        "freeze",
-                        gate="freeze",
+                        "entry_freeze",
+                        gate="session_safety",
                         freeze_reason=freeze_reason or "state_mismatch",
                         freeze_reason_detail=freeze_reason_detail,
                         local_count=freeze_detail.get("local_count"),
                         live_count=freeze_detail.get("live_count"),
                     )
                     continue
-                if session_kill_switch_active:
+                _passed_gates.append("session_safety")
+
+                # ── GATE 5: DEDUPE / CONFLICT PRECHECK ──────────────────────────
+                # Cheap dict/set lookups — before model inference and any API calls.
+                # btc_threshold and weather_cluster conflict checks use only raw
+                # signal fields (threshold_price, market_family) already present.
+                if market_key in active_trade_keys:
+                    logging.info("Prevented duplicate entry: Trade already open for %s.", market_key)
+                    _log_candidate_skip(signal_row, "duplicate_active_trade", gate="dedupe_conflict", market_key=market_key)
+                    continue
+                if token_id in _orderbook_unavailable_tokens:
                     _log_candidate_skip(
                         signal_row,
-                        "freeze",
-                        gate="kill_switch",
-                        freeze_reason=session_kill_switch_reason or "session_limit_hit",
-                        freeze_reason_detail=session_kill_switch_reason or "session_limit_hit",
+                        "orderbook_not_available_cached",
+                        gate="dedupe_conflict",
+                        token_id_cached=True,
                     )
                     continue
-                _passed_gates.append("dedupe")
-                _passed_gates.append("liquidity")
-                _passed_gates.append("freeze")
-                _passed_gates.append("kill_switch")
+                _early_threshold_conflict = find_conflicting_btc_price_threshold_position(
+                    dict(signal_row),
+                    current_active_trades,
+                )
+                if _early_threshold_conflict:
+                    _etc_existing = _early_threshold_conflict["existing"]
+                    _log_candidate_skip(
+                        signal_row,
+                        "btc_threshold_conflict",
+                        gate="dedupe_conflict",
+                        conflicting_market=_etc_existing.get("market") or _etc_existing.get("market_title"),
+                        conflicting_condition_id=_etc_existing.get("condition_id"),
+                        conflicting_outcome_side=_etc_existing.get("outcome_side"),
+                        conflicting_threshold_price=round(float(_etc_existing.get("threshold_price", 0.0) or 0.0), 2),
+                        candidate_threshold_price=round(float(_early_threshold_conflict["candidate_threshold_price"]), 2),
+                        expiry_key=_early_threshold_conflict["expiry_key"],
+                    )
+                    continue
+                if market_family.startswith("weather_temperature"):
+                    _early_weather_conflict = find_conflicting_weather_temperature_position(
+                        dict(signal_row),
+                        current_active_trades,
+                        cluster_cap=int(getattr(weather_temperature_strategy, "cluster_cap", 1) or 1),
+                    )
+                    if _early_weather_conflict:
+                        _ewc_trade = _early_weather_conflict.get("trade")
+                        _ewc_payload = getattr(_ewc_trade, "__dict__", {}) if _ewc_trade is not None else {}
+                        _log_candidate_skip(
+                            signal_row,
+                            str(_early_weather_conflict.get("reason") or "weather_cluster_conflict"),
+                            gate="dedupe_conflict",
+                            conflict_cluster_key=_early_weather_conflict.get("cluster_key"),
+                            conflict_cluster_size=_early_weather_conflict.get("cluster_size"),
+                            conflict_cluster_cap=_early_weather_conflict.get("cluster_cap"),
+                            conflicting_market=_ewc_payload.get("market") or _ewc_payload.get("market_title"),
+                            conflicting_condition_id=_ewc_payload.get("condition_id"),
+                            conflicting_outcome_side=_ewc_payload.get("outcome_side"),
+                        )
+                        continue
+                _passed_gates.append("dedupe_conflict")
 
+                # ── GATE 6: CAPACITY / EXPOSURE ─────────────────────────────────
+                if len(current_active_trades) >= _max_pos:
+                    _log_candidate_skip(
+                        signal_row,
+                        "max_concurrent_positions_reached",
+                        gate="capacity_exposure",
+                        active_positions=len(current_active_trades),
+                        max_positions=_max_pos,
+                    )
+                    continue
+                # Per-family caps — BTC and weather slots are independent
+                _max_btc_pos = int(os.getenv("MAX_CONCURRENT_BTC_POSITIONS", str(max(_max_pos, 4))) or _max_pos)
+                _max_weather_pos = int(getattr(weather_temperature_strategy, "max_concurrent_positions", 6) or 6)
+                if market_family.startswith("weather_temperature") and current_weather_active_trade_count >= _max_weather_pos:
+                    _log_candidate_skip(
+                        signal_row,
+                        "weather_max_concurrent_positions_reached",
+                        gate="capacity_exposure",
+                        active_weather_positions=current_weather_active_trade_count,
+                        max_weather_positions=_max_weather_pos,
+                    )
+                    continue
+                if not market_family.startswith("weather_temperature") and current_btc_active_trade_count >= _max_btc_pos:
+                    _log_candidate_skip(
+                        signal_row,
+                        "btc_max_concurrent_positions_reached",
+                        gate="capacity_exposure",
+                        active_btc_positions=current_btc_active_trade_count,
+                        max_btc_positions=_max_btc_pos,
+                    )
+                    continue
+                _passed_gates.append("capacity_exposure")
+
+                # ── MODEL ACTION ─────────────────────────────────────────────────
                 # FIX BUG#1: evaluate rule once here and pass the result into
                 # choose_action so it does NOT call evaluate() a second time.
                 rule_eval = entry_rule.evaluate(signal_row) if hasattr(entry_rule, "evaluate") else None
@@ -4303,7 +4371,7 @@ def main_loop():
                     precomputed_rule_eval=rule_eval,
                     precomputed_rule_allows=rule_allows_entry,
                 )
-                if action_val not in [0, 1, 2]:
+                if action_val not in [0, 1, 2, 3]:
                     action_val = 0
 
                 # FIX BUG#2 + BUG#4: compute calibrated_edge once here so it can
@@ -4327,7 +4395,7 @@ def main_loop():
                         except Exception:
                             pass
 
-                action_map = {0: "IGNORE", 1: "SMALL_BUY", 2: "LARGE_BUY"}
+                action_map = {0: "IGNORE", 1: "SMALL_BUY", 2: "LARGE_BUY", 3: "HIGH_CONV_BUY"}
                 try:
                     db.execute(
                         "INSERT INTO model_decisions (token_id, condition_id, outcome_side, model_name, score, action, feature_snapshot, model_artifact, normalization_artifact) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -4347,6 +4415,9 @@ def main_loop():
                     logging.warning("Model decision logging failed for %s: %s", token_id, exc)
 
                 if action_val != 0:
+                    # ── GATE 7: ALPHA QUALITY ────────────────────────────────────
+                    # Model said BUY. Verify calibrated edge, explicit EV/edge/confidence
+                    # thresholds before spending any more compute.
                     # FIX BUG#2: reuse pre-computed calibrated_edge (no second call).
                     calibrated_edge = _pre_calibrated_edge
                     calibrated_required = max(calibration_min_edge, calibration_baseline + calibration_edge_margin)
@@ -4354,14 +4425,53 @@ def main_loop():
                         _log_candidate_skip(
                             signal_row,
                             "calibration_edge_below_baseline",
-                            gate="calibration",
+                            gate="alpha_quality",
                             model_action=action_map.get(action_val, "UNKNOWN"),
                             calibrated_edge=round(calibrated_edge, 8),
                             calibrated_baseline=round(calibration_baseline, 8),
                             calibrated_required=round(calibrated_required, 8),
                         )
                         continue
-                    confidence = _safe_float(signal_row.get("confidence", 0.0), default=0.0)
+                    # Explicit alpha thresholds — configurable minimums for EV, edge, confidence.
+                    # All default to 0.0 (disabled) so existing behavior is preserved until tuned.
+                    _alpha_confidence = _safe_float(signal_row.get("confidence", 0.0), default=0.0)
+                    _alpha_ev = _safe_float(signal_row.get("expected_return", 0.0), default=0.0)
+                    _alpha_edge = _safe_float(signal_row.get("edge_score", 0.0), default=0.0)
+                    _alpha_min_conf = float(os.getenv("ALPHA_GATE_MIN_CONFIDENCE", "0.0") or 0.0)
+                    _alpha_min_ev = float(os.getenv("ALPHA_GATE_MIN_EV", "0.0") or 0.0)
+                    _alpha_min_edge = float(os.getenv("ALPHA_GATE_MIN_EDGE", "0.0") or 0.0)
+                    if _alpha_min_conf > 0 and _alpha_confidence < _alpha_min_conf:
+                        _log_candidate_skip(
+                            signal_row,
+                            "confidence_below_threshold",
+                            gate="alpha_quality",
+                            model_action=action_map.get(action_val, "UNKNOWN"),
+                            confidence=round(_alpha_confidence, 4),
+                            min_confidence=round(_alpha_min_conf, 4),
+                        )
+                        continue
+                    if _alpha_min_ev > 0 and _alpha_ev < _alpha_min_ev:
+                        _log_candidate_skip(
+                            signal_row,
+                            "ev_below_threshold",
+                            gate="alpha_quality",
+                            model_action=action_map.get(action_val, "UNKNOWN"),
+                            expected_return=round(_alpha_ev, 4),
+                            min_ev=round(_alpha_min_ev, 4),
+                        )
+                        continue
+                    if _alpha_min_edge > 0 and _alpha_edge < _alpha_min_edge:
+                        _log_candidate_skip(
+                            signal_row,
+                            "edge_below_threshold",
+                            gate="alpha_quality",
+                            model_action=action_map.get(action_val, "UNKNOWN"),
+                            edge_score=round(_alpha_edge, 4),
+                            min_edge=round(_alpha_min_edge, 4),
+                        )
+                        continue
+                    _passed_gates.append("alpha_quality")
+                    confidence = _safe_float(_alpha_confidence, default=0.0)
                     signal_market_family = str(signal_row.get("market_family", "") or "btc")
                     signal_runtime_identity = _runtime_identity_from_row(signal_row)
                     signal_row["performance_governor_level"] = _safe_int(governor_state.get("governor_level", 0), 0)
@@ -4401,45 +4511,35 @@ def main_loop():
                             **signal_quality_context,
                         }
                     )
-                    threshold_conflict = find_conflicting_btc_price_threshold_position(
-                        signal_row.to_dict() if hasattr(signal_row, "to_dict") else dict(signal_row),
-                        current_active_trades,
-                    )
-                    if threshold_conflict:
-                        existing = threshold_conflict["existing"]
-                        _log_candidate_skip(
-                            signal_row,
-                            "btc_threshold_conflict",
-                            gate="portfolio_consistency",
-                            conflicting_market=existing.get("market") or existing.get("market_title"),
-                            conflicting_condition_id=existing.get("condition_id"),
-                            conflicting_outcome_side=existing.get("outcome_side"),
-                            conflicting_threshold_price=round(float(existing.get("threshold_price", 0.0) or 0.0), 2),
-                            candidate_threshold_price=round(float(threshold_conflict["candidate_threshold_price"]), 2),
-                            expiry_key=threshold_conflict["expiry_key"],
-                        )
-                        continue
-                    if market_family.startswith("weather_temperature"):
-                        weather_conflict = find_conflicting_weather_temperature_position(
-                            signal_row.to_dict() if hasattr(signal_row, "to_dict") else dict(signal_row),
-                            current_active_trades,
-                            cluster_cap=int(getattr(weather_temperature_strategy, "cluster_cap", 1) or 1),
-                        )
-                        if weather_conflict:
-                            conflicting_trade = weather_conflict.get("trade")
-                            conflicting_payload = getattr(conflicting_trade, "__dict__", {}) if conflicting_trade is not None else {}
+                    # ── GATE 8: FAMILY-SPECIFIC LOGIC ───────────────────────────
+                    # Wallet state (source wallet conflict) + family-specific signal
+                    # quality requirements. Runs after enrichment so signal_label,
+                    # market_family and model context are available.
+                    wallet_state_gate_pass = bool(signal_row.get("wallet_state_gate_pass", True))
+                    if entry_intent == "OPEN_LONG" and not wallet_state_gate_pass:
+                        if should_soften_wallet_state_conflict(signal_row):
+                            signal_row["wallet_state_gate_soft_override"] = True
+                            signal_row["wallet_state_gate_original_pass"] = False
+                            signal_row["wallet_state_gate_pass"] = True
+                        else:
                             _log_candidate_skip(
                                 signal_row,
-                                str(weather_conflict.get("reason") or "weather_temperature_conflict"),
-                                gate="portfolio_consistency",
-                                conflict_cluster_key=weather_conflict.get("cluster_key"),
-                                conflict_cluster_size=weather_conflict.get("cluster_size"),
-                                conflict_cluster_cap=weather_conflict.get("cluster_cap"),
-                                conflicting_market=conflicting_payload.get("market") or conflicting_payload.get("market_title"),
-                                conflicting_condition_id=conflicting_payload.get("condition_id"),
-                                conflicting_outcome_side=conflicting_payload.get("outcome_side"),
+                                "wallet_state_gate_failed",
+                                gate="family_logic",
+                                wallet_state_gate_reason=signal_row.get("wallet_state_gate_reason"),
+                                wallet_watchlist_approved=bool(signal_row.get("wallet_watchlist_approved", True)),
+                                wallet_quality_score=_safe_float(signal_row.get("wallet_quality_score", 0.0), default=0.0),
+                                wallet_fresh=bool(signal_row.get("source_wallet_fresh", False)),
+                                wallet_conflict_with_stronger=bool(signal_row.get("wallet_conflict_with_stronger", False)),
+                                wallet_agreement_score=_safe_float(signal_row.get("wallet_agreement_score", 0.0), default=0.0),
+                                wallet_stronger_conflict_score=_safe_float(signal_row.get("wallet_stronger_conflict_score", 0.0), default=0.0),
+                                wallet_support_strength=_safe_float(signal_row.get("wallet_support_strength", 0.0), default=0.0),
+                                source_wallet_direction_confidence=_safe_float(signal_row.get("source_wallet_direction_confidence", 0.0), default=0.0),
+                                source_wallet_position_event=signal_row.get("source_wallet_position_event"),
                             )
                             continue
+                    _passed_gates.append("family_logic")
+                    # ── GATE 9: GOVERNOR / MODE CONTROL ─────────────────────────
                     # Governor gate: profitability-first — use a blended score
                     # of expected_return, edge, and confidence.
                     governor_min_conf = float(governor_state.get("min_confidence", 0.0) or 0.0)
@@ -4456,7 +4556,7 @@ def main_loop():
                             _log_candidate_skip(
                                 signal_row,
                                 "performance_governor_min_confidence",
-                                gate="performance_governor",
+                                gate="governor",
                                 model_action=action_map.get(action_val, "UNKNOWN"),
                                 governor_level=_safe_int(governor_state.get("governor_level", 0), 0),
                                 required_confidence=round(governor_min_conf, 4),
@@ -4476,13 +4576,13 @@ def main_loop():
                         signal_row["governor_required_liquidity_score"] = round(governor_min_liquidity, 4)
                     allow_top_signal = performance_governor_top_signal_decision(
                         governor_state,
-                        governor_top_signal_consumed_count,
+                        governor_top_signal_consumed_count[_fam],
                     )
                     if not allow_top_signal:
                         _log_candidate_skip(
                             signal_row,
                             "performance_governor_top_signal_only",
-                            gate="performance_governor",
+                            gate="governor",
                             model_action=action_map.get(action_val, "UNKNOWN"),
                         governor_level=_safe_int(governor_state.get("governor_level", 0), 0),
                         )
@@ -4498,11 +4598,42 @@ def main_loop():
                         _available_bal = max(0.0, _sim_bal - current_open_exposure)
 
                     _current_exposure = current_open_exposure
-                    size_usdc = _money_mgr.calculate_bet_size(
-                        available_balance=_available_bal,
-                        confidence=confidence,
-                        current_exposure=_current_exposure,
+                    _sleeve_key = "weather_temperature" if signal_market_family.startswith("weather_temperature") else "btc"
+                    _mgr = _money_managers.get(_sleeve_key, _money_managers["btc"])
+                    
+                    _family_exposure = sum(
+                        float(getattr(t, "size_usdc", 0.0) or 0.0) for t in current_active_trades.values()
+                        if (getattr(t, "market_family", "").startswith("weather_temperature") if _sleeve_key == "weather_temperature" else not getattr(t, "market_family", "").startswith("weather_temperature"))
                     )
+                    
+                    # Approximating EV after cost based on supervised hybrid components
+                    _ev_after = _safe_float(signal_row.get("supervised_edge", 0.0), 0.0) - _safe_float(signal_row.get("exec_expected_slippage", 0.0), 0.0)
+                    
+                    _cluster_usdc = 0.0
+                    try:
+                        if _sleeve_key == "weather_temperature" and "_early_weather_conflict" in locals() and _early_weather_conflict:
+                            _conflict_trade = _early_weather_conflict.get("trade")
+                            if _conflict_trade: _cluster_usdc = float(getattr(_conflict_trade, "size_usdc", 0.0) or 0.0)
+                    except Exception:
+                        pass
+                        
+                    sizing_decomp = _mgr.calculate_bet_size(
+                        available_balance=_available_bal,
+                        current_exposure=_family_exposure,
+                        confidence=confidence,
+                        edge=_safe_float(signal_row.get("edge_score", 0.0), 0.0),
+                        ev_after_cost=_ev_after,
+                        fill_probability=_safe_float(signal_row.get("exec_fill_prob_30s", 1.0), 1.0),
+                        realized_volatility=_safe_float(signal_row.get("btc_realized_vol_15m", 0.0), 0.0),
+                        hours_to_resolution=_safe_float(signal_row.get("hours_to_resolution", 24.0), 24.0),
+                        market_liquidity_score=_safe_float(signal_row.get("liquidity_score", 1.0), 1.0),
+                        cluster_exposure_usdc=_cluster_usdc,
+                    )
+                    
+                    for k, v in sizing_decomp.items():
+                        signal_row[f"sizing_{k}"] = v
+                        
+                    size_usdc = sizing_decomp.get("final_size", 0.0)
                     size_usdc *= float(governor_state.get("size_multiplier", 1.0) or 1.0)
                     if governor_liquidity_floor_failed:
                         size_usdc *= float(governor_state.get("liquidity_size_multiplier", 1.0) or 1.0)
@@ -4623,6 +4754,62 @@ def main_loop():
                             model_action=action_map.get(action_val, "UNKNOWN"),
                         )
                         continue
+
+                    # Low-probability market filter: historical data shows 82% of entries
+                    # are at ≤ 5¢ with a ~5% win rate — effectively buying long shots.
+                    # Reject entries below the configurable floor unless confidence
+                    # exceeds the high-confidence override threshold.
+                    # Default floor = 0.05 (5¢). Set ENTRY_MIN_PRICE=0 to disable.
+                    _entry_min_price = float(os.getenv("ENTRY_MIN_PRICE", "0.05") or 0.05)
+                    _entry_min_price_conf_override = float(os.getenv("ENTRY_MIN_PRICE_CONF_OVERRIDE", "0.85") or 0.85)
+                    if _entry_min_price > 0 and float(fill_price) < _entry_min_price and confidence < _entry_min_price_conf_override:
+                        _log_candidate_skip(
+                            signal_row,
+                            "below_min_entry_price",
+                            gate="pricing",
+                            fill_price=round(float(fill_price), 4),
+                            min_entry_price=_entry_min_price,
+                            confidence=round(confidence, 4),
+                            conf_override_threshold=_entry_min_price_conf_override,
+                            model_action=action_map.get(action_val, "UNKNOWN"),
+                        )
+                        continue
+
+                    # ── Gate 13 continued: slippage and EV-after-slippage ────────
+                    # Estimate expected slippage from orderbook spread and check
+                    # whether the trade still has positive EV after costs.
+                    # Configurable via GATE13_MAX_SLIPPAGE_PCT and GATE13_MIN_EV_AFTER_SLIP.
+                    # Both default to 0.0 (disabled) — set to activate.
+                    _g13_max_slippage = float(os.getenv("GATE13_MAX_SLIPPAGE_PCT", "0.0") or 0.0)
+                    _g13_min_ev_after = float(os.getenv("GATE13_MIN_EV_AFTER_SLIP", "0.0") or 0.0)
+                    if _g13_max_slippage > 0 or _g13_min_ev_after > 0:
+                        _g13_spread = _safe_float(ob_check.get("spread_pct", 0.0), default=0.0) if "ob_check" in dir() else 0.0
+                        _g13_slippage_est = _g13_spread / 2.0  # half-spread as entry cost
+                        if _g13_max_slippage > 0 and _g13_slippage_est > _g13_max_slippage:
+                            _log_candidate_skip(
+                                signal_row,
+                                "slippage_too_high",
+                                gate="price_sanity",
+                                model_action=action_map.get(action_val, "UNKNOWN"),
+                                estimated_slippage_pct=round(_g13_slippage_est, 4),
+                                max_slippage_pct=_g13_max_slippage,
+                            )
+                            continue
+                        if _g13_min_ev_after > 0:
+                            _g13_ev = _safe_float(signal_row.get("expected_return", 0.0), default=0.0)
+                            _g13_ev_after_slip = _g13_ev - _g13_slippage_est
+                            if _g13_ev_after_slip <= _g13_min_ev_after:
+                                _log_candidate_skip(
+                                    signal_row,
+                                    "ev_negative_after_slippage",
+                                    gate="price_sanity",
+                                    model_action=action_map.get(action_val, "UNKNOWN"),
+                                    ev_before=round(_g13_ev, 4),
+                                    estimated_slippage=round(_g13_slippage_est, 4),
+                                    ev_after=round(_g13_ev_after_slip, 4),
+                                    min_ev_after=_g13_min_ev_after,
+                                )
+                                continue
 
                     _candidate_stats["candidates_tradable"] += 1
 
@@ -4761,7 +4948,12 @@ def main_loop():
                         trade_manager.active_trades[market_key] = trade
                         _refresh_local_active_trade_state()
                         _invalidate_entry_available_balance()
-                        logging.info("Live trade filled for %s at %s. Shares: %s", token_id, actual_fill_price, actual_fill_size)
+                        _daily_tx_count += 1
+                        logging.info(
+                            "Live trade filled for %s at %s. Shares: %s | daily_tx=%d/%d",
+                            token_id, actual_fill_price, actual_fill_size,
+                            _daily_tx_count, _daily_tx_target,
+                        )
                         _record_candidate_decision(
                             signal_row,
                             final_decision="ENTRY_FILLED",
@@ -4773,26 +4965,45 @@ def main_loop():
                             order_id=entry_order_id,
                             fill_price=actual_fill_price,
                             fill_shares=actual_fill_size,
+                            daily_tx_count=_daily_tx_count,
+                            daily_tx_target=_daily_tx_target,
                         )
-                        governor_top_signal_consumed_count = performance_governor_consume_top_signal_slot(
+                        governor_top_signal_consumed_count[_fam] = performance_governor_consume_top_signal_slot(
                             governor_state,
-                            governor_top_signal_consumed_count,
+                            governor_top_signal_consumed_count[_fam],
                         )
+                        # ── PHASE 7: POST-TRADE ATTRIBUTION (live) ───────────────
+                        # Store entry-time state for retraining and win-rate diagnostics.
+                        try:
+                            trade.model_prob_at_entry = _safe_float(signal_row.get("confidence", 0.0), default=0.0)
+                            trade.market_prob_at_entry = _safe_float(signal_row.get("current_price", fill_price), default=float(fill_price))
+                            trade.edge_at_entry = _safe_float(signal_row.get("edge_score", 0.0), default=0.0)
+                            trade.ev_at_entry = _safe_float(signal_row.get("expected_return", 0.0), default=0.0)
+                            trade.fill_price_at_entry = float(actual_fill_price)
+                            trade.size_usdc_at_entry = float(size_usdc)
+                            trade.governor_level_at_entry = _safe_int(governor_state.get("governor_level", 0), 0)
+                            trade.regime_at_entry = str(signal_row.get("active_regime") or "")
+                            trade.calibrated_edge_at_entry = float(calibrated_edge)
+                        except Exception as _attr_exc:
+                            logging.debug("Post-trade attribution failed (non-blocking): %s", _attr_exc)
                     else:
                         # Paper trade: register in TradeManager (which logs to execution_log.csv)
                         # FIX C7: Don't also call execute_paper_trade — it creates duplicate log entries
                         trade = trade_manager.handle_signal(signal_row=pd.Series(signal_row), confidence=confidence, size_usdc=size_usdc, entry_price_override=fill_price)
                         if trade is not None:
+                            _daily_tx_count += 1
                             _refresh_local_active_trade_state()
                             _invalidate_entry_available_balance()
                             logging.info(
-                                "Brain: FOLLOW -> Paper filled %s USDC on %s at $%.3f for '%s' | label=%s confidence=%.2f",
+                                "Brain: FOLLOW -> Paper filled %s USDC on %s at $%.3f for '%s' | label=%s confidence=%.2f | daily_tx=%d/%d",
                                 size_usdc,
                                 signal_row.get("outcome_side", "?"),
                                 fill_price,
                                 signal_row.get("market_title", "Unknown"),
                                 signal_row.get("signal_label", "UNKNOWN"),
                                 confidence,
+                                _daily_tx_count,
+                                _daily_tx_target,
                             )
                             _record_candidate_decision(
                                 signal_row,
@@ -4803,11 +5014,26 @@ def main_loop():
                                 final_size_usdc=size_usdc,
                                 available_balance=_available_bal,
                                 paper_fill_price=fill_price,
+                                daily_tx_count=_daily_tx_count,
+                                daily_tx_target=_daily_tx_target,
                             )
-                            governor_top_signal_consumed_count = performance_governor_consume_top_signal_slot(
+                            governor_top_signal_consumed_count[_fam] = performance_governor_consume_top_signal_slot(
                                 governor_state,
-                                governor_top_signal_consumed_count,
+                                governor_top_signal_consumed_count[_fam],
                             )
+                            # ── PHASE 7: POST-TRADE ATTRIBUTION (paper) ──────────
+                            try:
+                                trade.model_prob_at_entry = _safe_float(signal_row.get("confidence", 0.0), default=0.0)
+                                trade.market_prob_at_entry = _safe_float(signal_row.get("current_price", fill_price), default=float(fill_price))
+                                trade.edge_at_entry = _safe_float(signal_row.get("edge_score", 0.0), default=0.0)
+                                trade.ev_at_entry = _safe_float(signal_row.get("expected_return", 0.0), default=0.0)
+                                trade.fill_price_at_entry = float(fill_price)
+                                trade.size_usdc_at_entry = float(size_usdc)
+                                trade.governor_level_at_entry = _safe_int(governor_state.get("governor_level", 0), 0)
+                                trade.regime_at_entry = str(signal_row.get("active_regime") or "")
+                                trade.calibrated_edge_at_entry = float(calibrated_edge)
+                            except Exception as _attr_exc:
+                                logging.debug("Post-trade attribution failed (non-blocking): %s", _attr_exc)
                         else:
                             _record_candidate_decision(
                                 signal_row,
@@ -4869,6 +5095,29 @@ def main_loop():
             }
             append_csv_record(CANDIDATE_CYCLE_STATS_FILE, cycle_stats_row)
             logging.info("CANDIDATE_CYCLE_SUMMARY %s", json.dumps(cycle_stats_row, separators=(",", ":")))
+            # ── PHASE 8: END-OF-CYCLE REPORTING ─────────────────────────────────
+            # Per-gate rejection breakdown for diagnostics.
+            _gate_groups = {}
+            for _skip_reason, _skip_count in _candidate_skip_counts.items():
+                _gate_groups[_skip_reason] = _skip_count
+            if _gate_groups:
+                logging.info(
+                    "GATE_REJECTION_BREAKDOWN cycle=%s | %s",
+                    cycle_id,
+                    " | ".join(f"{k}={v}" for k, v in sorted(_gate_groups.items(), key=lambda x: -x[1])[:10]),
+                )
+            # Daily transaction pacing — log progress toward target once per cycle.
+            _hours_into_day = pd.Timestamp.utcnow().hour + pd.Timestamp.utcnow().minute / 60.0
+            _tx_rate_per_hour = _daily_tx_count / max(_hours_into_day, 0.1)
+            _tx_pace_pct = round(100.0 * _daily_tx_count / max(_daily_tx_target, 1), 1)
+            logging.info(
+                "DAILY_TX_PROGRESS date=%s count=%d target=%d pace=%.1f%% rate=%.1f/hr",
+                _daily_tx_date,
+                _daily_tx_count,
+                _daily_tx_target,
+                _tx_pace_pct,
+                _tx_rate_per_hour,
+            )
             if cycle_duplicate_steps:
                 logging.warning(
                     "Duplicate column audit detected %d step(s) this cycle. See %s",
@@ -5339,10 +5588,15 @@ def main_loop():
                     break
                 # Only record if it wasn't rolled back into OPEN state
                 if getattr(ct, 'state', None) == TradeState.CLOSED:
-                    if ct.realized_pnl >= 0:
-                        _money_mgr.record_win(ct.realized_pnl)
-                    else:
-                        _money_mgr.record_loss(ct.realized_pnl)
+                    _fam_key = "weather_temperature" if getattr(ct, "market_family", "").startswith("weather_temperature") else "btc"
+                    _mgr = _money_managers.get(_fam_key, _money_managers["btc"])
+                    
+                    try:
+                        _ts = ct.closed_at.isoformat() if hasattr(ct.closed_at, "isoformat") else None
+                    except Exception:
+                        _ts = None
+                        
+                    _mgr.record_trade_result(ct.realized_pnl, ts_iso=_ts)
             finalized_closed_trades = [ct for ct in closed_trades if getattr(ct, "state", None) == TradeState.CLOSED]
             closed_trade_feedback_count = feedback_learner.record_closed_trades(finalized_closed_trades)
             try:
@@ -5488,6 +5742,7 @@ def main_loop():
     _flush_runtime_state(reason="shutdown_signal" if _shutdown_requested else "loop_exit")
     if _shutdown_requested:
         logging.info("Supervisor shutting down gracefully after signal.")
+        sys.exit(0)
 
 
 if __name__ == "__main__":

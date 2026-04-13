@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 LEADERBOARD_URL = "https://data-api.polymarket.com/v1/leaderboard"
 _CACHE: dict[tuple[str, str, str, int, str], tuple[float, pd.DataFrame]] = {}
 
+# Fix 5 — staleness guard
+_DEFAULT_STALENESS_WARN_HOURS = 24
+_STALENESS_QUALITY_MULTIPLIER = 0.5  # halve quality_score when stale
+
 
 def _safe_float(value, default=0.0) -> float:
     try:
@@ -153,6 +157,8 @@ class PolymarketLeaderboardService:
             )
 
         frame = pd.DataFrame(rows)
+        # Fix 5 — annotate staleness
+        frame = self._annotate_staleness(frame, category=category_key)
         self._write_audit(category_key, frame)
         _CACHE[cache_key] = (now, frame.copy())
         logger.info(
@@ -217,6 +223,46 @@ class PolymarketLeaderboardService:
             merged = merged.drop_duplicates(subset=["wallet"], keep="last").reset_index(drop=True)
         self._write_audit(category, merged)
         return merged
+
+    # ------------------------------------------------------------------
+    # Fix 5 — staleness annotation
+    # ------------------------------------------------------------------
+
+    def _leaderboard_file_age_hours(self, category: str) -> float:
+        """Return age in hours of the leaderboard CSV file, or inf if missing."""
+        audit_file = self._audit_file(category)
+        if not audit_file.exists():
+            return float("inf")
+        try:
+            return (time.time() - audit_file.stat().st_mtime) / 3600.0
+        except Exception:
+            return float("inf")
+
+    def _annotate_staleness(self, frame: pd.DataFrame, category: str) -> pd.DataFrame:
+        """
+        Add staleness_multiplier and leaderboard_age_hours columns.
+        When the file is older than LEADERBOARD_STALENESS_WARNING_HOURS,
+        quality_score is dampened so downstream models trust it less.
+        """
+        if frame.empty:
+            return frame
+        warn_hours = float(
+            os.getenv("LEADERBOARD_STALENESS_WARNING_HOURS", str(_DEFAULT_STALENESS_WARN_HOURS))
+        )
+        age_hours = self._leaderboard_file_age_hours(category)
+        is_stale = age_hours > warn_hours
+        multiplier = _STALENESS_QUALITY_MULTIPLIER if is_stale else 1.0
+        frame = frame.copy()
+        frame["leaderboard_age_hours"] = round(age_hours if age_hours != float("inf") else -1.0, 2)
+        frame["staleness_multiplier"] = multiplier
+        if is_stale and "quality_score" in frame.columns:
+            frame["quality_score"] = frame["quality_score"] * multiplier
+            logger.warning(
+                "LeaderboardService[%s]: file is %.1f hours old (threshold=%.1f h). "
+                "quality_score dampened by %.1fx.",
+                category, age_hours, warn_hours, multiplier,
+            )
+        return frame
 
     def snapshot_status(self, *, category: str, time_period: str = "WEEK", order_by: str = "PNL", limit: int = 100) -> dict:
         frame = self.fetch_leaderboard(

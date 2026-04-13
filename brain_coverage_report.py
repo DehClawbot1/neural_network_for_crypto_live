@@ -34,6 +34,10 @@ OPTIONAL_CONTEXT_FEATURES = [
 
 TIMESTAMP_CANDIDATES = [
     "timestamp",
+    # snapshot-specific names used by btc_live_snapshot.csv / technical_regime_snapshot.csv
+    "btc_live_timestamp",
+    "technical_timestamp",
+    # generic suffixed names written by various pipeline steps
     "captured_at",
     "recorded_at",
     "observed_at",
@@ -57,8 +61,19 @@ def _safe_read_csv(path: Path) -> pd.DataFrame:
 
 
 def _extract_timestamp_series(df: pd.DataFrame) -> pd.Series:
+    # 1. Try the explicit priority list first.
     for column in TIMESTAMP_CANDIDATES:
         if column in df.columns:
+            return pd.to_datetime(df[column], errors="coerce", utc=True)
+    # 2. Fuzzy fallback: any column whose name contains "timestamp" (e.g.
+    #    "btc_live_timestamp", "technical_timestamp").  This future-proofs
+    #    against new snapshot writers using their own prefix conventions.
+    for column in df.columns:
+        if "timestamp" in column.lower():
+            return pd.to_datetime(df[column], errors="coerce", utc=True)
+    # 3. Last resort: any column whose name ends with "_at".
+    for column in df.columns:
+        if column.lower().endswith("_at"):
             return pd.to_datetime(df[column], errors="coerce", utc=True)
     return pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns, UTC]")
 

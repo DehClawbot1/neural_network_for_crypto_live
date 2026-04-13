@@ -1,18 +1,12 @@
 """
 money_manager.py
 ================
-Intelligent bet sizing based on available balance, confidence, and risk limits.
-
-Rules:
-  - Never bet more than MAX_RISK_PER_TRADE_PCT of available balance
-  - Scale bet size by confidence level
-  - Never bet below MIN_BET_USDC (skip the trade instead)
-  - Never bet above MAX_BET_USDC (cap it)
-  - Track total exposure and reject if MAX_TOTAL_EXPOSURE_PCT exceeded
-  - Learn from wins/losses: reduce size after consecutive losses
+Intelligent bet sizing based on family sleeves, additive quality scores, and multiplicative penalties.
 """
 
 import logging
+from datetime import datetime, timezone
+import numpy as np
 
 from config import TradingConfig
 
@@ -20,143 +14,227 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 
 class MoneyManager:
-    def __init__(self):
+    def __init__(self, family: str, sleeve_pct: float = 1.0):
+        self.family = family.lower()
+        self.sleeve_pct = max(0.01, min(1.0, sleeve_pct))
+        
         self.consecutive_losses = 0
         self.consecutive_wins = 0
         self.total_trades = 0
         self.total_pnl = 0.0
+        
+        self.daily_loss = 0.0
+        self.weekly_loss = 0.0
+        self.current_day_str = ""
+        self.current_week_str = ""
 
-    def record_win(self, pnl: float):
-        self.consecutive_wins += 1
-        self.consecutive_losses = 0
+    def record_trade_result(self, pnl: float, ts_iso: str = None):
+        """Records win/loss strictly against the assigned family sleeve state."""
+        if ts_iso is None:
+            ts_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            dt = datetime.fromisoformat(ts_iso)
+            if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            dt = datetime.now(timezone.utc)
+            
+        day_str = dt.strftime("%Y-%m-%d")
+        week_str = dt.strftime("%Y-%W")
+        
+        if day_str != self.current_day_str:
+            self.daily_loss = 0.0
+            self.current_day_str = day_str
+            
+        if week_str != self.current_week_str:
+            self.weekly_loss = 0.0
+            self.current_week_str = week_str
+
+        # Win / Loss streak
+        if pnl > 0:
+            self.consecutive_wins += 1
+            self.consecutive_losses = 0
+        elif pnl < 0:
+            self.consecutive_losses += 1
+            self.consecutive_wins = 0
+            self.daily_loss += abs(pnl) # Accumulate absolute loss cleanly
+            self.weekly_loss += abs(pnl)
+            
         self.total_trades += 1
         self.total_pnl += pnl
 
-    def record_loss(self, pnl: float):
-        self.consecutive_losses += 1
-        self.consecutive_wins = 0
-        self.total_trades += 1
-        self.total_pnl += pnl
+    def _get_drawdown_penalty(self) -> float:
+        if self.consecutive_losses <= 1: return 1.0
+        if self.consecutive_losses == 2: return 0.75
+        if self.consecutive_losses == 3: return 0.50
+        return 0.25 # Max clamp
 
-    def _loss_reduction_factor(self) -> float:
-        """Reduce bet size after consecutive losses (Kelly-inspired)."""
-        if self.consecutive_losses <= 1:
-            return 1.0
-        if self.consecutive_losses == 2:
-            return 0.75
-        if self.consecutive_losses == 3:
-            return 0.50
-        return 0.25  # After 4+ losses, bet 25% of normal
+    def _is_kill_switched(self, max_daily_loss: float, max_weekly_loss: float) -> bool:
+        if max_daily_loss > 0 and self.daily_loss >= max_daily_loss:
+            return True
+        if max_weekly_loss > 0 and self.weekly_loss >= max_weekly_loss:
+            return True
+        return False
 
-    def _confidence_bet_pct(self, confidence: float) -> float:
-        """Map confidence to bet size as % of balance.
-
-        Model confidence range is ~0.08-0.28, so thresholds are
-        calibrated to the actual output distribution (p75=0.15, p90=0.18).
-        """
-        if confidence >= 0.20:
-            return TradingConfig.HIGH_CONFIDENCE_BET_PCT
-        if confidence >= 0.13:
-            return TradingConfig.MEDIUM_CONFIDENCE_BET_PCT
-        return TradingConfig.LOW_CONFIDENCE_BET_PCT
+    def _safe_float(self, val, fallback) -> float:
+        try:
+            v = float(val)
+            if np.isnan(v) or np.isinf(v):
+                return float(fallback)
+            return v
+        except Exception:
+            return float(fallback)
 
     def calculate_bet_size(
         self,
         available_balance: float,
-        confidence: float,
         current_exposure: float = 0.0,
-    ) -> float:
+        # Execution / Safety Constraints
+        confidence: float = 0.0,
+        edge: float = 0.0,
+        ev_after_cost: float = 0.0,
+        fill_probability: float = 0.0,
+        # Context constraints
+        realized_volatility: float = 0.0,
+        hours_to_resolution: float = 0.0,
+        market_liquidity_score: float = 1.0,
+        cluster_exposure_usdc: float = 0.0,
+        # Environmental Overrides
+        target_vol: float = 0.05,
+        floor_vol: float = 0.02,
+        cluster_cap_usdc: float = 250.0,
+        max_daily_loss: float = 100.0,
+        max_weekly_loss: float = 300.0,
+    ) -> dict:
         """
-        Calculates a DYNAMIC bet size that scales infinitely with account balance.
-        Increases bets on profit, shrinks bets on drawdowns, and ensures capital preservation.
+        Calculates size by returning a complete breakdown of multipliers, penalties, and final capped size.
         """
-        if available_balance <= 0:
-            logging.warning("MoneyManager: No balance available ($%.2f)", available_balance)
-            return 0.0
-
-        reserve_pct = max(0.0, min(0.95, float(getattr(TradingConfig, "CAPITAL_RESERVE_PCT", 0.20))))
-        reserve_usdc = available_balance * reserve_pct
-        tradable_balance = max(0.0, available_balance - reserve_usdc)
-
-        min_bet_usdc = float(getattr(TradingConfig, "MIN_BET_USDC", 1.0))
-        strategic_min_entry = max(min_bet_usdc, float(getattr(TradingConfig, "MIN_ENTRY_USDC", min_bet_usdc)))
-        if tradable_balance < min_bet_usdc:
-            logging.info(
-                "MoneyManager: low-balance pause (balance=$%.2f, tradable=$%.2f, exchange_floor=$%.2f).",
-                available_balance, tradable_balance, min_bet_usdc,
-            )
-            return 0.0
-
-        # Check total exposure limit (e.g. 85% of total capital)
-        max_total_exposure = (available_balance + current_exposure) * TradingConfig.MAX_TOTAL_EXPOSURE_PCT # BUG FIX 2: Compute against total portfolio
-        remaining_capacity = max_total_exposure - current_exposure
-        if remaining_capacity <= 0:
-            logging.info(
-                "MoneyManager: Exposure limit reached. Current=$%.2f, Max=$%.2f",
-                current_exposure, max_total_exposure
-            )
-            return 0.0
-
-        # Base bet: confidence-scaled % of current balance (Naturally scales with profit/loss)
-        base_pct = self._confidence_bet_pct(confidence)
-        base_bet = tradable_balance * base_pct
-
-        # Apply loss reduction (Protects against losing streaks)
-        loss_factor = self._loss_reduction_factor()
-        adjusted_bet = base_bet * loss_factor
-
-        # --- DYNAMIC LIMITS ---
-        absolute_floor = min_bet_usdc # Exchange absolute minimum
-        max_risk_per_trade_pct = max(0.0, float(getattr(TradingConfig, "MAX_RISK_PER_TRADE_PCT", 0.15)))
+        # Guardrail 2: missing metrics force conservative defaults.
+        # Edge, Ev, Fill automatically fall back to 0.0 if not provided or NaN
+        confidence = self._safe_float(confidence, 0.0)
+        edge = self._safe_float(edge, 0.0)
+        ev_after_cost = self._safe_float(ev_after_cost, 0.0)
+        fill_probability = self._safe_float(fill_probability, 0.0)
         
-        # Dynamic minimum grows slowly with account size but remains capped.
-        dynamic_min_pct = max(0.0, float(getattr(TradingConfig, "MIN_BET_DYNAMIC_PCT", 0.002)))
-        dynamic_min_cap = max(strategic_min_entry, float(getattr(TradingConfig, "MAX_DYNAMIC_MIN_BET_USDC", 5.0)))
-        dynamic_min = max(strategic_min_entry, min(tradable_balance * dynamic_min_pct, dynamic_min_cap))
+        # 1. Family Capital Allocation
+        global_reserve_pct = max(0.0, min(0.95, float(getattr(TradingConfig, "CAPITAL_RESERVE_PCT", 0.20))))
+        tradable_global = max(0.0, available_balance * (1.0 - global_reserve_pct))
         
-        # Dynamic Max: percentage of tradable balance + hard absolute safety cap.
-        dynamic_max = tradable_balance * max_risk_per_trade_pct
-        hard_max = max(absolute_floor, float(getattr(TradingConfig, "HARD_MAX_BET_USDC", 250.0)))
-        dynamic_max = min(dynamic_max, hard_max)
+        sleeve_capacity = tradable_global * self.sleeve_pct
+        sleeve_available = max(0.0, sleeve_capacity - current_exposure)
 
-        # Cap the bet at the dynamic max and remaining capacity
-        adjusted_bet = min(adjusted_bet, dynamic_max)
-        adjusted_bet = min(adjusted_bet, remaining_capacity)
+        decomposition = {
+            "family": self.family,
+            "sleeve_capacity": round(sleeve_capacity, 2),
+            "sleeve_available": round(sleeve_available, 2),
+            "edge_component": edge,
+            "ev_component": ev_after_cost,
+            "fill_prob_component": fill_probability,
+            "confidence_component": confidence,
+            "quality_score": 0.0,
+            "volatility_penalty": 1.0,
+            "drag_penalty": 1.0,
+            "liquidity_penalty": 1.0,
+            "drawdown_penalty": 1.0,
+            "cluster_penalty": 1.0,
+            "final_size": 0.0,
+            "reason": None
+        }
 
-        # Enforce the dynamic minimum
-        if dynamic_max < absolute_floor:
-            floor_support_pct = max(0.0, (1.0 - reserve_pct) * max_risk_per_trade_pct)
-            min_balance_for_floor = (absolute_floor / floor_support_pct) if floor_support_pct > 0 else float("inf")
-            logging.info(
-                "MoneyManager: low-balance pause (balance=$%.2f, tradable=$%.2f, risk_cap=$%.2f, exchange_floor=$%.2f, min_balance_for_floor=$%.2f).",
-                available_balance,
-                tradable_balance,
-                dynamic_max,
-                absolute_floor,
-                min_balance_for_floor,
-            )
-            return 0.0
+        if sleeve_available <= 0:
+            decomposition["reason"] = "sleeve_depleted"
+            return decomposition
+
+        if self._is_kill_switched(max_daily_loss, max_weekly_loss):
+            decomposition["reason"] = "kill_switch_active"
+            return decomposition
+
+        # 2. Additive Quality Score (Guardrail 1: 35/35/20/10)
+        # Normalize the metrics strictly to 0-1 range for uniform combination.
+        n_edge = max(0.0, min(1.0, edge * 20.0))  # e.g. 5% true edge hits max quality scale
+        n_ev = max(0.0, min(1.0, ev_after_cost * 20.0))
+        n_fill = max(0.0, min(1.0, fill_probability))
+        n_conf = max(0.0, min(1.0, confidence * 4.0)) # map standard 0.25 PM probability to 1.0 scale
+
+        qs = (n_edge * 0.35) + (n_ev * 0.35) + (n_fill * 0.20) + (n_conf * 0.10)
+        qs = max(0.0, min(1.0, qs))
+        decomposition["quality_score"] = round(qs, 4)
+
+        if qs < 0.05: # Minimal quality floor
+            decomposition["reason"] = "quality_score_too_low"
+            return decomposition
+
+        # Default single trade hard cap sizing inside sleeve
+        # (Weather operates on a tighter 3% single position margin, BTC larger 6%)
+        sleeve_single_trade_cap_pct = 0.06 if "btc" in self.family else 0.03
+        base_size = sleeve_capacity * sleeve_single_trade_cap_pct * qs
+
+        # 3. Multiplicative Penalty Stack
+        
+        # A) Drawdown Penalty
+        dd_penalty = self._get_drawdown_penalty()
+        decomposition["drawdown_penalty"] = dd_penalty
+        
+        # B) Liquidity Penalty
+        liq = max(0.5, min(1.0, self._safe_float(market_liquidity_score, 1.0)))
+        decomposition["liquidity_penalty"] = liq
+        
+        # Family-specific limits
+        vol_penalty = 1.0
+        drag_penalty = 1.0
+        cluster_penalty = 1.0
+
+        if "btc" in self.family:
+            rv = self._safe_float(realized_volatility, floor_vol)
+            v_pen = target_vol / max(rv, floor_vol)
+            vol_penalty = max(0.50, min(1.25, v_pen))
+            decomposition["volatility_penalty"] = round(vol_penalty, 4)
+        else:
+            # Weather Drag Target (Guardrail 5)
+            hr = self._safe_float(hours_to_resolution, 24.0)
+            if hr > 72.0: drag_penalty = 0.50
+            elif hr > 48.0: drag_penalty = 0.65
+            elif hr > 24.0: drag_penalty = 0.85
+            else: drag_penalty = 1.00
+            decomposition["drag_penalty"] = drag_penalty
             
-        if adjusted_bet < dynamic_min:
-            if remaining_capacity >= dynamic_min:
-                adjusted_bet = min(dynamic_min, dynamic_max) # BUG FIX 3: Never break max risk for the sake of minimums
-            else:
-                return 0.0
+            # Weather Cluster (Guardrail 6)
+            cluster_usdc = self._safe_float(cluster_exposure_usdc, 0.0)
+            if cluster_usdc >= cluster_cap_usdc:
+                decomposition["cluster_penalty"] = 0.0
+                decomposition["reason"] = "cluster_cap_exceeded"
+                decomposition["final_size"] = 0.0
+                return decomposition
+            elif cluster_usdc >= (cluster_cap_usdc * 0.5):
+                cluster_penalty = 0.5
+            decomposition["cluster_penalty"] = cluster_penalty
 
-        adjusted_bet = round(adjusted_bet, 2)
+        # 4. Final Application and Hard Caps (Guardrail 3)
+        combined_multiplier = dd_penalty * liq * vol_penalty * drag_penalty * cluster_penalty
+        combined_multiplier = max(0.25, min(1.50, combined_multiplier))
+        
+        final_size = base_size * combined_multiplier
 
-        logging.info(
-            "MoneyManager: balance=$%.2f reserve=$%.2f tradable=$%.2f conf=%.2f base_pct=%.1f%% loss_factor=%.2f -> final_bet=$%.2f (strategy_min=$%.2f, max=$%.2f)",
-            available_balance, reserve_usdc, tradable_balance, confidence, base_pct * 100, loss_factor, adjusted_bet, dynamic_min, dynamic_max
-        )
+        # Apply ultimate caps vs available
+        min_bet = float(getattr(TradingConfig, "MIN_BET_USDC", 1.0))
+        final_size = min(final_size, sleeve_available)
 
-        return adjusted_bet
+        if final_size < min_bet:
+            decomposition["reason"] = "below_exchange_minimum"
+            decomposition["final_size"] = 0.0
+            return decomposition
+
+        decomposition["final_size"] = round(final_size, 2)
+        decomposition["reason"] = "approved"
+        
+        return decomposition
 
     def get_status(self) -> dict:
         return {
+            "family": self.family,
             "total_trades": self.total_trades,
             "total_pnl": round(self.total_pnl, 4),
             "consecutive_wins": self.consecutive_wins,
             "consecutive_losses": self.consecutive_losses,
-            "loss_reduction_factor": self._loss_reduction_factor(),
+            "daily_loss": round(self.daily_loss, 4),
+            "weekly_loss": round(self.weekly_loss, 4)
         }

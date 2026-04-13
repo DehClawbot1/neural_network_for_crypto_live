@@ -494,31 +494,123 @@ class TradeManager:
                 pass # Safely ignore if API rate limits or client ref not found
             # -------------------------------------------------------
 
+            # Family-specific parameter overrides
+            is_btc = "weather" not in str(trade.market_family or "").lower() and "temperature" not in str(trade.market_family or "").lower()
+            vol_bucket = getattr(trade, 'volatility_bucket', 'medium')
+            liq_bucket = getattr(trade, 'liquidity_bucket', 'medium')
+
+            # Phase 3: Dynamic Trailing Stop
+            vol_multiplier = 1.0
+            if is_btc:
+                if vol_bucket == "high": vol_multiplier = 1.5
+                elif vol_bucket == "low": vol_multiplier = 0.75
+                elif vol_bucket in ("extreme", "event"): vol_multiplier = 1.85
+            else:
+                vol_multiplier = 1.2  # Weather base widen
+            vol_multiplier = max(0.65, min(1.75, vol_multiplier))
+            dynamic_trailing_stop = exit_thresholds["trailing_stop"] * vol_multiplier
+
+            # Context-Aware Time Stop
+            dynamic_time_stop_minutes = exit_thresholds["time_stop_minutes"]
+            if is_btc and liq_bucket == "low":
+                dynamic_time_stop_minutes *= 1.5 # give illiquid markets more time rather than panic selling
+            if not is_btc:
+                time_to_res_val = technical_context.get("hours_to_resolution", 24) if technical_context else 24
+                if time_to_res_val < 6 and roi < 0:
+                    dynamic_time_stop_minutes *= 0.5 # exit earlier if weather resolution near and we are losing
+                
             hard_emergency_delta = self._env_float("EXIT_HARD_EMERGENCY_DELTA", 0.035, minimum=0.001, maximum=1.0)
+            
+            # --- Hard Exits (No Execution Delay) ---
             if close_reason is None and (entry_price - current_price) >= hard_emergency_delta:
-                close_reason = "hard_emergency_stop"
+                close_reason = "risk_management_hard_stop"
             elif close_reason is None and bool(trajectory_signal.get("panic_exit_signal")):
-                close_reason = "trajectory_panic_exit"
+                close_reason = "alpha_invalidation_panic"
             elif close_reason is None and (entry_price - current_price) >= exit_thresholds["sl_delta"]:
-                close_reason = "stop_loss"
+                close_reason = "risk_management_stop_loss"
             elif close_reason is None and bool(trajectory_signal.get("reversal_exit_signal")):
-                close_reason = "trajectory_reversal_exit"
-            elif close_reason is None:
-                close_reason = self._technical_exit_reason(trade, technical_context, minutes_open)
-            if close_reason is None and minutes_open >= exit_thresholds["time_stop_minutes"]:
-                close_reason = "time_stop"
+                close_reason = "alpha_invalidation_reversal"
+            elif close_reason is None and not is_btc and technical_context and bool(technical_context.get("weather_forecast_stale")):
+                close_reason = "alpha_invalidation_forecast_stale"
+
+            # --- Soft Exits (Allow Execution Delay & Scale Out) ---
+            is_soft_exit = False
+            if close_reason is None:
+                tech_reason = self._technical_exit_reason(trade, technical_context, minutes_open)
+                if tech_reason:
+                    close_reason = tech_reason
+                    is_soft_exit = True
+
+            if close_reason is None and minutes_open >= dynamic_time_stop_minutes:
+                close_reason = "time_stop_attrition"
+                is_soft_exit = True
             elif close_reason is None and roi >= exit_thresholds["tp_roi"]:
                 close_reason = "take_profit_roi"
+                is_soft_exit = True
             elif close_reason is None and (current_price - entry_price) >= exit_thresholds["tp_delta"]:
                 close_reason = "take_profit_price_move"
+                is_soft_exit = True
             elif close_reason is None and predicted_target_price is not None and current_price >= predicted_target_price:
                 close_reason = "take_profit_model_target"
-            elif close_reason is None and trailing_drop >= exit_thresholds["trailing_stop"] and minutes_open > 15:
-                close_reason = "trailing_stop"
+                is_soft_exit = True
+            elif close_reason is None and trailing_drop >= dynamic_trailing_stop and minutes_open > 15 and is_btc:
+                close_reason = "trailing_stop_invalidation"
+                is_soft_exit = True
             elif close_reason is None and roi > 0 and bool(trajectory_signal.get("liquidity_stress_signal")):
                 close_reason = "trajectory_liquidity_stress"
+                is_soft_exit = True
             elif close_reason is None and roi > 0 and bool(trajectory_signal.get("profit_lock_signal")):
                 close_reason = "trajectory_profit_lock"
+                is_soft_exit = True
+
+            # Phase 1: Execution Engine Delay & Scale Out logic
+            if close_reason and is_soft_exit:
+                engine = getattr(self, '_execution_engine', None)
+                if engine is None:
+                    try:
+                        from execution_engine import ExecutionEngine
+                        engine = ExecutionEngine()
+                        engine.load()
+                        self._execution_engine = engine
+                    except Exception:
+                        pass
+                
+                # Check exit execution cost
+                high_exit_cost = False
+                slippage_val = 0.0
+                liq_fail_val = 0.0
+                if engine:
+                    try:
+                        scores = engine.score({"spread_at_entry": 0.02, "requested_size": trade.size_usdc, "volatility_bucket": vol_bucket}, side="exit")
+                        slippage_val = float(scores.get("expected_slippage", 0))
+                        liq_fail_val = float(scores.get("liquidity_failure_risk", 0))
+                        if slippage_val > 0.02 or liq_fail_val > 0.5:
+                            high_exit_cost = True
+                    except Exception:
+                        pass
+                
+                # Cooldown check
+                cooldown_minutes = self._env_int("PARTIAL_EXIT_COOLDOWN_MINUTES", 15, minimum=1, maximum=1000)
+                last_partial = getattr(trade, 'last_partial_exit_at', None)
+                in_cooldown = False
+                if last_partial:
+                    try:
+                        lp_dt = datetime.fromisoformat(last_partial)
+                        if lp_dt.tzinfo is None: lp_dt = lp_dt.replace(tzinfo=timezone.utc)
+                        if (current_ts - lp_dt).total_seconds() / 60.0 < cooldown_minutes:
+                            in_cooldown = True
+                    except Exception:
+                        pass
+                        
+                is_early_strength = (roi > (exit_thresholds["tp_roi"] * 0.75)) and ("take_profit" not in close_reason)
+                
+                if (high_exit_cost or is_early_strength) and not in_cooldown:
+                    if getattr(trade, 'shares', 0) > 0:
+                        partial_reason = f"execution_delayed_partial_exit_{close_reason}" if high_exit_cost else f"early_strength_partial_{close_reason}"
+                        trade.partial_exit(0.25, current_price, reason=partial_reason, expected_slippage=slippage_val, liquidity_fail_risk=liq_fail_val)
+                        self._apply_closed_trade_metadata(trade)
+                        logger.info("[~] Scaled out 25%% for %s (%s). Reason: %s", trade.market, trade.outcome_side, partial_reason)
+                        close_reason = None # Suppress full exit this tick!
 
             if close_reason:
                 trade.intended_exit_reason = close_reason
@@ -526,7 +618,7 @@ class TradeManager:
                 trade.close(current_price, reason=close_reason)
                 self._apply_closed_trade_metadata(trade)
                 logger.info("[->] Closed trade for %s (%s). Reason: %s. PnL: %.4f",
-                            trade.market, trade.outcome_side, close_reason, trade.realized_pnl)
+                             trade.market, trade.outcome_side, close_reason, trade.realized_pnl)
                 closed_trades.append(trade)
                 close_reasons[trade_key] = close_reason
 
@@ -701,6 +793,7 @@ class TradeManager:
             "exit_cancel_count": getattr(trade, "exit_cancel_count", 0),
             "exit_partial_fill_ratio": getattr(trade, "exit_partial_fill_ratio", 0.0),
             "exit_realized_slippage_bps": getattr(trade, "exit_realized_slippage_bps", 0.0),
+            "last_partial_exit_at": getattr(trade, "last_partial_exit_at", None),
             "mark_price": trade.current_price,
             "best_bid": None,
             "best_ask": None,

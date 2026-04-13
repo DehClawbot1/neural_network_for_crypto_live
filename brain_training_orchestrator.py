@@ -95,6 +95,86 @@ def train_brain_models(
     return candidate_dir
 
 
+def train_execution_engine(
+    context: BrainContext,
+    candidate_dir: Path,
+) -> dict[str, bool]:
+    """
+    Phase 6 Stage C — Train execution engine models from execution_feedback.csv.
+    Returns dict of model_name → success.  Non-blocking on insufficient data.
+    """
+    try:
+        from execution_engine import ExecutionEngine
+        from data_integrity_layer import DataIntegrityLayer
+        dil = DataIntegrityLayer(logs_dir=str(context.shared_logs_dir))
+        exec_df = dil.build_execution_training_set()
+        if exec_df.empty or len(exec_df) < 50:
+            import logging as _logging
+            _logging.info(
+                "train_execution_engine[%s]: skipped (only %d execution feedback rows, need 50)",
+                context.market_family, len(exec_df),
+            )
+            return {}
+        engine = ExecutionEngine(weights_dir=str(candidate_dir), logs_dir=str(context.shared_logs_dir))
+        results = engine.train(exec_df)
+        import logging as _logging
+        _logging.info("train_execution_engine[%s]: results=%s", context.market_family, results)
+        return results
+    except Exception as exc:
+        import logging as _logging
+        _logging.warning("train_execution_engine[%s]: failed (non-blocking): %s", context.market_family, exc)
+        return {}
+
+
+def train_meta_decision_engine(
+    context: BrainContext,
+    candidate_dir: Path,
+) -> bool:
+    """
+    Phase 6 Stage D — Train MetaDecisionEngine from policy_feedback.csv.
+    Returns True if trained successfully.  Non-blocking on insufficient data.
+    """
+    try:
+        from data_integrity_layer import DataIntegrityLayer
+        import lightgbm as lgb
+        import joblib
+        import pandas as pd
+
+        dil = DataIntegrityLayer(logs_dir=str(context.shared_logs_dir))
+        policy_df = dil.build_policy_training_set()
+        if policy_df.empty or len(policy_df) < 50:
+            import logging as _logging
+            _logging.info(
+                "train_meta_decision_engine[%s]: skipped (%d policy rows, need 50)",
+                context.market_family, len(policy_df),
+            )
+            return False
+
+        # Target: policy_success = 1
+        y = (policy_df.get("policy_verdict", pd.Series("", index=policy_df.index)) == "policy_success").astype(int)
+        feature_cols = [c for c in policy_df.columns if c not in {
+            "policy_verdict", "attributed_at", "report_id", "token_id",
+            "market_family", "signal_label", "sample_weight",
+        } and pd.api.types.is_numeric_dtype(policy_df[c])]
+        if not feature_cols:
+            return False
+
+        X = policy_df[feature_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+        sw = policy_df.get("sample_weight", pd.Series(1.0, index=policy_df.index))
+        model = lgb.LGBMClassifier(n_estimators=100, num_leaves=15, random_state=42, verbose=-1)
+        model.fit(X, y, sample_weight=sw)
+        path = candidate_dir / "meta_decision_engine.joblib"
+        joblib.dump({"model": model, "features": feature_cols, "market_family": context.market_family}, path)
+
+        import logging as _logging
+        _logging.info("train_meta_decision_engine[%s]: trained on %d rows → %s", context.market_family, len(policy_df), path)
+        return True
+    except Exception as exc:
+        import logging as _logging
+        _logging.warning("train_meta_decision_engine[%s]: failed (non-blocking): %s", context.market_family, exc)
+        return False
+
+
 def evaluate_brain_candidate_rows(
     context: BrainContext,
     *,

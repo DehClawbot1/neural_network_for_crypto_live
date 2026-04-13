@@ -275,7 +275,7 @@ class TradeLifecycle:
         })
         return self.unrealized_pnl
 
-    def partial_exit(self, fraction: float, exit_price: float):
+    def partial_exit(self, fraction: float, exit_price: float, reason: str = "", expected_slippage: float = 0.0, liquidity_fail_risk: float = 0.0):
         fraction = max(0.0, min(1.0, float(fraction)))
         if fraction <= 0 or self.shares <= 0:
             return 0.0
@@ -287,16 +287,31 @@ class TradeLifecycle:
         self.current_price = float(exit_price)
         self.unrealized_pnl = self.shares * (self.current_price - self.entry_price)
         self.state = TradeState.PARTIAL_EXIT if self.shares > 0 else TradeState.CLOSED
-        self.ledger.append({
+        
+        now_ts = datetime.now(timezone.utc).isoformat()
+        self.last_partial_exit_at = now_ts
+        
+        payload = {
             "event": "partial_exit",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "fraction": fraction,
+            "timestamp": now_ts,
+            "market": self.market,
+            "token_id": self.token_id,
+            "condition_id": self.condition_id,
+            "outcome_side": self.outcome_side,
+            "partial_exit_fraction_requested": fraction,
+            "partial_exit_fraction_filled": fraction,
+            "partial_exit_reason": reason,
+            "expected_slippage_at_exit": expected_slippage,
+            "liquidity_failure_risk_at_exit": liquidity_fail_risk,
+            "remaining_shares_after_exit": self.shares,
             "exit_price": exit_price,
-            "remaining_shares": self.shares,
             "realized_pnl": pnl,
-        })
+        }
+        self.ledger.append(payload)
+        self._write_execution_event(payload)
+        
         if self.shares <= 0:
-            self.closed_at = datetime.now(timezone.utc).isoformat()
+            self.closed_at = now_ts
         return pnl
 
     def close(self, exit_price: float, reason: str = "policy_exit", exit_btc_price: float = 0.0):

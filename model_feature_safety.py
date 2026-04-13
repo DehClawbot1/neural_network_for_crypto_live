@@ -8,6 +8,109 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+COMMON_IDENTITY_COLUMNS = [
+    "timestamp",
+    "anchor_timestamp",
+    "created_at",
+    "market_title",
+    "market_slug",
+    "token_id",
+    "condition_id",
+    "outcome_side",
+    "trader_wallet",
+    "brain_id",
+    "market_family",
+]
+
+STRING_IDENTITY_COLUMNS = {
+    "timestamp",
+    "anchor_timestamp",
+    "created_at",
+    "market_title",
+    "market_slug",
+    "token_id",
+    "condition_id",
+    "outcome_side",
+    "trader_wallet",
+    "brain_id",
+    "market_family",
+}
+
+HISTORICAL_CONTEXT_COLUMNS = [
+    "entry_price",
+    "current_price",
+    "normalized_trade_size",
+    "trader_win_rate",
+]
+
+CONTRACT_TARGET_LABEL_COLUMNS = [
+    "forward_return_15m",
+    "tp_before_sl_60m",
+    "mfe_60m",
+    "mae_60m",
+    "target_up",
+]
+
+SEQUENCE_AUXILIARY_COLUMNS = [
+    "entry_price",
+    "recent_token_activity_5",
+    "recent_yes_ratio_5",
+]
+
+
+def _ordered_existing_columns(df: pd.DataFrame, desired_columns: Iterable[str]) -> List[str]:
+    seen = set()
+    ordered: List[str] = []
+    for column in desired_columns:
+        if column in seen or column not in df.columns:
+            continue
+        seen.add(column)
+        ordered.append(column)
+    return ordered
+
+
+def project_training_columns(
+    df: pd.DataFrame,
+    *,
+    context: str = "csv_save",
+) -> pd.DataFrame:
+    """Keep only model-relevant columns for persisted training datasets."""
+    if df is None or df.empty:
+        return df.copy()
+
+    from model_feature_catalog import DEFAULT_TABULAR_FEATURE_COLUMNS, SEQUENCE_BASE_COLUMNS
+
+    if context == "historical_dataset":
+        keep_columns = (
+            COMMON_IDENTITY_COLUMNS
+            + HISTORICAL_CONTEXT_COLUMNS
+            + DEFAULT_TABULAR_FEATURE_COLUMNS
+        )
+    elif context == "contract_targets":
+        keep_columns = (
+            COMMON_IDENTITY_COLUMNS
+            + HISTORICAL_CONTEXT_COLUMNS
+            + DEFAULT_TABULAR_FEATURE_COLUMNS
+            + CONTRACT_TARGET_LABEL_COLUMNS
+        )
+    elif context == "sequence_dataset":
+        lag_columns = [column for column in df.columns if "_lag_" in str(column)]
+        keep_columns = (
+            COMMON_IDENTITY_COLUMNS
+            + SEQUENCE_AUXILIARY_COLUMNS
+            + SEQUENCE_BASE_COLUMNS
+            + lag_columns
+            + CONTRACT_TARGET_LABEL_COLUMNS
+        )
+    else:
+        keep_columns = list(df.columns)
+
+    projected_columns = _ordered_existing_columns(df, keep_columns)
+    if not projected_columns:
+        return df.copy()
+    return df.loc[:, projected_columns].copy()
+
+
 def drop_all_nan_features(
     df: pd.DataFrame,
     candidate_features: Iterable[str],
@@ -54,10 +157,13 @@ def clean_dataframe_for_training(
     """
     from feature_treatment_policy import get_treatment
 
-    out = df.copy()
+    out = project_training_columns(df, context=context)
 
     # 1. Coerce numeric columns
     for col in out.columns:
+        if col in STRING_IDENTITY_COLUMNS:
+            out[col] = out[col].astype("string")
+            continue
         if out[col].dtype == object:
             converted = pd.to_numeric(out[col], errors="coerce")
             # Only convert if at least half the non-null values are numeric
@@ -73,7 +179,9 @@ def clean_dataframe_for_training(
     # 3. Median imputation for numeric, empty string for object
     for col in out.columns:
         if out[col].isna().any():
-            if pd.api.types.is_numeric_dtype(out[col]):
+            if col in STRING_IDENTITY_COLUMNS:
+                out[col] = out[col].fillna("").astype("string")
+            elif pd.api.types.is_numeric_dtype(out[col]):
                 median_val = out[col].median()
                 if pd.isna(median_val):
                     median_val = 0.0

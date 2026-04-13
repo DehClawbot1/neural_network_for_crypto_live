@@ -13,6 +13,14 @@ import pandas as pd
 from db import Database
 from trade_quality import build_quality_context, enrich_quality_frame
 
+# Phase 2 — Feedback Attribution (lazy import avoids circular dependency)
+def _get_attribution_engine(logs_dir):
+    try:
+        from feedback_attribution_engine import FeedbackAttributionEngine
+        return FeedbackAttributionEngine(logs_dir=str(logs_dir))
+    except Exception:
+        return None
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 
@@ -888,4 +896,13 @@ class TradeFeedbackLearner:
             merged.to_csv(self.report_csv, index=False)
             self._refresh_summary()
             logging.info("Recorded %s trade feedback reports.", processed)
+
+            # Phase 2 — attribute newly written reports
+            try:
+                engine = _get_attribution_engine(self.logs_dir)
+                if engine is not None:
+                    engine.attribute_batch(report_rows)
+            except Exception as _attr_exc:
+                logging.warning("FeedbackAttribution (batch) failed (non-blocking): %s", _attr_exc)
+
         return processed

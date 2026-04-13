@@ -143,6 +143,11 @@ class SequenceFeatureBuilder:
                 if column in target_df.columns
             ]
             if merge_keys and target_label_columns:
+                string_merge_keys = {"token_id", "condition_id", "outcome_side", "trader_wallet", "market_title"}
+                for merge_key in merge_keys:
+                    if merge_key in string_merge_keys:
+                        combined[merge_key] = combined[merge_key].astype("string")
+                        target_df[merge_key] = target_df[merge_key].astype("string")
                 target_view = target_df[merge_keys + target_label_columns].drop_duplicates(subset=merge_keys, keep="last")
                 combined = combined.merge(target_view, on=merge_keys, how="left", suffixes=("", "_target"))
                 for column in target_label_columns:

@@ -1,5 +1,5 @@
 import pandas as pd
-
+from execution_engine import ExecutionEngine
 
 def _safe_numeric_series(frame: pd.DataFrame, column_name: str, default=0.0) -> pd.Series:
     if frame is None or frame.empty:
@@ -27,6 +27,12 @@ class Stage3HybridScorer:
         self.transaction_cost = transaction_cost
         self.risk_penalty = risk_penalty
         self.agreement_threshold = agreement_threshold
+        self._execution_engine = None
+
+    def get_execution_engine(self):
+        if self._execution_engine is None:
+            self._execution_engine = ExecutionEngine()
+        return self._execution_engine
 
     def run(self, df: pd.DataFrame):
         if df is None or df.empty:
@@ -84,8 +90,17 @@ class Stage3HybridScorer:
         )
         out["entry_ev"] = out["supervised_edge"] - self.transaction_cost - spread_penalty.astype(float)
         out["risk_adjusted_ev"] = out["entry_ev"] - out["p_loss"] * out["expected_loss"] * self.risk_penalty - time_penalty.astype(float) * 0.05 - crowding_penalty.astype(float) * 0.01
-        out["hybrid_edge"] = out["risk_adjusted_ev"] * (1.0 + out["execution_quality_score"].clip(lower=0.0)) * regime_multiplier
-
+        
+        # Apply machine-learning execution adjustment based on real slippage/fill models
+        try:
+            exe_df = self.get_execution_engine().score_batch(out, side="entry")
+            out["hybrid_edge"] = exe_df["execution_adjusted_edge"] * regime_multiplier
+            out["exec_fill_prob_30s"] = exe_df["exec_fill_prob_30s"]
+            out["exec_expected_slippage"] = exe_df["exec_expected_slippage"]
+            out["exec_liquidity_fail_risk"] = exe_df["exec_liquidity_fail_risk"]
+        except Exception:
+            # Fallback to the legacy heuristic multiplier
+            out["hybrid_edge"] = out["risk_adjusted_ev"] * (1.0 + out["execution_quality_score"].clip(lower=0.0)) * regime_multiplier
         if "temporal_p_tp_before_sl" in out.columns:
             out["rf_probability"] = _safe_numeric_series(out, "p_tp_before_sl", 0.0)
             out["nn_probability"] = _safe_numeric_series(out, "temporal_p_tp_before_sl", 0.0)

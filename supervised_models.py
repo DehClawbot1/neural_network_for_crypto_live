@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 from brain_paths import filter_frame_for_brain, normalize_market_family, resolve_brain_context
+from label_schema import primary_classifier_target
 from model_feature_catalog import DEFAULT_TABULAR_FEATURE_COLUMNS
 from model_feature_safety import drop_all_nan_features
 from return_calibration import fit_return_calibration, transform_return_targets
@@ -269,8 +270,9 @@ class SupervisedModels:
         sklearn = _load_sklearn_supervised()
         joblib = sklearn["joblib"]
 
-        if "tp_before_sl_60m" in train_df.columns:
-            y_clf = train_df["tp_before_sl_60m"].fillna(0).astype(int)
+        target_col = self._select_primary_clf_target(train_df)
+        if target_col and target_col in train_df.columns:
+            y_clf = train_df[target_col].fillna(0).astype(int)
             if y_clf.nunique(dropna=True) >= 2:
                 try:
                     clf, clf_meta = self._train_sparse_classifier(X, y_clf)
@@ -281,6 +283,7 @@ class SupervisedModels:
                         "model": clf,
                         "features": usable,
                         "feature_set": "default_tabular",
+                        "target_col": target_col,
                         "scaling": "standard" if not bool(clf_meta.get("fallback_used")) else "none",
                         "market_family": self.market_family,
                         **clf_meta,
@@ -288,8 +291,9 @@ class SupervisedModels:
                     self.classifier_file,
                 )
 
-        if "forward_return_15m" in train_df.columns:
-            target_returns = pd.to_numeric(train_df["forward_return_15m"], errors="coerce").fillna(0.0)
+        regressor_target = "path_return_15m" if "path_return_15m" in train_df.columns else "forward_return_15m"
+        if regressor_target in train_df.columns:
+            target_returns = pd.to_numeric(train_df[regressor_target], errors="coerce").fillna(0.0)
             return_calibration = fit_return_calibration(target_returns)
             transformed_returns = transform_return_targets(target_returns, return_calibration)
             try:
@@ -310,3 +314,34 @@ class SupervisedModels:
             )
 
         return usable
+
+    def _select_primary_clf_target(self, df: pd.DataFrame) -> str | None:
+        """
+        Select the correct primary classifier target for this family.
+
+        BTC    → path_tp_hit_60m  (fallback: tp_before_sl_60m)
+        Weather → weather_contract_resolved_yes if >=30 resolved rows
+                  (no fallback to CLOB proxy — bad label is worse than no label)
+        """
+        schema_target = primary_classifier_target(self.market_family)
+        if schema_target is None:
+            return "tp_before_sl_60m" if "tp_before_sl_60m" in df.columns else None
+
+        if self.market_family.startswith("btc"):
+            if schema_target in df.columns:
+                return schema_target
+            return "tp_before_sl_60m" if "tp_before_sl_60m" in df.columns else None
+
+        if self.market_family.startswith("weather"):
+            if schema_target in df.columns:
+                valid = df[schema_target].notna().sum()
+                if valid >= 30:
+                    logger.info("WeatherClassifier: using %s (%d resolved rows)", schema_target, valid)
+                    return schema_target
+                logger.info(
+                    "WeatherClassifier: only %d resolved rows (need 30) — skipping classifier training", valid
+                )
+                return None  # no fallback to CLOB proxy
+            return None
+
+        return "tp_before_sl_60m" if "tp_before_sl_60m" in df.columns else None
