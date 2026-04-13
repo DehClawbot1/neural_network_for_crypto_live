@@ -92,6 +92,7 @@ from trade_lifecycle_audit import TradeLifecycleAuditor
 from benchmark_strategy import BenchmarkStrategy
 from trade_quality import build_quality_context, resolve_entry_signal_label
 from trading_mode_preset import select_trading_mode, apply_preset, PRESETS
+from deployment_gate import DeploymentGate, DeploymentViolationError, get_deployment_gate
 from btc_trade_feedback import BTCTradeFeedback
 from weather_temperature_strategy import WeatherTemperatureStrategy
 from weather_temperature_markets import fetch_weather_temperature_markets
@@ -1589,10 +1590,14 @@ def main_loop():
     entry_max_spread = _env_float("ENTRY_MAX_SPREAD", 0.35)
     entry_min_liquidity = _env_float("ENTRY_MIN_LIQUIDITY", 0.5)
     entry_min_liquidity_score = _env_float("ENTRY_MIN_LIQUIDITY_SCORE", 0.005)
+    # Cadence boosting disabled by default.
+    # Scope rule: cadence boost is "trade more" logic — disabled until edge is proven.
+    # Enable with ENTRY_CADENCE_BOOST_ENABLED=true only after offline + shadow validation.
+    _cadence_boost_globally_enabled = os.getenv("ENTRY_CADENCE_BOOST_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
     target_entry_interval_minutes = _env_float(
         "TARGET_ENTRY_INTERVAL_MINUTES",
         float(getattr(TradingConfig, "TARGET_ENTRY_INTERVAL_MINUTES", 5)),
-    )
+    ) if _cadence_boost_globally_enabled else 0.0
     entry_aggression_top_k = _env_int(
         "ENTRY_AGGRESSION_TOP_K",
         int(getattr(TradingConfig, "ENTRY_AGGRESSION_TOP_K", 3)),
@@ -1633,10 +1638,27 @@ def main_loop():
     trader_analytics = TraderAnalytics()
     dataset_builder = HistoricalDatasetBuilder()
     backtester = StrategyBacktester()
-    trading_mode = "live"
-    logging.warning("PAPER MODE DISABLED: Bot is permanently locked into LIVE TRADING mode.")
-    execution_client = ExecutionClient()
-    order_manager = OrderManager()
+    # ── Deployment stage (replaces hard-coded "live" lock) ────────────────────
+    _deployment_gate = get_deployment_gate()
+    trading_mode = _deployment_gate.stage.value   # e.g. "paper", "shadow-live", "micro-live"
+    logging.info(
+        "Deployment gate: stage=%r env=%r is_live=%s uses_real_money=%s max_pos=$%.0f",
+        _deployment_gate.stage.value,
+        _deployment_gate.env.value,
+        _deployment_gate.is_live,
+        _deployment_gate.uses_real_money,
+        _deployment_gate.max_position_usdc,
+    )
+
+    # ExecutionClient is only instantiated when the stage requires live market access.
+    # In replay/paper the client is None and order placement is bypassed entirely.
+    if _deployment_gate.can_place_orders:
+        execution_client = ExecutionClient()
+        order_manager = OrderManager()
+    else:
+        execution_client = None
+        order_manager = None
+        logging.info("Deployment gate: execution_client and order_manager disabled (stage=%r)", trading_mode)
     live_position_book = LivePositionBook()
     live_pnl = LivePnLCalculator()
     reconciliation_service = ReconciliationService(execution_client)
@@ -2054,11 +2076,38 @@ def main_loop():
                 targets[trade_key] = target_price
         return targets
 
-    always_on_enabled = os.getenv("ALWAYS_ON_MARKET_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    # ── SYSTEM SCOPE ──────────────────────────────────────────────────────────
+    # Two independent systems: BTC and Weather.
+    # Each has its own alpha thesis. Enable only the system you are actively
+    # developing and validating. Disable the other to keep signal clean.
+    #
+    # BTC alpha thesis: short-horizon mispricing between external BTC price
+    #   path and Polymarket contract pricing (e.g. 5m/1h updown markets).
+    #   Edge source: BTC momentum / regime divergence from implied prob.
+    #
+    # Weather alpha thesis: forecast revision timing vs market lag under
+    #   specific contract structures (e.g. high-temp threshold markets).
+    #   Edge source: NWP ensemble spread narrowing faster than market updates.
+    #
+    # Rule: no new feature enters live unless it proves edge offline AND shadow.
+    # See feature_shadow_gate.py for the enforcement mechanism.
+    _btc_system_enabled = os.getenv("BTC_SYSTEM_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    _weather_system_enabled = os.getenv("WEATHER_SYSTEM_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+    if not _btc_system_enabled:
+        logging.info("SCOPE: BTC system DISABLED (BTC_SYSTEM_ENABLED=false)")
+    if not _weather_system_enabled:
+        logging.info("SCOPE: Weather system DISABLED (WEATHER_SYSTEM_ENABLED=false)")
+
+    # ── ALWAYS-ON MARKET ──────────────────────────────────────────────────────
+    # Always-on market disabled by default.
+    # Scope rule: no "trade more" logic until edge is proven offline and in shadow.
+    # Enable explicitly with ALWAYS_ON_MARKET_ENABLED=true only after shadow validation.
+    always_on_enabled = os.getenv("ALWAYS_ON_MARKET_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
     configured_always_on_slug = str(os.getenv("ALWAYS_ON_MARKET_SLUG", "btc-updown-5m-1774926600") or "").strip()
     always_on_slug = configured_always_on_slug
     always_on_only = os.getenv("ALWAYS_ON_ONLY", "false").strip().lower() in {"1", "true", "yes", "on"}
-    always_on_force_entry = os.getenv("ALWAYS_ON_FORCE_ENTRY", "true").strip().lower() in {"1", "true", "yes", "on"}
+    always_on_force_entry = os.getenv("ALWAYS_ON_FORCE_ENTRY", "false").strip().lower() in {"1", "true", "yes", "on"}
     always_on_signal_size = float(os.getenv("ALWAYS_ON_SIGNAL_SIZE", "25") or 25)
     always_on_rotate_prefix = "btc-updown-5m-"
     if ALWAYS_ON_STATE_FILE.exists():
@@ -2127,7 +2176,9 @@ def main_loop():
     # Set to 0 to disable auto-reset.
     session_kill_switch_reset_minutes = max(0, int(os.getenv("SESSION_KILL_SWITCH_RESET_MINUTES", "30") or 30))
     # Daily transaction counter — reset at UTC midnight, logged each cycle.
-    _daily_tx_target = int(os.getenv("DAILY_TX_TARGET", "1000") or 1000)
+    # No target: the bot trades when it has edge, not to hit a count.
+    # DAILY_TX_TARGET is kept for diagnostic logging only, not for pacing logic.
+    _daily_tx_target = 0  # 0 = no target; tx count is an observation, not a goal
     _daily_tx_count = 0
     _daily_tx_date = pd.Timestamp.utcnow().date()
 
@@ -4139,6 +4190,17 @@ def main_loop():
                 market_key = _trade_key_from_signal(signal_row)
                 market_family = str(signal_row.get("market_family", "") or "").strip().lower()
 
+                # ── GATE 1: SYSTEM SCOPE ─────────────────────────────────────────
+                # Drop signals from disabled systems before any other work.
+                _is_weather_signal = market_family.startswith("weather_temperature")
+                if _is_weather_signal and not _weather_system_enabled:
+                    _log_candidate_skip(signal_row, "weather_system_disabled", gate="system_scope")
+                    continue
+                if not _is_weather_signal and not _btc_system_enabled:
+                    _log_candidate_skip(signal_row, "btc_system_disabled", gate="system_scope")
+                    continue
+                _passed_gates.append("system_scope")
+
                 market_age_sec = _signal_age_seconds(signal_row)
                 if market_age_sec is None and entry_require_market_timestamp:
                     _log_candidate_skip(signal_row, "missing_market_timestamp", gate="freshness")
@@ -4437,7 +4499,32 @@ def main_loop():
                     _alpha_confidence = _safe_float(signal_row.get("confidence", 0.0), default=0.0)
                     _alpha_ev = _safe_float(signal_row.get("expected_return", 0.0), default=0.0)
                     _alpha_edge = _safe_float(signal_row.get("edge_score", 0.0), default=0.0)
-                    _alpha_min_conf = float(os.getenv("ALPHA_GATE_MIN_CONFIDENCE", "0.0") or 0.0)
+                    
+                    # HARD GATES to hit 51% win rate:
+                    _alpha_min_conf = max(0.50, float(os.getenv("ALPHA_GATE_MIN_CONFIDENCE", "0.0") or 0.0))
+                    
+                    # Check action_val constraint
+                    if action_val < 2:
+                        _log_candidate_skip(
+                            signal_row,
+                            "action_code_below_threshold_2",
+                            gate="alpha_quality",
+                            model_action=action_map.get(action_val, "UNKNOWN"),
+                            confidence=round(_alpha_confidence, 4)
+                        )
+                        continue
+                        
+                    # Check family constraint
+                    if str(signal_row.get("market_family", "")) == "btc_other":
+                        _log_candidate_skip(
+                            signal_row,
+                            "blocked_market_family",
+                            gate="alpha_quality",
+                            market_family="btc_other",
+                            model_action=action_map.get(action_val, "UNKNOWN")
+                        )
+                        continue
+
                     _alpha_min_ev = float(os.getenv("ALPHA_GATE_MIN_EV", "0.0") or 0.0)
                     _alpha_min_edge = float(os.getenv("ALPHA_GATE_MIN_EDGE", "0.0") or 0.0)
                     if _alpha_min_conf > 0 and _alpha_confidence < _alpha_min_conf:
@@ -4674,6 +4761,19 @@ def main_loop():
                             min_balance_for_exchange_floor=round(float(sizing_context["min_balance_for_exchange_floor"]), 6),
                         )
                         continue
+                    # HARD FLOOR: Dust trades ($0.01) have 0% win rate due to fees/slippage.
+                    # Never execute a trade smaller than 0.15 USDC under ANY risk paradigm.
+                    if size_usdc < 0.15:
+                        logging.info("Anti-micro guard: hard block on dust trade (size=$%.2f)", size_usdc)
+                        _log_candidate_skip(
+                            signal_row,
+                            "dust_trade_blocked",
+                            gate="sizing",
+                            model_action=action_map.get(action_val, "UNKNOWN"),
+                            proposed_size_usdc=round(size_usdc, 6),
+                        )
+                        continue
+
                     if size_usdc + 1e-9 < effective_min_entry:
                         logging.info(
                             "Anti-micro guard: skipping tiny entry for %s (size=$%.2f < min_entry=$%.2f)",
@@ -4755,20 +4855,20 @@ def main_loop():
                         )
                         continue
 
-                    # Low-probability market filter: historical data shows 82% of entries
-                    # are at ≤ 5¢ with a ~5% win rate — effectively buying long shots.
-                    # Reject entries below the configurable floor unless confidence
-                    # exceeds the high-confidence override threshold.
-                    # Default floor = 0.05 (5¢). Set ENTRY_MIN_PRICE=0 to disable.
-                    _entry_min_price = float(os.getenv("ENTRY_MIN_PRICE", "0.05") or 0.05)
-                    _entry_min_price_conf_override = float(os.getenv("ENTRY_MIN_PRICE_CONF_OVERRIDE", "0.85") or 0.85)
-                    if _entry_min_price > 0 and float(fill_price) < _entry_min_price and confidence < _entry_min_price_conf_override:
+                    # Low-probability market filter: historical data shows near-resolved markets
+                    # cause high slippage drag. Require 0.15 <= entry_price <= 0.86.
+                    _entry_min_price = float(os.getenv("ENTRY_MIN_PRICE", "0.15") or 0.15)
+                    _entry_max_price = float(os.getenv("ENTRY_MAX_PRICE", "0.86") or 0.86)
+                    _entry_min_price_conf_override = float(os.getenv("ENTRY_MIN_PRICE_CONF_OVERRIDE", "0.99") or 0.99)
+                    
+                    if _entry_min_price > 0 and (float(fill_price) < _entry_min_price or float(fill_price) > _entry_max_price) and confidence < _entry_min_price_conf_override:
                         _log_candidate_skip(
                             signal_row,
-                            "below_min_entry_price",
+                            "outside_entry_price_bounds",
                             gate="pricing",
                             fill_price=round(float(fill_price), 4),
                             min_entry_price=_entry_min_price,
+                            max_entry_price=_entry_max_price,
                             confidence=round(confidence, 4),
                             conf_override_threshold=_entry_min_price_conf_override,
                             model_action=action_map.get(action_val, "UNKNOWN"),
@@ -4950,9 +5050,9 @@ def main_loop():
                         _invalidate_entry_available_balance()
                         _daily_tx_count += 1
                         logging.info(
-                            "Live trade filled for %s at %s. Shares: %s | daily_tx=%d/%d",
+                            "Live trade filled for %s at %s. Shares: %s | daily_tx=%d",
                             token_id, actual_fill_price, actual_fill_size,
-                            _daily_tx_count, _daily_tx_target,
+                            _daily_tx_count,
                         )
                         _record_candidate_decision(
                             signal_row,
@@ -4966,7 +5066,6 @@ def main_loop():
                             fill_price=actual_fill_price,
                             fill_shares=actual_fill_size,
                             daily_tx_count=_daily_tx_count,
-                            daily_tx_target=_daily_tx_target,
                         )
                         governor_top_signal_consumed_count[_fam] = performance_governor_consume_top_signal_slot(
                             governor_state,
@@ -4995,7 +5094,7 @@ def main_loop():
                             _refresh_local_active_trade_state()
                             _invalidate_entry_available_balance()
                             logging.info(
-                                "Brain: FOLLOW -> Paper filled %s USDC on %s at $%.3f for '%s' | label=%s confidence=%.2f | daily_tx=%d/%d",
+                                "Brain: FOLLOW -> Paper filled %s USDC on %s at $%.3f for '%s' | label=%s confidence=%.2f | daily_tx=%d",
                                 size_usdc,
                                 signal_row.get("outcome_side", "?"),
                                 fill_price,
@@ -5003,7 +5102,6 @@ def main_loop():
                                 signal_row.get("signal_label", "UNKNOWN"),
                                 confidence,
                                 _daily_tx_count,
-                                _daily_tx_target,
                             )
                             _record_candidate_decision(
                                 signal_row,
@@ -5015,7 +5113,6 @@ def main_loop():
                                 available_balance=_available_bal,
                                 paper_fill_price=fill_price,
                                 daily_tx_count=_daily_tx_count,
-                                daily_tx_target=_daily_tx_target,
                             )
                             governor_top_signal_consumed_count[_fam] = performance_governor_consume_top_signal_slot(
                                 governor_state,
@@ -5106,16 +5203,13 @@ def main_loop():
                     cycle_id,
                     " | ".join(f"{k}={v}" for k, v in sorted(_gate_groups.items(), key=lambda x: -x[1])[:10]),
                 )
-            # Daily transaction pacing — log progress toward target once per cycle.
+            # Daily transaction count — observation only, no target pressure.
             _hours_into_day = pd.Timestamp.utcnow().hour + pd.Timestamp.utcnow().minute / 60.0
             _tx_rate_per_hour = _daily_tx_count / max(_hours_into_day, 0.1)
-            _tx_pace_pct = round(100.0 * _daily_tx_count / max(_daily_tx_target, 1), 1)
             logging.info(
-                "DAILY_TX_PROGRESS date=%s count=%d target=%d pace=%.1f%% rate=%.1f/hr",
+                "DAILY_TX_COUNT date=%s count=%d rate=%.1f/hr",
                 _daily_tx_date,
                 _daily_tx_count,
-                _daily_tx_target,
-                _tx_pace_pct,
                 _tx_rate_per_hour,
             )
             if cycle_duplicate_steps:
@@ -5687,11 +5781,12 @@ def main_loop():
                 sync_ops_state_to_db("logs")
             except Exception as exc:
                 logging.warning("Ops state sync to DB failed: %s", exc)
-            # LIVE-TRADE FIX: enable live retraining by default so the RL model
-            # actually learns from wins and losses during real trading.
-            allow_live_retrain = os.getenv("ENABLE_LIVE_RETRAIN", "true").strip().lower() in {"1", "true", "yes", "on"}
+            # Retraining is forbidden in live stages (shadow-live and above).
+            # A live process must never train or promote a model.
+            # Offline retraining runs in a separate process and promotes artifacts
+            # into the weights/ directory; the live process loads them on next restart.
             retrain_promoted = False
-            if trading_mode != "live" or allow_live_retrain:
+            if _deployment_gate.can_train:
                 retrain_promoted = bool(retrainer.maybe_retrain(
                     force=closed_trade_feedback_count > 0,
                     reason="closed_trade_feedback" if closed_trade_feedback_count > 0 else "scheduled_cycle_check",
@@ -5700,7 +5795,11 @@ def main_loop():
                     _refresh_runtime_model_handles(reason="retrain_promoted_models_activated")
                 autonomous_monitor.write_heartbeat("retrainer", status="ok", message="retrain_checked")
             else:
-                autonomous_monitor.write_heartbeat("retrainer", status="ok", message="retrain_skipped_live")
+                # Hard rule: live process must not train. Log and skip.
+                autonomous_monitor.write_heartbeat(
+                    "retrainer", status="ok",
+                    message=f"retrain_forbidden_stage={_deployment_gate.stage.value}",
+                )
 
             open_positions_count_for_sleep = 0
             if trading_mode == "live":

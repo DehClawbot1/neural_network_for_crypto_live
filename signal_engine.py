@@ -162,6 +162,12 @@ class SignalEngine:
         else:
             action_code = 3
 
+        # Phase 5: Near-resolved market gate. Cap action_code at 1 (LOW-CONFIDENCE WATCH)
+        # if the market is effectively resolved (<0.15 or >0.86) to prevent tail-risk sizing.
+        current_price = _safe_float(row.get("current_price", 0.5), default=0.5)
+        if current_price < 0.15 or current_price > 0.86:
+            action_code = min(action_code, 1)
+
         return {
             **row,
             "confidence": round(confidence, 4),
