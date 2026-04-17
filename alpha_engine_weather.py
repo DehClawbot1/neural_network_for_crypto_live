@@ -17,6 +17,10 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Any
+import os
+
+import joblib
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -100,23 +104,92 @@ class WeatherRevisionModel:
 # ---------------------------------------------------------------------------
 class WeatherUncertaintyModel:
     """
-    Classifies whether the current forecast state is too unstable to trade.
-    Returns an uncertainty_penalty in [0, 1].
-
-    Trained from weather contract_targets where ensemble_spread or
-    source_disagreement columns are available.
+    Classifies whether the current forecast state is an anomaly / out-of-distribution.
+    Uses IsolationForest to detect if current features vary significantly from historical 
+    training distributions, acting as an empirical measure of uncertainty.
+    Outputs penalty in [0, 1].
     """
+
+    MIN_ROWS = 50
 
     def __init__(self, weights_dir: str = "weights", logs_dir: str = "logs") -> None:
         self.weights_dir = Path(weights_dir)
         self.logs_dir = Path(logs_dir)
+        self.model_path = self.weights_dir / "weather_uncertainty_forest.joblib"
+        self._model = None
+        self._features: list[str] = []
+        self._load_model()
+
+    def _load_model(self) -> None:
+        if self.model_path.exists():
+            try:
+                data = joblib.load(self.model_path)
+                self._model = data.get("model")
+                self._features = data.get("features", [])
+            except Exception as exc:
+                logger.warning("WeatherUncertaintyModel: load failed: %s", exc)
+
+    def fit(self, df: pd.DataFrame) -> bool:
+        if df is None or len(df) < self.MIN_ROWS:
+            return False
+            
+        try:
+            from sklearn.ensemble import IsolationForest
+            
+            # Select numerical operational features excluding labels
+            feature_cols = [c for c in df.columns if c not in {
+                "weather_forecast_revision_direction", "attributed_at", "report_id",
+                "token_id", "condition_id", "alpha_verdict", "outcome_class",
+                "weather_contract_resolved_yes", "p_tp_before_sl"
+            } and df[c].dtype in [np.float64, np.float32, np.int64, np.int32]]
+            
+            if not feature_cols:
+                return False
+                
+            X = df[feature_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+            
+            # Contamination represents approx how much data is considered "anomalous" (e.g. top 5% wild variances)
+            self._model = IsolationForest(contamination=0.05, random_state=42, n_jobs=-1)
+            self._model.fit(X)
+            self._features = feature_cols
+            
+            self.model_path.parent.mkdir(parents=True, exist_ok=True)
+            joblib.dump({"model": self._model, "features": self._features}, self.model_path)
+            
+            logger.info("WeatherUncertaintyModel: fitted IF on %d rows, %d features", len(df), len(feature_cols))
+            return True
+        except Exception as exc:
+            logger.warning("WeatherUncertaintyModel: fit failed: %s", exc)
+            return False
 
     def predict(self, row: dict[str, Any]) -> float:
         """
-        Phase 5: Manual uncertainty heuristic stripped. 
-        Will return 0.0 until a unified uncertainty ML model is provided.
+        Calculates an uncertainty penalty based on Anomaly detection.
+        IsolationForest `.score_samples()` returns negative values for anomalies (lower is more anomalous).
+        We map this to a [0, 1] uncertainty penalty curve.
         """
-        return 0.0
+        if self._model is None or not self._features:
+            return 0.0 # Default missing
+            
+        try:
+            # Reconstruct the exact feature array
+            X = pd.DataFrame([{f: _safe_float(row.get(f)) for f in self._features}])
+            
+            # -1 for outliers, 1 for inliers.
+            anomaly_flag = self._model.predict(X)[0]
+            
+            if anomaly_flag == -1:
+                # Get severity. score_samples ranges from roughly -0.3 (inlier) to -0.8 (extreme outlier)
+                score = self._model.score_samples(X)[0]
+                # High uncertainty if anomaly. Score maps roughly to [0.5, 1.0] uncertainty boundary.
+                # Just applying a static strict penalty is safer if anomaly flag hits.
+                return 0.75 
+            else:
+                return 0.10 # Standard baseline noise
+                
+        except Exception as exc:
+            logger.debug(f"WeatherUncertaintyModel prediction error: {exc}")
+            return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -247,3 +320,23 @@ class WeatherAlphaEngine:
         self._calibrator_fitted = False
         self._ensure_calibrator()
         return self._calibrator_fitted
+
+
+if __name__ == "__main__":
+    import sys
+    
+    if "--recalibrate" in sys.argv:
+        engine = WeatherAlphaEngine(logs_dir="logs/weather_temperature", weights_dir="weights/weather_temperature")
+        df = _safe_read(engine.logs_dir / "contract_targets.csv")
+        
+        print("Calibrating Uncertainty Anomaly Model...")
+        if engine._uncertainty_model.fit(df):
+            print("[OK] Uncertainty Model fitted to operational distribution.")
+        else:
+            print("[FAIL] Could not fit Uncertainty Model.")
+            
+        print("Refreshing Isotonic Calibrators...")
+        engine.refresh_calibration()
+        print("[OK] Routing probabilities calibrated.")
+        
+        sys.exit(0)

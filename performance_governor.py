@@ -79,6 +79,37 @@ class BaseGovernor:
     def _rank_severity(self, lvl: str) -> int:
         return {"0": 0, "1": 1, "2A": 2, "2B": 3}.get(str(lvl).upper(), 0)
 
+
+def coerce_governor_level_int(value) -> int:
+    """
+    Coerce any governor_level representation ("0", "1", "2A", "2B",
+    0, 1, 2, 3, None) into the integer rank used by legacy callers.
+    Old code used ``int(governor_level)`` which blew up on "2A"/"2B".
+    """
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        try:
+            return int(value)
+        except Exception:
+            return 0
+    s = str(value).strip().upper()
+    if not s:
+        return 0
+    mapping = {"0": 0, "1": 1, "2A": 2, "2B": 3, "2": 2, "3": 3}
+    if s in mapping:
+        return mapping[s]
+    # Fall back to parsing the leading digit (e.g. "LEVEL_2A" → 2).
+    for ch in s:
+        if ch.isdigit():
+            try:
+                return int(ch)
+            except Exception:
+                return 0
+    return 0
+
     @staticmethod
     def max_severity(state1: dict, state2: dict) -> dict:
         """Merges two policies, adopting the MAXIMUM severity constraints of both."""
@@ -336,4 +367,64 @@ class FamilyPerformanceGovernor(BaseGovernor):
              state["size_multiplier"] = 0.0
              state["reason"] = f"{state.get('reason','')},global_schema_kill".strip(",")
              
+        return state
+
+class PerformanceGovernor(FamilyPerformanceGovernor):
+    """
+    Backward-compatible shim — FamilyPerformanceGovernor was previously PerformanceGovernor.
+
+    The new class uses string levels ("0", "1", "2A", "2B"). This shim normalises
+    governor_level back to integers (0, 1, 2) expected by callers written against the
+    old API: 2A and 2B both map to integer 2.
+
+    Also re-adds fields expected by supervisor.py:
+      live_profit_factor, live_win_rate_50, live_recent_reconciliation_close_ratio
+    """
+
+    _LEVEL_TO_INT = {"0": 0, "1": 1, "2A": 2, "2B": 2}
+
+    def __init__(self, logs_dir: str = "logs", family: str = "btc"):
+        super().__init__(family=family, logs_dir=logs_dir)
+
+    def evaluate(self) -> dict:
+        import pandas as _pd
+
+        state = super().evaluate()
+
+        # Normalise string level to integer for backward compatibility.
+        raw = str(state.get("governor_level", "0")).upper()
+        state["governor_level"] = self._LEVEL_TO_INT.get(raw, 0)
+
+        # Re-add legacy fields not emitted by FamilyPerformanceGovernor.
+        try:
+            df = self._safe_read()
+            if not df.empty:
+                pnl_col = "net_realized_pnl" if "net_realized_pnl" in df.columns else "realized_pnl"
+                pnl = _pd.to_numeric(df[pnl_col], errors="coerce").fillna(0.0)
+                recent = pnl.tail(50)
+                gross_profit = float(recent[recent > 0].sum())
+                gross_loss = float((-recent[recent < 0]).sum())
+                state.setdefault(
+                    "live_profit_factor",
+                    gross_profit / gross_loss if gross_loss > 0 else (1.0 if gross_profit > 0 else 0.0),
+                )
+                state.setdefault("live_win_rate_50", float((recent > 0).mean()))
+                # Reconciliation close ratio
+                if "close_reason" in df.columns:
+                    recent_df = df.tail(50)
+                    rec_mask = recent_df["close_reason"].astype(str).str.contains(
+                        "reconciliation|external_manual_close", case=False, na=False
+                    )
+                    state.setdefault("live_recent_reconciliation_close_ratio", float(rec_mask.mean()))
+                else:
+                    state.setdefault("live_recent_reconciliation_close_ratio", 0.0)
+            else:
+                state.setdefault("live_profit_factor", 0.0)
+                state.setdefault("live_win_rate_50", 0.0)
+                state.setdefault("live_recent_reconciliation_close_ratio", 0.0)
+        except Exception:
+            state.setdefault("live_profit_factor", 0.0)
+            state.setdefault("live_win_rate_50", 0.0)
+            state.setdefault("live_recent_reconciliation_close_ratio", 0.0)
+
         return state

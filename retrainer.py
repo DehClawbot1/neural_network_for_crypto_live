@@ -410,7 +410,8 @@ class Retrainer:
 
         min_profit_factor = self._env_float("PROMOTION_MIN_PROFIT_FACTOR", 1.05)
         min_average_pnl = self._env_float("PROMOTION_MIN_AVERAGE_PNL", 0.0)
-        min_live_closed_trades = max(1, self._env_int("PROMOTION_MIN_LIVE_CLOSED_TRADES", 25))
+        max_drawdown = self._env_float("PROMOTION_MAX_DRAWDOWN", 15.0)
+        min_live_closed_trades = max(1, self._env_int("PROMOTION_MIN_LIVE_CLOSED_TRADES", 30))
         min_live_profit_factor = self._env_float("PROMOTION_MIN_LIVE_PROFIT_FACTOR", 1.00)
         min_live_average_pnl = self._env_float("PROMOTION_MIN_LIVE_AVERAGE_PNL", 0.0)
         min_learning_eligible_ratio = self._env_float("PROMOTION_MIN_LEARNING_ELIGIBLE_RATIO", 0.65)
@@ -421,6 +422,8 @@ class Retrainer:
         failures = []
         candidate_profit_factor = self._safe_float(candidate_row.get("profit_factor"), 0.0)
         candidate_average_pnl = self._safe_float(candidate_row.get("average_pnl"), 0.0)
+        candidate_max_drawdown = self._safe_float(candidate_row.get("max_drawdown"), 0.0)
+        
         if candidate_profit_factor < min_profit_factor:
             failures.append(
                 f"profit_factor {candidate_profit_factor:.3f} < required {min_profit_factor:.3f}"
@@ -428,6 +431,10 @@ class Retrainer:
         if candidate_average_pnl <= min_average_pnl:
             failures.append(
                 f"average_pnl {candidate_average_pnl:.4f} <= required {min_average_pnl:.4f}"
+            )
+        if candidate_max_drawdown > max_drawdown:
+            failures.append(
+                f"max_drawdown {candidate_max_drawdown:.3f} > allowed {max_drawdown:.3f}"
             )
 
         live_closed_trades = _safe_int(candidate_row.get("live_closed_trades", 0))

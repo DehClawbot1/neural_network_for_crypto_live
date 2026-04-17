@@ -38,6 +38,18 @@ _REGISTRY_COLUMNS = [
     "beats_champion",
     "is_champion",
     "promotion_gate_passed",
+    # ── Governance fields (Phase 4) ─────────────────────────────────────
+    "feature_schema_hash",       # deterministic hash of feature_names list
+    "training_window_start",     # ISO timestamp: first label in train set
+    "training_window_end",       # ISO timestamp: last label in train set
+    "shadow_rows",               # rows observed in shadow mode before promotion
+    "approval_status",           # pending | approved | rejected
+    "approved_by",               # operator id or "auto_gate"
+    "oos_beats_incumbent",       # bool: out-of-sample P&L beat current champion
+    "walk_forward_passed",       # bool: purged walk-forward CV cleared threshold
+    "cost_model_passed",         # bool: EV-after-cost clears minimum on replay
+    "calibration_brier",         # Brier on held-out set at promotion time
+    "calibration_ece",           # ECE on held-out set at promotion time
     "notes",
 ]
 
@@ -52,13 +64,32 @@ _NUMERIC_COLUMNS = {
     "rmse",
     "profit_factor",
     "replay_ev",
+    "shadow_rows",
+    "calibration_brier",
+    "calibration_ece",
 }
 
 _BOOLEAN_COLUMNS = {
     "beats_champion",
     "is_champion",
     "promotion_gate_passed",
+    "oos_beats_incumbent",
+    "walk_forward_passed",
+    "cost_model_passed",
 }
+
+
+def compute_feature_schema_hash(feature_names) -> str:
+    """
+    Deterministic SHA256 of the feature-name list.
+    Used to detect silent feature-set drift between training and inference.
+    Order-sensitive on purpose — two models with the same features in
+    different orders must NOT collide.
+    """
+    import hashlib
+    names = [str(n) for n in (feature_names or [])]
+    blob = "\n".join(names).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()[:16]  # 16 hex = 64 bits, plenty
 
 
 def _safe_float(value, default=None):
@@ -121,6 +152,11 @@ class ModelRegistry:
         payload["regime_slice"] = str(payload.get("regime_slice") or "all")
         payload["promotion_status"] = str(payload.get("promotion_status") or "candidate")
         payload["promotion_reason"] = str(payload.get("promotion_reason") or "")
+        payload["feature_schema_hash"] = str(payload.get("feature_schema_hash") or "")
+        payload["training_window_start"] = str(payload.get("training_window_start") or "")
+        payload["training_window_end"] = str(payload.get("training_window_end") or "")
+        payload["approval_status"] = str(payload.get("approval_status") or "pending")
+        payload["approved_by"] = str(payload.get("approved_by") or "")
         payload["notes"] = str(payload.get("notes") or "")
 
         existing = self._read()

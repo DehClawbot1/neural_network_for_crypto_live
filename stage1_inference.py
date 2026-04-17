@@ -35,7 +35,8 @@ def _build_numeric_feature_matrix(frame: pd.DataFrame, feature_names: list[str])
 
 
 class Stage1Inference:
-    def __init__(self, weights_dir="weights", *, brain_context=None, brain_id=None, market_family=None, shared_logs_dir="logs", shared_weights_dir="weights"):
+    def __init__(self, weights_dir="weights", *, brain_context=None, brain_id=None, market_family=None, shared_logs_dir="logs", shared_weights_dir="weights", strict_mode: bool = False):
+        self.strict_mode = bool(strict_mode)
         if brain_context is None and (brain_id or market_family):
             brain_context = resolve_brain_context(
                 market_family,
@@ -70,6 +71,9 @@ class Stage1Inference:
         work = frame.copy()
         missing = {col: 0.0 for col in feature_names if col not in work.columns}
         if missing:
+            if getattr(self, "strict_mode", False):
+                from services.types import DataFaultError
+                raise DataFaultError(f"Stage1Inference strict_mode: missing features {sorted(missing)}")
             work = work.assign(**missing)
 
         x = _build_numeric_feature_matrix(work, feature_names)
@@ -89,6 +93,12 @@ class Stage1Inference:
 
         clf_saved = self._load(self.classifier_file)
         reg_saved = self._load(self.regressor_file)
+
+        if self.strict_mode and (clf_saved is None or reg_saved is None):
+            from services.types import ModelFaultError
+            raise ModelFaultError(
+                f"Stage1Inference strict_mode: missing artifacts (clf={clf_saved is not None}, reg={reg_saved is not None})"
+            )
 
         if clf_saved is not None:
             try:
@@ -112,6 +122,9 @@ class Stage1Inference:
                     out["p_tp_before_sl"] = np.clip(pd.Series(probs, index=out.index).astype(float), 0.0, 1.0)
             except Exception as exc:
                 _report_inference_error("stage1_inference.classifier", exc, context="p_tp_before_sl_zero_fallback")
+                if self.strict_mode:
+                    from services.types import ModelFaultError
+                    raise ModelFaultError(f"Stage1Inference classifier failed: {exc}") from exc
                 out["p_tp_before_sl"] = 0.0
 
         if reg_saved is not None:
@@ -133,6 +146,9 @@ class Stage1Inference:
                     out["expected_return"] = calibrate_return_predictions(preds, calibration, index=out.index)
             except Exception as exc:
                 _report_inference_error("stage1_inference.regressor", exc, context="expected_return_zero_fallback")
+                if self.strict_mode:
+                    from services.types import ModelFaultError
+                    raise ModelFaultError(f"Stage1Inference regressor failed: {exc}") from exc
                 out["expected_return"] = 0.0
 
         calibration = reg_saved.get("return_calibration") if isinstance(reg_saved, dict) else {}

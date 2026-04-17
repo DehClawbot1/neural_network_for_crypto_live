@@ -45,7 +45,8 @@ class ModelInference:
     - never emit positive-looking outputs if model inference itself failed
     """
 
-    def __init__(self, weights_dir="weights", *, brain_context=None, brain_id=None, market_family=None, shared_logs_dir="logs", shared_weights_dir="weights"):
+    def __init__(self, weights_dir="weights", *, brain_context=None, brain_id=None, market_family=None, shared_logs_dir="logs", shared_weights_dir="weights", strict_mode: bool = False):
+        self.strict_mode = bool(strict_mode)
         if brain_context is None and (brain_id or market_family):
             brain_context = resolve_brain_context(
                 market_family,
@@ -79,7 +80,11 @@ class ModelInference:
 
         work = frame.copy()
         missing = {col: 0.0 for col in feature_names if col not in work.columns}
-        if missing: work = work.assign(**missing) # BUG FIX 8: Prevent DF Fragmentation
+        if missing:
+            if getattr(self, "strict_mode", False):
+                from services.types import DataFaultError
+                raise DataFaultError(f"ModelInference strict_mode: missing features {sorted(missing)}")
+            work = work.assign(**missing) # BUG FIX 8: Prevent DF Fragmentation
 
         x = _build_numeric_feature_matrix(work, feature_names)
 
@@ -100,6 +105,12 @@ class ModelInference:
         clf_saved = self._load(self.classifier_file)
         reg_saved = self._load(self.regressor_file)
 
+        if self.strict_mode and (clf_saved is None or reg_saved is None):
+            from services.types import ModelFaultError
+            raise ModelFaultError(
+                f"ModelInference strict_mode: missing artifacts (clf={clf_saved is not None}, reg={reg_saved is not None})"
+            )
+
         if clf_saved is not None:
             try:
                 clf = clf_saved["model"] if isinstance(clf_saved, dict) and "model" in clf_saved else clf_saved
@@ -113,6 +124,9 @@ class ModelInference:
                     out["p_tp_before_sl"] = np.clip(pd.Series(probs, index=out.index).astype(float), 0.0, 1.0)
             except Exception as exc:
                 _report_inference_error("model_inference.classifier", exc, context="p_tp_before_sl_zero_fallback")
+                if self.strict_mode:
+                    from services.types import ModelFaultError
+                    raise ModelFaultError(f"ModelInference classifier failed: {exc}") from exc
                 out["p_tp_before_sl"] = 0.0
 
         if reg_saved is not None:
@@ -125,9 +139,16 @@ class ModelInference:
                     out["expected_return"] = calibrate_return_predictions(preds, calibration, index=out.index)
             except Exception as exc:
                 _report_inference_error("model_inference.regressor", exc, context="expected_return_zero_fallback")
+                if self.strict_mode:
+                    from services.types import ModelFaultError
+                    raise ModelFaultError(f"ModelInference regressor failed: {exc}") from exc
                 out["expected_return"] = 0.0
 
         p_tp = _safe_numeric_feature_series(out, "p_tp_before_sl")
         exp_ret = _safe_numeric_feature_series(out, "expected_return")
+        if self.strict_mode:
+            if not np.isfinite(p_tp).all() or not np.isfinite(exp_ret).all():
+                from services.types import ModelFaultError
+                raise ModelFaultError("ModelInference strict_mode: non-finite output values")
         out["edge_score"] = p_tp * exp_ret
         return out

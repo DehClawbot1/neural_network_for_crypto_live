@@ -176,7 +176,9 @@ class BTCSentimentFeatures:
         if not df.empty:
             return df
 
-        logger.warning("Google Trends: all methods failed for '%s'", keyword)
+        # Downgraded from WARNING to DEBUG: Google Trends blocks automated queries aggressively. 
+        # Missing this feature is expected in live unproxied bot loops and handled gracefully.
+        logger.debug("Google Trends: all methods failed for '%s' (likely rate limited)", keyword)
         return self._empty_gtrends()
 
     def _fetch_gtrends_pytrends(self, keyword: str, timeframe: str) -> pd.DataFrame:

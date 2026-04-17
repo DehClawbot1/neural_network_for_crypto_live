@@ -93,6 +93,8 @@ from benchmark_strategy import BenchmarkStrategy
 from trade_quality import build_quality_context, resolve_entry_signal_label
 from trading_mode_preset import select_trading_mode, apply_preset, PRESETS
 from deployment_gate import DeploymentGate, DeploymentViolationError, get_deployment_gate
+from setup_risk_config import load_risk_env as _load_risk_env
+_load_risk_env()
 from btc_trade_feedback import BTCTradeFeedback
 from weather_temperature_strategy import WeatherTemperatureStrategy
 from weather_temperature_markets import fetch_weather_temperature_markets
@@ -508,9 +510,24 @@ def _safe_int(value, default=0) -> int:
             return int(default)
     except Exception:
         pass
+    # Governor levels like "2A" / "2B" come through here when callers pass
+    # `governor_state["governor_level"]` directly. Map them to int rank.
+    if isinstance(value, str):
+        s = value.strip().upper()
+        gov_map = {"0": 0, "1": 1, "2A": 2, "2B": 3, "2": 2, "3": 3}
+        if s in gov_map:
+            return gov_map[s]
     try:
         num = float(value)
     except Exception:
+        # Last-resort: pull the first digit if the string contains one
+        if isinstance(value, str):
+            for ch in value:
+                if ch.isdigit():
+                    try:
+                        return int(ch)
+                    except Exception:
+                        break
         return int(default)
     if not np.isfinite(num):
         return int(default)
@@ -1572,9 +1589,26 @@ def main_loop():
     weather_brain_context = resolve_brain_context("weather_temperature", shared_logs_dir="logs", shared_weights_dir="weights")
 
     feature_builder = FeatureBuilder()
-    signal_engine = SignalEngine()
-    model_inference = ModelInference(brain_context=btc_brain_context)
-    stage1_inference = Stage1Inference(brain_context=btc_brain_context)
+    signal_engine = SignalEngine(strict_mode=get_deployment_gate().is_live)
+
+    # Per-family conformal services (None until enough residuals accumulate).
+    try:
+        from services.uncertainty_service import build_family_conformal_service
+        _conformal_services = {
+            "btc": build_family_conformal_service("btc", logs_dir="logs"),
+            "weather_temperature": build_family_conformal_service("weather_temperature", logs_dir="logs"),
+        }
+        signal_engine.set_conformal_services(_conformal_services)
+        for _fam, _svc in _conformal_services.items():
+            if _svc is not None:
+                logging.info("Conformal service ready for %s: %s", _fam, _svc.summary())
+            else:
+                logging.info("Conformal service not yet ready for %s (insufficient residuals)", _fam)
+    except Exception as _conf_exc:
+        logging.warning("Conformal service bootstrap failed: %s", _conf_exc)
+    _strict_inference = get_deployment_gate().is_live
+    model_inference = ModelInference(brain_context=btc_brain_context, strict_mode=_strict_inference)
+    stage1_inference = Stage1Inference(brain_context=btc_brain_context, strict_mode=_strict_inference)
     stage2_inference = Stage2TemporalInference(brain_context=btc_brain_context)
     hybrid_scorer = Stage3HybridScorer()
     order_flow_analyzer = OrderFlowAnalyzer(min_usd_volume=500.0, volume_imbalance_threshold=0.75, min_trades_count=3)
@@ -1808,8 +1842,9 @@ def main_loop():
         # The supervised inference classes already read fresh artifacts from disk
         # on every run, but rebuilding them here makes promoted model activation
         # explicit and keeps startup/reload paths symmetric.
-        model_inference = ModelInference(brain_context=btc_brain_context)
-        stage1_inference = Stage1Inference(brain_context=btc_brain_context)
+        _strict_inference = _deployment_gate.is_live
+        model_inference = ModelInference(brain_context=btc_brain_context, strict_mode=_strict_inference)
+        stage1_inference = Stage1Inference(brain_context=btc_brain_context, strict_mode=_strict_inference)
         stage2_inference = Stage2TemporalInference(brain_context=btc_brain_context)
 
         active_artifacts = snapshot_artifact_state("weights")
@@ -2453,6 +2488,83 @@ def main_loop():
             pre_cycle_freeze_reason = None
             pre_cycle_freeze_detail = {}
             _reset_inference_runtime_guard()
+
+            # ── Portfolio allocator: refresh per-family pool caps ────────────
+            # Reads last N closed trades, computes Kelly × vol-target × DD
+            # throttle per family, publishes caps to services.family_pool_state
+            # for downstream sizing/approval sites to consult.
+            try:
+                from services.family_stats_loader import load_family_stats as _load_fam_stats
+                from services.portfolio_allocator import PortfolioAllocator as _PortfolioAllocator
+                from services import family_pool_state as _family_pool_state
+                _alloc_total_capital = 0.0
+                try:
+                    if order_manager is not None:
+                        _alloc_total_capital, _ = order_manager._get_available_balance(asset_type="COLLATERAL")
+                        _alloc_total_capital = float(_alloc_total_capital or 0.0)
+                except Exception:
+                    _alloc_total_capital = 0.0
+                if _alloc_total_capital <= 0 and execution_client is not None:
+                    try:
+                        _alloc_total_capital = float(execution_client.get_available_balance(asset_type="COLLATERAL") or 0.0)
+                    except Exception:
+                        _alloc_total_capital = 0.0
+                if _alloc_total_capital > 0:
+                    _fam_stats = _load_fam_stats("logs/closed_positions.csv")
+                    _alloc = _PortfolioAllocator()
+                    _allocations = _alloc.allocate(_fam_stats, total_capital_usdc=_alloc_total_capital)
+                    _pool_map = {fam: float(a.pool_usdc) for fam, a in _allocations.items()}
+                    # Cold-start bootstrap: if every family returns a 0 pool AND
+                    # no family is explicitly stopped-out by the DD throttle,
+                    # we treat it as "no history yet" and skip publishing caps
+                    # so the legacy sizing path can run. Once any family has
+                    # enough trades to produce a positive Kelly, caps kick in.
+                    _any_stopped = any(bool(getattr(a, "stopped_out", False)) for a in _allocations.values())
+                    _any_positive = any(v > 0 for v in _pool_map.values())
+                    if _any_positive or _any_stopped:
+                        _family_pool_state.update(_pool_map, total_capital_usdc=_alloc_total_capital)
+                    else:
+                        _family_pool_state.clear()
+                    # Audit row per cycle (best-effort, never crashes cycle).
+                    try:
+                        import csv as _csv
+                        from pathlib import Path as _Path
+                        _audit_path = _Path("logs/allocation_history.csv")
+                        _audit_path.parent.mkdir(parents=True, exist_ok=True)
+                        _is_new = not _audit_path.exists()
+                        with _audit_path.open("a", newline="", encoding="utf-8") as _fh:
+                            _w = _csv.writer(_fh)
+                            if _is_new:
+                                _w.writerow(["cycle_id", "total_capital_usdc", "family", "pool_usdc",
+                                             "kelly_raw", "kelly_shrunk", "vol_scalar",
+                                             "dd_throttle", "stopped_out", "notes"])
+                            for _fam, _a in _allocations.items():
+                                _w.writerow([
+                                    cycle_id, round(_alloc_total_capital, 2), _fam,
+                                    round(float(_a.pool_usdc), 2),
+                                    round(float(getattr(_a, "kelly_raw", 0.0)), 4),
+                                    round(float(getattr(_a, "kelly_shrunk", 0.0)), 4),
+                                    round(float(getattr(_a, "vol_scalar", 0.0)), 4),
+                                    round(float(getattr(_a, "dd_throttle", 1.0)), 4),
+                                    bool(getattr(_a, "stopped_out", False)),
+                                    str(getattr(_a, "notes", "") or ""),
+                                ])
+                    except Exception as _audit_exc:
+                        logging.debug("allocation audit write failed: %s", _audit_exc)
+                    logging.info(
+                        "PortfolioAllocator: total=%.2f pools=%s",
+                        _alloc_total_capital,
+                        {k: round(v, 2) for k, v in _pool_map.items()},
+                    )
+                else:
+                    _family_pool_state.clear()
+            except Exception as _alloc_exc:
+                logging.warning("PortfolioAllocator skipped this cycle: %s", _alloc_exc)
+                try:
+                    from services import family_pool_state as _family_pool_state
+                    _family_pool_state.clear()
+                except Exception:
+                    pass
 
             def _audit_duplicate_step(frame, step_name, **extra):
                 duplicates = audit_duplicate_columns(
@@ -4084,6 +4196,17 @@ def main_loop():
 
             def _log_candidate_skip(signal_row: dict, reason: str, gate: str | None = None, **extra):
                 extra.setdefault("_passed_gates", _passed_gates)
+                # Populate available_balance on early-gate skips so the
+                # CANDIDATE_SKIP record isn't mostly null. Pre-sizing gates
+                # (open_universe, market_validity, etc.) never run the
+                # sizing block, so this is the only place we can surface it.
+                if "available_balance" not in extra:
+                    try:
+                        _eb = _get_entry_available_balance()
+                        if _eb is not None:
+                            extra["available_balance"] = float(_eb)
+                    except Exception:
+                        pass
                 payload = _record_candidate_decision(
                     signal_row,
                     final_decision="SKIPPED",
@@ -4724,6 +4847,169 @@ def main_loop():
                     size_usdc *= float(governor_state.get("size_multiplier", 1.0) or 1.0)
                     if governor_liquidity_floor_failed:
                         size_usdc *= float(governor_state.get("liquidity_size_multiplier", 1.0) or 1.0)
+
+                    # Per-trade Kelly × vol-scale × edge-floor multiplier.
+                    # Applied on top of MoneyManager base size. Skips when edge
+                    # below floor (2¢ default) — see services/per_trade_sizer.
+                    try:
+                        from services.per_trade_sizer import PerTradeSizer as _PerTradeSizer
+                        from services import family_pool_state as _fp_state_for_sizer
+                        _pts = getattr(_inject_always_on_signal, "_pts_cache", None)
+                        if _pts is None:
+                            _pts = _PerTradeSizer()
+                            setattr(_inject_always_on_signal, "_pts_cache", _pts)
+                        _p_model = float(signal_row.get("confidence_at_entry")
+                                         or signal_row.get("model_probability")
+                                         or signal_row.get("predicted_probability")
+                                         or 0.0)
+                        _mkt_px = float(signal_row.get("entry_price")
+                                        or signal_row.get("price")
+                                        or signal_row.get("mid_price")
+                                        or 0.0)
+                        _fam_for_kelly = str(signal_row.get("market_family") or "").strip().lower()
+                        if not _fam_for_kelly:
+                            _fam_for_kelly = "weather_temperature" if bool(signal_row.get("is_weather_temperature_market", False)) else "btc"
+                        # Load family stats lazily from loader; gracefully degrade.
+                        _fam_n, _fam_wr, _fam_vol = 0, None, None
+                        try:
+                            from services.family_stats_loader import load_family_stats as _lfs
+                            _fam_stats_sizer = _lfs("logs/closed_positions.csv")
+                            _fs = _fam_stats_sizer.get(_fam_for_kelly)
+                            if _fs is not None:
+                                _fam_n = int(getattr(_fs, "n_trades", 0) or 0)
+                                _fam_wr = float(getattr(_fs, "win_rate", 0.5))
+                                _rets = getattr(_fs, "returns_series", None)
+                                if _rets is not None and getattr(_rets, "size", 0) > 5:
+                                    _fam_vol = float(_rets.std(ddof=1))
+                        except Exception:
+                            pass
+                        if 0.0 < _p_model < 1.0 and 0.0 < _mkt_px < 1.0:
+                            _bd = _pts.compute(
+                                predicted_probability=_p_model,
+                                market_price=_mkt_px,
+                                family_n_trades=_fam_n,
+                                family_win_rate=_fam_wr,
+                                family_realised_vol=_fam_vol,
+                            )
+                            if _bd.skip:
+                                logging.info(
+                                    "PerTradeSizer: skip (reason=%s edge=%.3f p=%.3f price=%.3f)",
+                                    _bd.reason, _bd.edge, _p_model, _mkt_px,
+                                )
+                                size_usdc = 0.0
+                            else:
+                                size_usdc *= float(_bd.multiplier)
+                                signal_row["sizing_kelly_raw"] = _bd.kelly_raw
+                                signal_row["sizing_kelly_shrunk"] = _bd.kelly_shrunk
+                                signal_row["sizing_fractional_kelly"] = _bd.fractional_kelly
+                                signal_row["sizing_vol_scalar"] = _bd.vol_scalar
+                                signal_row["sizing_edge"] = _bd.edge
+                                signal_row["sizing_kelly_multiplier"] = _bd.multiplier
+                    except Exception as _pts_exc:
+                        logging.debug("PerTradeSizer skipped: %s", _pts_exc)
+
+                    # Conformal uncertainty scaling — only applied when a fitted
+                    # family conformal service populated the column. Absent
+                    # column → um=1.0, no behavior change vs. pre-plumbing.
+                    try:
+                        _um = float(signal_row.get("uncertainty_multiplier", 1.0) or 1.0)
+                    except (TypeError, ValueError):
+                        _um = 1.0
+                    _um = max(0.0, min(1.0, _um))
+                    if _um < 1.0:
+                        size_usdc *= _um
+                        signal_row["sizing_uncertainty_multiplier"] = round(_um, 4)
+                    # PortfolioAllocator pool cap (per-family). Hard-zero → skip.
+                    try:
+                        from services import family_pool_state as _fp_state
+                        _fam_for_cap = str(signal_row.get("market_family") or "").strip().lower()
+                        if not _fam_for_cap:
+                            _fam_for_cap = "weather_temperature" if bool(signal_row.get("is_weather_temperature_market", False)) else "btc"
+                        _fam_cap = _fp_state.cap_for(_fam_for_cap)
+                        if _fam_cap is not None:
+                            if _fam_cap <= 0.0:
+                                logging.info(
+                                    "PortfolioAllocator: family=%s stopped out (pool=0) — skipping entry.",
+                                    _fam_for_cap,
+                                )
+                                size_usdc = 0.0
+                            else:
+                                # Subtract existing open exposure for the family, if tracked.
+                                _fam_open = 0.0
+                                try:
+                                    if _fam_for_cap.startswith("weather"):
+                                        _fam_open = float(signal_row.get("weather_open_notional", 0.0) or 0.0)
+                                    else:
+                                        _fam_open = float(signal_row.get("btc_open_notional", 0.0) or 0.0)
+                                except Exception:
+                                    _fam_open = 0.0
+                                _fam_remaining = max(0.0, float(_fam_cap) - _fam_open)
+                                if size_usdc > _fam_remaining:
+                                    logging.info(
+                                        "PortfolioAllocator: cap family=%s size %.2f→%.2f (pool=%.2f, open=%.2f)",
+                                        _fam_for_cap, size_usdc, _fam_remaining, _fam_cap, _fam_open,
+                                    )
+                                    size_usdc = _fam_remaining
+                                signal_row["allocator_family_pool_usdc"] = round(float(_fam_cap), 4)
+                    except Exception as _cap_exc:
+                        logging.debug("family pool cap application failed: %s", _cap_exc)
+
+                    # Cost + market-impact viability gate. Rejects trades
+                    # whose raw edge doesn't clear half-spread + sqrt-impact
+                    # + fees. See services/cost_impact_model.
+                    try:
+                        from services.cost_impact_model import (
+                            estimate_trade_cost as _estimate_trade_cost,
+                            CostParams as _CostParams,
+                        )
+                        _cp = getattr(_inject_always_on_signal, "_cost_params_cache", None)
+                        if _cp is None:
+                            _cp = _CostParams(
+                                taker_fee_bps=float(_env_float("COST_TAKER_FEE_BPS", 0.0)),
+                                maker_fee_bps=float(_env_float("COST_MAKER_FEE_BPS", 0.0)),
+                                impact_coef_k=float(_env_float("COST_IMPACT_K", 0.10)),
+                                min_half_spread=float(_env_float("COST_MIN_HALF_SPREAD", 0.005)),
+                                max_impact=float(_env_float("COST_MAX_IMPACT", 0.05)),
+                            )
+                            setattr(_inject_always_on_signal, "_cost_params_cache", _cp)
+                        _edge_for_cost = float(signal_row.get("sizing_edge")
+                                               or (float(signal_row.get("confidence_at_entry", 0.0) or 0.0)
+                                                   - float(signal_row.get("entry_price",
+                                                                          signal_row.get("price", 0.0)) or 0.0)))
+                        _spread_for_cost = float(signal_row.get("spread_at_entry")
+                                                 or signal_row.get("spread", 0.0) or 0.0)
+                        _adv_for_cost = float(signal_row.get("avg_daily_volume_usdc")
+                                              or signal_row.get("market_volume_24h")
+                                              or signal_row.get("volume_24h_usdc")
+                                              or 0.0)
+                        _price_for_cost = float(signal_row.get("entry_price")
+                                                or signal_row.get("price")
+                                                or signal_row.get("mid_price") or 0.0)
+                        if size_usdc > 0 and _price_for_cost > 0:
+                            _est = _estimate_trade_cost(
+                                size_usdc=float(size_usdc),
+                                price=_price_for_cost,
+                                spread=_spread_for_cost,
+                                adv_usdc=_adv_for_cost,
+                                edge=_edge_for_cost,
+                                side=str(signal_row.get("outcome_side", "buy")).lower() or "buy",
+                                params=_cp,
+                            )
+                            signal_row["cost_impact"] = _est.impact
+                            signal_row["cost_half_spread"] = _est.half_spread
+                            signal_row["cost_fees"] = _est.fees
+                            signal_row["cost_total"] = _est.total_cost
+                            signal_row["cost_edge_after"] = _est.edge_after_cost
+                            signal_row["cost_viable"] = bool(_est.viable)
+                            _enforce_cost_gate = str(os.getenv("COST_VIABILITY_GATE_ENFORCE", "1")).strip().lower() not in ("0", "false", "no", "off", "")
+                            if not _est.viable and _edge_for_cost > 0 and _enforce_cost_gate:
+                                logging.info(
+                                    "CostGate: reject (edge=%.4f total_cost=%.4f impact=%.4f spread=%.4f size=%.2f adv=%.0f)",
+                                    _edge_for_cost, _est.total_cost, _est.impact, _est.half_spread, size_usdc, _adv_for_cost,
+                                )
+                                size_usdc = 0.0
+                    except Exception as _cost_exc:
+                        logging.debug("cost viability gate skipped: %s", _cost_exc)
                     sizing_context = _entry_balance_sizing_context(_available_bal)
                     min_bet_usdc = sizing_context["min_bet_usdc"]
                     configured_min_entry = sizing_context["configured_min_entry"]
@@ -5574,6 +5860,263 @@ def main_loop():
             )
             if closed_trades:
                 logging.info("[%s] Processed %s closed trades.", trading_mode.upper(), len(closed_trades))
+
+                # ── Conformal calibration: append |outcome - predicted_p| per close
+                # Silent best-effort; never block the main loop. DataFaultError
+                # from the store is swallowed with a warning because bad data
+                # in one trade must not poison calibration for others.
+                try:
+                    from services.calibration_store import append_residual, residual_from_outcome
+                    for _ct in closed_trades:
+                        try:
+                            _p = float(getattr(_ct, "p_tp_before_sl", float("nan")))
+                            if not (0.0 <= _p <= 1.0):
+                                continue
+                            # Binary outcome: 1 if the trade hit TP (or net profit), else 0
+                            _reason = str(getattr(_ct, "close_reason", "") or "").lower()
+                            _pnl = float(getattr(_ct, "realized_pnl", 0.0) or 0.0)
+                            _y = 1 if ("tp" in _reason or _pnl > 0) else 0
+                            _fam = str(getattr(_ct, "market_family", "") or "btc").lower()
+                            _fam = "weather_temperature" if _fam.startswith("weather") else "btc"
+                            append_residual(_fam, residual_from_outcome(_p, _y))
+                        except Exception as _ce:
+                            logging.debug("calibration append skipped: %s", _ce)
+                except Exception as _ce_outer:
+                    logging.warning("calibration store unavailable: %s", _ce_outer)
+
+                # Refresh alpha-thesis health report — cheap, run alongside
+                # calibration. Tells ops which claimed signals are decaying.
+                try:
+                    from alpha_thesis_validator import build_report as _build_thesis_report
+                    _thesis = _build_thesis_report("logs/closed_positions.csv")
+                    for _fam_name, _fam_info in (_thesis.get("families") or {}).items():
+                        for _sig in (_fam_info.get("signals") or []):
+                            if _sig.get("status") == "degraded":
+                                logging.warning(
+                                    "Alpha thesis degraded: %s/%s flags=%s ic=%s",
+                                    _fam_name, _sig.get("signal"),
+                                    _sig.get("flags"), _sig.get("ic"),
+                                )
+                except Exception as _th_exc:
+                    logging.warning("thesis validator failed: %s", _th_exc)
+
+                # Refresh per-family drift report + re-fit conformal services
+                # so sizing adapts within the same session.
+                try:
+                    from calibration_report import write_report
+                    _rep = write_report(
+                        ["btc", "weather_temperature"],
+                        logs_dir="logs",
+                        predictions_csv="logs/closed_positions.csv",
+                    )
+                    for _fam_name, _fam_info in _rep["families"].items():
+                        if _fam_info.get("status") in {"drifting", "miscalibrated"}:
+                            logging.warning(
+                                "Calibration drift flag for %s: %s (n=%s, brier=%s)",
+                                _fam_name, _fam_info.get("flags"),
+                                _fam_info.get("n_samples"), _fam_info.get("brier"),
+                            )
+                    from services.uncertainty_service import build_family_conformal_service
+                    signal_engine.set_conformal_services({
+                        "btc": build_family_conformal_service("btc", logs_dir="logs"),
+                        "weather_temperature": build_family_conformal_service(
+                            "weather_temperature", logs_dir="logs"),
+                    })
+                except Exception as _rep_exc:
+                    logging.warning("calibration report refresh failed: %s", _rep_exc)
+
+                # ── Formal drift tests (CUSUM + Page-Hinkley) on residuals.
+                # Persists state to logs/drift_state.json between cycles so
+                # detectors accumulate across restarts.
+                try:
+                    import json as _json
+                    from pathlib import Path as _DPath
+                    from services.drift_tests import (
+                        CUSUM as _CUSUM,
+                        PageHinkley as _PageHinkley,
+                        CUSUMState as _CUSUMState,
+                        PageHinkleyState as _PHState,
+                    )
+                    from services.calibration_store import residual_from_outcome as _res_from_outcome
+                    _drift_path = _DPath("logs/drift_state.json")
+                    _drift_state = {}
+                    if _drift_path.exists():
+                        try:
+                            _drift_state = _json.loads(_drift_path.read_text(encoding="utf-8"))
+                        except Exception:
+                            _drift_state = {}
+                    _alarms_this_cycle: list[dict] = []
+                    for _ct in closed_trades:
+                        try:
+                            _p = float(getattr(_ct, "p_tp_before_sl", float("nan")))
+                            if not (0.0 <= _p <= 1.0):
+                                continue
+                            _reason = str(getattr(_ct, "close_reason", "") or "").lower()
+                            _pnl = float(getattr(_ct, "realized_pnl", 0.0) or 0.0)
+                            _y = 1 if ("tp" in _reason or _pnl > 0) else 0
+                            _res = _res_from_outcome(_p, _y)
+                            _fam = str(getattr(_ct, "market_family", "") or "btc").lower()
+                            _fam = "weather_temperature" if _fam.startswith("weather") else "btc"
+                            _fam_state = _drift_state.setdefault(_fam, {})
+                            # CUSUM
+                            _cusum = _CUSUM(k=0.5, h=5.0, warmup=50)
+                            if _fam_state.get("cusum"):
+                                try:
+                                    _cusum.state = _CUSUMState(**_fam_state["cusum"])
+                                except Exception:
+                                    pass
+                            _cr = _cusum.update(_res)
+                            _fam_state["cusum"] = _cusum.state.to_dict()
+                            # Page-Hinkley
+                            _ph = _PageHinkley(delta=0.005, lambda_=30.0, alpha=0.9999)
+                            if _fam_state.get("page_hinkley"):
+                                try:
+                                    _ph.state = _PHState(**_fam_state["page_hinkley"])
+                                except Exception:
+                                    pass
+                            _pr = _ph.update(_res)
+                            _fam_state["page_hinkley"] = _ph.state.to_dict()
+                            if _cr.get("alarm") or _pr.get("alarm"):
+                                _alarms_this_cycle.append({
+                                    "family": _fam,
+                                    "cusum": _cr,
+                                    "page_hinkley": _pr,
+                                    "residual": round(float(_res), 4),
+                                })
+                        except Exception as _di:
+                            logging.debug("drift update skipped: %s", _di)
+                    _drift_path.parent.mkdir(parents=True, exist_ok=True)
+                    _drift_path.write_text(_json.dumps(_drift_state, indent=2), encoding="utf-8")
+                    for _a in _alarms_this_cycle:
+                        logging.warning("DriftAlarm family=%s cusum=%s ph=%s",
+                                        _a["family"], _a["cusum"], _a["page_hinkley"])
+                except Exception as _de:
+                    logging.debug("drift tests skipped: %s", _de)
+
+                # ── Nightly-grade reports: calibration auto-select + attribution
+                # + Monte Carlo. Throttled to once every N closes to avoid burning
+                # CPU each trade. Default N=10 (tunable via NIGHTLY_REPORT_EVERY).
+                try:
+                    _nightly_every = int(float(os.getenv("NIGHTLY_REPORT_EVERY", "10") or 10))
+                    _nightly_counter_path = __import__("pathlib").Path("logs/_nightly_counter.txt")
+                    _cur = 0
+                    if _nightly_counter_path.exists():
+                        try:
+                            _cur = int(_nightly_counter_path.read_text().strip() or "0")
+                        except Exception:
+                            _cur = 0
+                    _cur += len(closed_trades)
+                    if _cur >= _nightly_every:
+                        _cur = 0
+                        # Confidence stacker — refit meta-learner on fresh closes.
+                        # Replaces the hand-tuned 0.45/0.30/0.25 blend in
+                        # signal_engine with a data-fitted L2 logistic.
+                        try:
+                            from services.confidence_stacker import ConfidenceStacker as _ConfStacker
+                            _cs = _ConfStacker(path="logs/confidence_stacker.json",
+                                               min_samples=int(float(os.getenv("STACKER_MIN_SAMPLES", "80") or 80)),
+                                               l2=float(os.getenv("STACKER_L2", "1.0") or 1.0))
+                            _fit = _cs.fit_from_closed_trades("logs/closed_positions.csv")
+                            logging.info("ConfidenceStacker refit: %s", _fit)
+                            # Push into the signal engine in-process so next cycle
+                            # uses the new weights without a restart.
+                            try:
+                                signal_engine.set_confidence_stacker(_cs)
+                            except Exception as _sse:
+                                logging.debug("signal_engine stacker plumb failed: %s", _sse)
+                        except Exception as _csx:
+                            logging.debug("confidence-stacker refit skipped: %s", _csx)
+
+                        # Cap calibrator — fit data-derived replacements for the
+                        # 0.59 / 0.44 / 0.39 / 0.42 confidence caps in score_row.
+                        try:
+                            from services.cap_calibrator import fit_caps_from_closed_trades as _fit_caps
+                            _cap_art = _fit_caps(
+                                "logs/closed_positions.csv",
+                                out_path="logs/confidence_caps.json",
+                                win_rate_floor=float(os.getenv("CAP_WR_FLOOR", "0.50") or 0.50),
+                                min_samples_per_regime=int(float(os.getenv("CAP_MIN_SAMPLES", "30") or 30)),
+                            )
+                            logging.info("CapCalibrator refit: caps=%s counts=%s n=%s",
+                                         _cap_art.caps, _cap_art.sample_counts, _cap_art.n_trades)
+                            try:
+                                signal_engine.reload_confidence_caps()
+                            except Exception:
+                                pass
+                        except Exception as _capx:
+                            logging.debug("cap-calibrator refit skipped: %s", _capx)
+
+                        # Calibration suite (auto-select best of Platt/Iso/Beta)
+                        try:
+                            import json as _json
+                            import pandas as _pd
+                            import numpy as _np
+                            from services.calibration_suite import auto_calibrate as _auto_cal
+                            _cp = "logs/closed_positions.csv"
+                            if __import__("os").path.exists(_cp):
+                                _cdf = _pd.read_csv(_cp, engine="python", on_bad_lines="skip")
+                                if {"confidence_at_entry", "realized_pnl"}.issubset(_cdf.columns) and len(_cdf) >= 60:
+                                    _s = _pd.to_numeric(_cdf["confidence_at_entry"], errors="coerce").to_numpy()
+                                    _y = (_pd.to_numeric(_cdf["realized_pnl"], errors="coerce") > 0).astype(float).to_numpy()
+                                    _m = _np.isfinite(_s) & _np.isfinite(_y)
+                                    if _m.sum() >= 60:
+                                        _ac = _auto_cal(_s[_m], _y[_m])
+                                        _cal_out = {"best": _ac.get("best"), "results": _ac.get("results")}
+                                        __import__("pathlib").Path("logs/calibration_suite_report.json").write_text(
+                                            _json.dumps(_cal_out, indent=2, default=str), encoding="utf-8")
+                                        logging.info("CalibrationSuite best=%s", _cal_out["best"])
+                        except Exception as _csx:
+                            logging.debug("calibration-suite nightly skipped: %s", _csx)
+                        # Attribution + MC backtest
+                        try:
+                            import json as _json
+                            import pandas as _pd
+                            import numpy as _np
+                            from services.attribution_engine import (
+                                permutation_feature_importance as _perm_imp,
+                                regime_winrate_ztest as _regime_z,
+                            )
+                            from services.monte_carlo_backtest import (
+                                monte_carlo_backtest as _mc_bt,
+                                deflated_sharpe_ratio as _dsr,
+                            )
+                            _cp2 = "logs/closed_positions.csv"
+                            if __import__("os").path.exists(_cp2):
+                                _cdf2 = _pd.read_csv(_cp2, engine="python", on_bad_lines="skip")
+                                if "realized_pnl" in _cdf2.columns and len(_cdf2) >= 30:
+                                    _feat_cols = [c for c in [
+                                        "confidence_at_entry", "entry_btc_predicted_return",
+                                        "entry_btc_forecast_confidence", "whale_pressure",
+                                        "forecast_p_hit_interval", "weather_forecast_edge",
+                                    ] if c in _cdf2.columns]
+                                    _imp = _perm_imp(_cdf2, feature_cols=_feat_cols, n_repeats=8) if _feat_cols else []
+                                    _zreg = _regime_z(_cdf2, outcome_col="realized_pnl",
+                                                     regime_col="volatility_bucket") if "volatility_bucket" in _cdf2.columns else []
+                                    _sz = _pd.to_numeric(_cdf2.get("size_usdc", 1.0), errors="coerce").clip(lower=1e-6)
+                                    _ret = (_pd.to_numeric(_cdf2["realized_pnl"], errors="coerce") / _sz).dropna().to_numpy()
+                                    _mc_out = _mc_bt(_ret, n_simulations=1000, block_size=8,
+                                                     method="stationary", periods_per_year=252.0)
+                                    _mc_dict = _mc_out.to_dict()
+                                    _mc_dict["dsr_1000_trials"] = _dsr(_mc_out.point_sharpe, 1000, _mc_out.n_trades)
+                                    _bundle = {
+                                        "generated_at": datetime.now(timezone.utc).isoformat(),
+                                        "permutation_importance": _imp,
+                                        "regime_winrate_ztest": _zreg,
+                                        "monte_carlo": _mc_dict,
+                                    }
+                                    __import__("pathlib").Path("logs/nightly_research_report.json").write_text(
+                                        _json.dumps(_bundle, indent=2, default=str), encoding="utf-8")
+                                    logging.info(
+                                        "NightlyReport: MC Sharpe=%.3f CI=%s PSR=%.3f DSR=%.3f n=%d",
+                                        _mc_out.point_sharpe, _mc_out.sharpe_ci,
+                                        _mc_out.probabilistic_sharpe, _mc_dict["dsr_1000_trials"], _mc_out.n_trades,
+                                    )
+                        except Exception as _atx:
+                            logging.debug("attribution/MC nightly skipped: %s", _atx)
+                    _nightly_counter_path.parent.mkdir(parents=True, exist_ok=True)
+                    _nightly_counter_path.write_text(str(_cur), encoding="utf-8")
+                except Exception as _ne:
+                    logging.debug("nightly research block skipped: %s", _ne)
 
                 # CLEANED LIVE EXIT & MONEY MANAGER BLOCK
             if trading_mode == "live" and order_manager is not None:

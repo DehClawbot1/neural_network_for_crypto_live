@@ -90,6 +90,7 @@ class MoneyManager:
         current_exposure: float = 0.0,
         # Execution / Safety Constraints
         confidence: float = 0.0,
+        uncertainty: float = 0.0,
         edge: float = 0.0,
         ev_after_cost: float = 0.0,
         fill_probability: float = 0.0,
@@ -98,12 +99,16 @@ class MoneyManager:
         hours_to_resolution: float = 0.0,
         market_liquidity_score: float = 1.0,
         cluster_exposure_usdc: float = 0.0,
+        active_correlated_positions: int = 0,
         # Environmental Overrides
         target_vol: float = 0.05,
         floor_vol: float = 0.02,
         cluster_cap_usdc: float = 250.0,
         max_daily_loss: float = 100.0,
         max_weekly_loss: float = 300.0,
+        max_family_drawdown: float = 500.0,
+        max_portfolio_drawdown: float = 1000.0,
+        global_portfolio_drawdown: float = 0.0,
     ) -> dict:
         """
         Calculates size by returning a complete breakdown of multipliers, penalties, and final capped size.
@@ -111,6 +116,7 @@ class MoneyManager:
         # Guardrail 2: missing metrics force conservative defaults.
         # Edge, Ev, Fill automatically fall back to 0.0 if not provided or NaN
         confidence = self._safe_float(confidence, 0.0)
+        uncertainty = self._safe_float(uncertainty, 0.5)
         edge = self._safe_float(edge, 0.0)
         ev_after_cost = self._safe_float(ev_after_cost, 0.0)
         fill_probability = self._safe_float(fill_probability, 0.0)
@@ -130,12 +136,16 @@ class MoneyManager:
             "ev_component": ev_after_cost,
             "fill_prob_component": fill_probability,
             "confidence_component": confidence,
+            "uncertainty_component": uncertainty,
             "quality_score": 0.0,
             "volatility_penalty": 1.0,
             "drag_penalty": 1.0,
             "liquidity_penalty": 1.0,
             "drawdown_penalty": 1.0,
             "cluster_penalty": 1.0,
+            "correlation_penalty": 1.0,
+            "uncertainty_penalty": 1.0,
+            "risk_of_ruin_penalty": 1.0,
             "final_size": 0.0,
             "reason": None
         }
@@ -146,6 +156,14 @@ class MoneyManager:
 
         if self._is_kill_switched(max_daily_loss, max_weekly_loss):
             decomposition["reason"] = "kill_switch_active"
+            return decomposition
+            
+        if self.weekly_loss >= max_family_drawdown:
+            decomposition["reason"] = "max_family_drawdown_exceeded"
+            return decomposition
+            
+        if global_portfolio_drawdown >= max_portfolio_drawdown:
+            decomposition["reason"] = "max_portfolio_drawdown_exceeded"
             return decomposition
 
         # 2. Additive Quality Score (Guardrail 1: 35/35/20/10)
@@ -209,8 +227,25 @@ class MoneyManager:
             decomposition["cluster_penalty"] = cluster_penalty
 
         # 4. Final Application and Hard Caps (Guardrail 3)
-        combined_multiplier = dd_penalty * liq * vol_penalty * drag_penalty * cluster_penalty
-        combined_multiplier = max(0.25, min(1.50, combined_multiplier))
+        
+        # Uncertainty Multiplier (decay extremely fast as uncertainty moves above 0.25)
+        uncertainty_penalty = max(0.0, min(1.0, 1.0 - (uncertainty * 2.0)))
+        decomposition["uncertainty_penalty"] = round(uncertainty_penalty, 4)
+        
+        # Risk of Ruin basic bound
+        # A simple bounding metric: Kelly assumes f* = edge/odds. If we limit maximum bankroll exposure to 
+        # prevent touching ruin margins. We enforce a 0.25 multiplier if edge is virtually static.
+        risk_of_ruin_penalty = 1.0 if edge > 0.01 else 0.25
+        decomposition["risk_of_ruin_penalty"] = risk_of_ruin_penalty
+        
+        # Correlation limit
+        correlation_penalty = 1.0
+        if int(active_correlated_positions) > 0:
+            correlation_penalty = 1.0 / (int(active_correlated_positions) + 1)
+        decomposition["correlation_penalty"] = round(correlation_penalty, 4)
+        
+        combined_multiplier = dd_penalty * liq * vol_penalty * drag_penalty * cluster_penalty * uncertainty_penalty * risk_of_ruin_penalty * correlation_penalty
+        combined_multiplier = max(0.0, min(1.50, combined_multiplier))
         
         final_size = base_size * combined_multiplier
 

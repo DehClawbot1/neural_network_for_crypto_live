@@ -14,6 +14,7 @@ from execution_client import ExecutionClient
 from live_risk_manager import LiveRiskManager, RiskDecision
 from db import Database
 
+from enum import Enum
 try:
     from polymarket_capabilities import apply_execution_client_patch
     apply_execution_client_patch()
@@ -21,6 +22,20 @@ except (ImportError, ModuleNotFoundError):
     pass
 except Exception as exc:
     logging.warning("Execution client patch failed: %s", exc)
+
+class OrderState(Enum):
+    INTENDED = "INTENDED"
+    SUBMITTED = "SUBMITTED"
+    ACKNOWLEDGED = "ACKNOWLEDGED"
+    PARTIALLY_FILLED = "PARTIALLY_FILLED"
+    FILLED = "FILLED"
+    CANCELED = "CANCELED"
+    REJECTED = "REJECTED"
+    RECONCILED = "RECONCILED"
+
+    @classmethod
+    def is_terminal(cls, state: str) -> bool:
+        return str(state).upper() in {cls.FILLED.value, cls.CANCELED.value, cls.REJECTED.value, cls.RECONCILED.value, "FAILED", "EXECUTED", "MATCHED"}
 
 
 class OrderManager:
@@ -60,8 +75,7 @@ class OrderManager:
         return None
 
     def _is_terminal_status(self, status):
-        status = str(status or "").upper()
-        return status in {"FILLED", "EXECUTED", "MATCHED", "CANCELED", "CANCELLED", "FAILED", "REJECTED"}
+        return OrderState.is_terminal(status)
 
     def _normalize_balance(self, raw_balance):
         return normalize_allowance_balance(raw_balance, asset_type="COLLATERAL")
@@ -74,37 +88,9 @@ class OrderManager:
         factor = 10 ** int(decimals)
         return math.floor(max(shares, 0.0) * factor) / factor
 
-    def _has_recent_dust_clear(self, token_id, condition_id=None, outcome_side=None, lookback_seconds=300):
-        try:
-            lookback_seconds = max(1, int(lookback_seconds))
-        except Exception:
-            lookback_seconds = 300
-        cutoff_iso = (datetime.now(timezone.utc) - pd.Timedelta(seconds=lookback_seconds)).isoformat()
-        try:
-            rows = self.db.query_all(
-                """
-                SELECT order_id
-                FROM orders
-                WHERE order_id LIKE 'dust_clear_%'
-                  AND token_id = ?
-                  AND COALESCE(condition_id, '') = ?
-                  AND COALESCE(outcome_side, '') = ?
-                  AND COALESCE(created_at, '') >= ?
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (
-                    str(token_id or ""),
-                    str(condition_id or ""),
-                    str(outcome_side or ""),
-                    cutoff_iso,
-                ),
-            )
-            return bool(rows)
-        except Exception:
-            return False
 
-    def _get_available_balance(self, asset_type="COLLATERAL", token_id=None, use_onchain_fallback=True):
+
+    def _get_available_balance(self, asset_type="COLLATERAL", token_id=None):
         readiness = self.check_readiness(asset_type=asset_type, token_id=token_id)
         raw_balance = None
         if isinstance(readiness, dict):
@@ -115,33 +101,11 @@ class OrderManager:
 
         normalized_balance = self._normalize_balance(raw_balance)
         logging.info(
-            "Balance check: raw=%s normalized=$%.2f (asset_type=%s)",
+            "Balance check: raw=%s normalized=$%.2f (asset_type=%s, CLOB-only)",
             raw_balance, normalized_balance, asset_type
         )
 
-        onchain_balance = 0.0
-        if str(asset_type).upper() == "COLLATERAL":
-            try:
-                onchain = self.client.get_onchain_collateral_balance()
-                onchain_balance = float((onchain or {}).get("total", 0.0) or 0.0)
-                logging.info("On-chain balance (diagnostic only): $%.2f", onchain_balance)
-            except Exception as exc:
-                logging.warning("On-chain collateral lookup failed: %s", exc)
-
-        allow_onchain_fallback = (
-            use_onchain_fallback
-            and os.getenv("ALLOW_ONCHAIN_BALANCE_FALLBACK", "false").strip().lower() in {"1", "true", "yes", "on"}
-        )
-        available = normalized_balance
-        if allow_onchain_fallback and available <= 0 and str(asset_type).upper() == "COLLATERAL":
-            available = onchain_balance
-            logging.warning(
-                "Using on-chain fallback balance because CLOB/API balance is zero. "
-                "This can still fail at order placement."
-            )
-        logging.info("Spendable balance: $%.2f (CLOB=$%.2f, onchain=$%.2f)",
-                      available, normalized_balance, onchain_balance)
-        return available, readiness
+        return normalized_balance, readiness
 
     def check_readiness(self, asset_type=None, token_id=None):
         try:
@@ -194,12 +158,8 @@ class OrderManager:
             message = str(exc)
             context["orderbook_ok"] = False
             context["orderbook_error"] = message
-            if "orderbook" in message.lower() and "does not exist" in message.lower():
-                context["tradable"] = False
-                context["reason"] = "orderbook_not_found"
-            else:
-                context["tradable"] = True
-                context["reason"] = "orderbook_check_failed_allowing"
+            context["tradable"] = False
+            context["reason"] = "orderbook_check_failed"
             return context
 
         try:
@@ -280,7 +240,6 @@ class OrderManager:
 
         available, readiness = self._get_available_balance(
             asset_type="COLLATERAL",
-            use_onchain_fallback=False,
         )
 
         if available < amount:
@@ -385,18 +344,13 @@ class OrderManager:
             row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": "invalid_price"}
             self._append(self.orders_file, row)
             return row, None
-        # Polymarket CLOB hard limits: price must be in [0.01, 0.99].
-        # Clamp rather than reject so marginally out-of-bounds prices (e.g. 0.992
-        # from a stale orderbook snapshot) don't count as failed entries.
+        # FAIL CLOSED: Reject invalid prices instead of clamping.
         _POLY_PRICE_MIN = float(os.getenv("POLY_PRICE_MIN", "0.01"))
         _POLY_PRICE_MAX = float(os.getenv("POLY_PRICE_MAX", "0.99"))
         if price < _POLY_PRICE_MIN or price > _POLY_PRICE_MAX:
-            clamped_price = max(_POLY_PRICE_MIN, min(_POLY_PRICE_MAX, price))
-            logging.warning(
-                "Price %.6f out of Polymarket bounds [%.2f, %.2f] for token %s — clamping to %.6f",
-                price, _POLY_PRICE_MIN, _POLY_PRICE_MAX, str(token_id)[:16], clamped_price,
-            )
-            price = clamped_price
+            row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": "out_of_bounds_price"}
+            self._append(self.orders_file, row)
+            return row, None
         if requested_size is None or requested_size <= 0.0:
             row = {"timestamp": datetime.now(timezone.utc).isoformat(), "order_id": None, "token_id": token_id, "condition_id": condition_id, "outcome_side": outcome_side, "order_side": side, "price": price, "size": size, "order_type": order_type, "post_only": post_only, "execution_style": execution_style, "status": "REJECTED", "reason": "invalid_size"}
             self._append(self.orders_file, row)
@@ -522,76 +476,60 @@ class OrderManager:
                 pass
             return row, None
 
-        # --- DUST PROTECTION PATCH ---
-        if normalized_side == "SELL" and float(order_size_shares) * float(price) < 0.01:
-            import time
-            dedupe_window = int(os.getenv("DUST_CLEAR_DEDUPE_SECONDS", "300") or 300)
-            if self._has_recent_dust_clear(token_id, condition_id, outcome_side, lookback_seconds=dedupe_window):
-                logging.info(
-                    "Skipping duplicate dust clear for %s (recent synthetic clear already recorded within %ss).",
-                    str(token_id)[:16],
-                    dedupe_window,
-                )
-                row = {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "order_id": None,
-                    "idempotency_key": idempotency_key,
-                    "token_id": token_id,
-                    "condition_id": condition_id,
-                    "outcome_side": outcome_side,
-                    "order_side": side,
-                    "price": price,
-                    "size": size,
-                    "size_usdc": notional_usdc,
-                    "order_size_shares": order_size_shares,
-                    "order_type": order_type,
-                    "post_only": post_only,
-                    "execution_style": execution_style,
-                    "status": "SKIPPED",
-                    "reason": "dust_already_cleared_recently",
-                    **market_context,
-                }
-                self._append(self.orders_file, row)
-                return row, {"status": "SKIPPED", "reason": "dust_already_cleared_recently"}
-            logging.info("Silently clearing dust position for %s (Value < $0.01). Skipping API.", str(token_id)[:16])
-            dummy_response = {"status": "FILLED", "orderID": "dust_clear_" + str(int(time.time()))}
-            row = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "order_id": dummy_response["orderID"],
-                "idempotency_key": idempotency_key,
-                "token_id": token_id,
-                "condition_id": condition_id,
-                "outcome_side": outcome_side,
-                "order_side": side,
-                "price": price,
-                "size": size,
-                "size_usdc": notional_usdc,
-                "order_size_shares": order_size_shares,
-                "order_type": order_type,
-                "post_only": post_only,
-                "execution_style": execution_style,
-                "status": "FILLED",
-                **market_context,
-            }
-            self._append(self.orders_file, row)
-            self.db.execute(
-                "INSERT OR REPLACE INTO orders (order_id, token_id, condition_id, outcome_side, order_side, price, size, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (row.get("order_id"), row.get("token_id"), row.get("condition_id"), row.get("outcome_side"), row.get("order_side"), row.get("price"), row.get("size"), row.get("status"), row.get("timestamp")),
-            )
-            # Instantly create a synthetic fill so TradeManager clears the position
-            self.record_fill({
-                "trade_id": "fill_" + dummy_response["orderID"],
-                "order_id": dummy_response["orderID"],
-                "token_id": token_id,
-                "condition_id": condition_id,
-                "outcome_side": outcome_side,
-                "side": side,
-                "price": float(price),
-                "size": float(order_size_shares),
-                "filled_at": row["timestamp"]
-            })
-            return row, dummy_response
-        # -----------------------------
+        # Execution Limits (Fail Closed)
+        max_spread = float(os.getenv("EXEC_STATIC_SPREAD_LIMIT", "0.10"))
+        max_slippage = float(os.getenv("EXEC_STATIC_SLIPPAGE_LIMIT", "0.03"))
+        
+        quoted_price = float(market_context.get("quoted_price", price) or price)
+        quoted_spread = float(market_context.get("quoted_spread", 0.0) or 0.0)
+        
+        if quoted_spread > max_spread:
+             row = {
+                 "timestamp": datetime.now(timezone.utc).isoformat(),
+                 "order_id": None,
+                 "idempotency_key": idempotency_key,
+                 "token_id": token_id,
+                 "condition_id": condition_id,
+                 "outcome_side": outcome_side,
+                 "order_side": side,
+                 "price": price,
+                 "size": size,
+                 "size_usdc": notional_usdc,
+                 "order_size_shares": order_size_shares,
+                 "order_type": order_type,
+                 "post_only": post_only,
+                 "execution_style": execution_style,
+                 "status": "REJECTED",
+                 "reason": "max_spread_exceeded",
+                 "quoted_spread": quoted_spread,
+                 **market_context,
+             }
+             self._append(self.orders_file, row)
+             return row, None
+             
+        if abs(price - quoted_price) > max_slippage:
+             row = {
+                 "timestamp": datetime.now(timezone.utc).isoformat(),
+                 "order_id": None,
+                 "idempotency_key": idempotency_key,
+                 "token_id": token_id,
+                 "condition_id": condition_id,
+                 "outcome_side": outcome_side,
+                 "order_side": side,
+                 "price": price,
+                 "size": size,
+                 "size_usdc": notional_usdc,
+                 "order_size_shares": order_size_shares,
+                 "order_type": order_type,
+                 "post_only": post_only,
+                 "execution_style": execution_style,
+                 "status": "REJECTED",
+                 "reason": "max_slippage_exceeded",
+                 "quoted_price": quoted_price,
+                 **market_context,
+             }
+             self._append(self.orders_file, row)
+             return row, None
         try:
             if str(order_type).upper() == "GTD" and hasattr(self.client, "GTD_order"):
                 expiration = int((datetime.now(timezone.utc).timestamp()) + 3600)
@@ -687,35 +625,6 @@ class OrderManager:
         return self.client.get_order(order_id)
 
     def wait_for_fill(self, order_id, timeout_seconds=20, poll_seconds=2):
-        # Synthetic dust-clear orders are already materialized as fills in submit_entry.
-        # Do not re-record them here, otherwise each poll path duplicates SELL fills
-        # and corrupts live position reconstruction.
-        if order_id and "dust_clear" in str(order_id):
-            db_row = {}
-            try:
-                rows = self.db.query_all(
-                    "SELECT token_id, condition_id, outcome_side, order_side, price, size FROM orders WHERE order_id = ?",
-                    (str(order_id),),
-                )
-                if rows:
-                    db_row = rows[0]
-            except Exception:
-                db_row = {}
-            fill_payload = {
-                "trade_id": f"fill_{order_id}",
-                "order_id": str(order_id),
-                "token_id": db_row.get("token_id", ""),
-                "condition_id": db_row.get("condition_id"),
-                "outcome_side": db_row.get("outcome_side"),
-                "side": db_row.get("order_side"),
-                "price": float(db_row.get("price", 0.0) or 0.0),
-                "size": float(db_row.get("size", 0.0) or 0.0),
-                "filled_at": datetime.now(timezone.utc).isoformat(),
-            }
-            self._update_order_status(str(order_id), "FILLED", fill_price=fill_payload["price"], fill_size=fill_payload["size"])
-            self.risk.record_successful_order()
-            return {"filled": True, "response": fill_payload, "order_status": {"status": "FILLED", "id": str(order_id)}, "synthetic": True}
-
         deadline = time.time() + float(timeout_seconds)
         last_response = None
         while time.time() < deadline:

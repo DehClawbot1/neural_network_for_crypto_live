@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from csv_utils import safe_csv_append
+from performance_governor import coerce_governor_level_int as _coerce_gov_level
 
 
 class BenchmarkStrategy:
@@ -70,7 +71,7 @@ class BenchmarkStrategy:
             "price_below_anchored_vwap": below_vwap,
             "long_fractal_breakout": long_breakout,
             "short_fractal_breakout": short_breakout,
-            "performance_governor_level": int(governor_state.get("governor_level", 0) or 0),
+            "performance_governor_level": _coerce_gov_level(governor_state.get("governor_level", 0)),
             "main_live_win_rate": float(governor_state.get("live_win_rate", 0.0) or 0.0),
             "main_live_profit_factor": float(governor_state.get("live_profit_factor", 0.0) or 0.0),
         }
