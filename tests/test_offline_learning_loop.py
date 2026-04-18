@@ -189,3 +189,40 @@ def test_fill_probability_stability_is_support_weighted():
     stability = loop._family_stability(frame, "_edge", "fill_probability")
 
     assert abs(stability - 1.0) < 1e-9
+
+
+def test_supported_model_names_are_family_specific():
+    loop = OfflineLearningLoop()
+
+    assert loop._family_config("btc").supported_models == (
+        "entry_edge",
+        "fill_probability",
+        "slippage_liquidity",
+        "exit_quality",
+        "regime_calibration",
+    )
+    assert loop._family_config("weather_temperature").supported_models == (
+        "entry_edge",
+        "exit_quality",
+        "regime_calibration",
+    )
+
+
+def test_weather_exit_quality_uses_family_specific_gate_thresholds():
+    loop = OfflineLearningLoop()
+    candidate = PromotionGateMetrics(
+        sample_size=140,
+        sharpe_like=0.1,
+        max_drawdown=-0.2,
+        calibration_error=0.30,
+        fill_adjusted_edge=0.05,
+        family_stability=0.40,
+    )
+
+    btc_passed, btc_reason = loop._hard_promotion_gate("exit_quality", candidate, None, family="btc")
+    weather_passed, weather_reason = loop._hard_promotion_gate("exit_quality", candidate, None, family="weather_temperature")
+
+    assert btc_passed is False
+    assert "calibration_error" in btc_reason or "family_stability" in btc_reason
+    assert weather_passed is True
+    assert weather_reason == "no_incumbent_hard_gate_pass"

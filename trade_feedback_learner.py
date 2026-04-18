@@ -13,6 +13,18 @@ import pandas as pd
 from db import Database
 from trade_quality import build_quality_context, enrich_quality_frame
 
+# Edge calibrator — loaded once, used inside apply_to_scored_df()
+try:
+    from edge_calibrator import EdgeCalibrator as _EdgeCalibrator
+except ImportError:
+    _EdgeCalibrator = None
+
+# Recency weighting — decayed + shrinkage estimator replacing tail(N) mean
+try:
+    from recency_weighting import make_scoped_store as _make_scoped_store
+except ImportError:
+    _make_scoped_store = None
+
 # Phase 2 — Feedback Attribution (lazy import avoids circular dependency)
 def _get_attribution_engine(logs_dir):
     try:
@@ -300,24 +312,59 @@ class TradeFeedbackLearner:
             ]
         )
 
-    def _compute_feedback_factors(self, group: pd.DataFrame):
+    def _compute_feedback_factors(
+        self,
+        group: pd.DataFrame,
+        win_rate_override: float | None = None,
+        avg_roi_override: float | None = None,
+        credibility: float = 1.0,
+    ):
+        """
+        Compute diagnostic feedback multipliers for a group of trades.
+
+        win_rate_override / avg_roi_override: pre-computed Bayesian posterior
+        values from ScopedRecencyStore.  If provided, these are used instead
+        of the raw group mean — they already encode decay, shrinkage, and the
+        minimum sample gate.
+
+        credibility: [0, 1] from the recency estimator.  Stored in the output
+        row so consumers can see how much to trust this estimate.  The
+        multipliers themselves are NOT applied to live trading — they are
+        diagnostic features for the retraining pipeline.
+        """
         count = len(group.index)
         realized_pnl = self._numeric_series(group, "realized_pnl", default=0.0)
         roi = self._numeric_series(group, "roi", default=0.0)
-        win_rate = self._safe_float((realized_pnl > 0).mean(), 0.5)
-        avg_roi = self._safe_float(roi.mean(), 0.0)
 
-        confidence_multiplier = np.clip(1.0 + ((win_rate - 0.5) * 0.40) + np.clip(avg_roi, -0.25, 0.25) * 0.20, 0.85, 1.15)
-        expected_return_multiplier = np.clip(1.0 + ((win_rate - 0.5) * 0.60) + np.clip(avg_roi, -0.25, 0.25) * 0.35, 0.80, 1.20)
-        edge_multiplier = np.clip((confidence_multiplier * 0.45) + (expected_return_multiplier * 0.55), 0.80, 1.20)
+        # Use Bayesian posterior if available, else raw group mean
+        if win_rate_override is not None:
+            win_rate = float(win_rate_override)
+        else:
+            win_rate = self._safe_float((realized_pnl > 0).mean(), 0.5)
+
+        if avg_roi_override is not None:
+            avg_roi = float(avg_roi_override)
+        else:
+            avg_roi = self._safe_float(roi.mean(), 0.0)
+
+        confidence_multiplier = np.clip(
+            1.0 + ((win_rate - 0.5) * 0.40) + np.clip(avg_roi, -0.25, 0.25) * 0.20, 0.85, 1.15
+        )
+        expected_return_multiplier = np.clip(
+            1.0 + ((win_rate - 0.5) * 0.60) + np.clip(avg_roi, -0.25, 0.25) * 0.35, 0.80, 1.20
+        )
+        edge_multiplier = np.clip(
+            (confidence_multiplier * 0.45) + (expected_return_multiplier * 0.55), 0.80, 1.20
+        )
 
         return {
-            "sample_count": int(count),
-            "win_rate": round(win_rate, 4),
-            "avg_roi": round(avg_roi, 6),
-            "confidence_multiplier": round(float(confidence_multiplier), 4),
+            "sample_count":               int(count),
+            "win_rate":                   round(win_rate, 4),
+            "avg_roi":                    round(avg_roi, 6),
+            "credibility":                round(credibility, 4),
+            "confidence_multiplier":      round(float(confidence_multiplier), 4),
             "expected_return_multiplier": round(float(expected_return_multiplier), 4),
-            "edge_multiplier": round(float(edge_multiplier), 4),
+            "edge_multiplier":            round(float(edge_multiplier), 4),
         }
 
     def _refresh_summary(self):
@@ -325,8 +372,7 @@ class TradeFeedbackLearner:
         if reports_df.empty:
             return pd.DataFrame()
 
-        lookback = max(5, int(os.getenv("TRADE_FEEDBACK_LOOKBACK", "50") or 50))
-        min_samples = max(2, int(os.getenv("TRADE_FEEDBACK_MIN_SAMPLES", "3") or 3))
+        lookback = max(5, int(os.getenv("TRADE_FEEDBACK_LOOKBACK", "200") or 200))
 
         work = reports_df.copy()
         work = enrich_quality_frame(work, logs_dir=self.logs_dir)
@@ -341,10 +387,33 @@ class TradeFeedbackLearner:
         if "closed_at" in work.columns:
             work["closed_at"] = pd.to_datetime(work["closed_at"], utc=True, errors="coerce")
             work = work.sort_values("closed_at")
-        recent = work.tail(lookback).copy()
+        work = work.tail(lookback).copy()
+
+        # ── Build ScopedRecencyStore for the whole window ──────────────────
+        # This gives us Bayesian-shrunk win rates and mean PnL per scope.
+        # Falls back to raw means if recency_weighting is unavailable.
+        _store = None
+        _family = str(work.get("market_family", pd.Series(["btc"])).iloc[0] if "market_family" in work.columns else "btc")
+        _family_key = "btc" if "weather" not in _family.lower() else "weather_temperature"
+        if _make_scoped_store is not None:
+            try:
+                _store = _make_scoped_store(_family_key)
+                _store.ingest(work)
+            except Exception as exc:
+                logging.warning("[TFL] ScopedRecencyStore failed: %s — using raw means", exc)
+                _store = None
+
         summary_rows = []
 
-        overall = self._compute_feedback_factors(recent)
+        # Overall
+        _overall_wr, _overall_cred = (_store._family_est.win_rate() if _store else (None, 1.0))
+        _overall_pnl, _ = (_store._family_est.avg_pnl() if _store else (None, 1.0))
+        overall = self._compute_feedback_factors(
+            work,
+            win_rate_override=_overall_wr,
+            avg_roi_override=_overall_pnl,
+            credibility=_overall_cred,
+        )
         summary_rows.append({
             "scope": "overall",
             "scope_value": "overall",
@@ -352,16 +421,34 @@ class TradeFeedbackLearner:
             "generated_at": datetime.now(timezone.utc).isoformat(),
         })
 
-        for scope in ["signal_label", "market_family", "horizon_bucket", "liquidity_bucket", "volatility_bucket", "technical_regime_bucket", "exit_reason_family"]:
-            if scope not in recent.columns:
+        # Per-scope — use Bayesian posterior from store; only emit rows that
+        # have at least min_eff_samples effective weight (enforced inside store)
+        _scopes = [
+            "signal_label", "market_family", "horizon_bucket",
+            "liquidity_bucket", "volatility_bucket",
+            "technical_regime_bucket", "exit_reason_family",
+        ]
+        for scope in _scopes:
+            if scope not in work.columns:
                 continue
-            for scope_value, group in recent.groupby(scope, dropna=True):
-                if len(group.index) < min_samples:
-                    continue
+            for scope_value, group in work.groupby(scope, dropna=True):
+                sv = str(scope_value)
+                if _store is not None:
+                    wr, cred  = _store.win_rate(scope, sv)
+                    mu, _     = _store.avg_pnl(scope, sv)
+                    reliable  = _store.is_reliable(scope, sv)
+                else:
+                    realized  = self._numeric_series(group, "realized_pnl", default=0.0)
+                    wr        = self._safe_float((realized > 0).mean(), 0.5)
+                    mu        = None
+                    cred      = 1.0
+                    reliable  = len(group) >= 15  # fallback minimum
+
                 summary_rows.append({
-                    "scope": scope,
-                    "scope_value": str(scope_value),
-                    **self._compute_feedback_factors(group),
+                    "scope":       scope,
+                    "scope_value": sv,
+                    "is_reliable": reliable,
+                    **self._compute_feedback_factors(group, win_rate_override=wr, avg_roi_override=mu, credibility=cred),
                     "generated_at": datetime.now(timezone.utc).isoformat(),
                 })
 
@@ -610,14 +697,28 @@ class TradeFeedbackLearner:
                 for _, scope_row in pain_summary_df.iterrows():
                     pain_scope_rows[(str(scope_row.get("scope")), str(scope_row.get("scope_value")))] = scope_row.to_dict()
 
+        # Load edge calibrator once for this batch (process-level cache)
+        _calibrator = None
+        if _EdgeCalibrator is not None:
+            try:
+                _market_family = scored_df["market_family"].iloc[0] if "market_family" in scored_df.columns else "btc"
+                _family_key = "btc" if "weather" not in str(_market_family).lower() else "weather_temperature"
+                _calibrator = _EdgeCalibrator.load(_family_key)
+            except Exception:
+                pass
+
         adjusted_rows = []
         for _, row in scored_df.iterrows():
             working = row.to_dict()
             quality_context = build_quality_context(working)
 
-            conf_mult = self._safe_float(overall_row.get("confidence_multiplier"), 1.0)
-            ret_mult = self._safe_float(overall_row.get("expected_return_multiplier"), 1.0)
-            edge_mult = self._safe_float(overall_row.get("edge_multiplier"), 1.0)
+            # ── Compute legacy heuristic multipliers for DIAGNOSTIC COLUMNS only ──
+            # These are no longer applied to edge_score or expected_return.
+            # They are preserved as feedback_* columns so they remain available
+            # as features for retraining (the learning loop will pick them up).
+            conf_mult_legacy = self._safe_float(overall_row.get("confidence_multiplier"), 1.0)
+            ret_mult_legacy = self._safe_float(overall_row.get("expected_return_multiplier"), 1.0)
+            edge_mult_legacy = self._safe_float(overall_row.get("edge_multiplier"), 1.0)
             pain_conf_mult = self._safe_float(pain_overall_row.get("confidence_multiplier"), 1.0)
             pain_ret_mult = self._safe_float(pain_overall_row.get("expected_return_multiplier"), 1.0)
             pain_edge_mult = self._safe_float(pain_overall_row.get("edge_multiplier"), 1.0)
@@ -626,48 +727,69 @@ class TradeFeedbackLearner:
                 scope_value = str(working.get(scope, quality_context.get(scope, "")) or "")
                 scope_ctx = scope_rows.get((scope, scope_value), {})
                 pain_ctx = pain_scope_rows.get((scope, scope_value), {})
-                conf_mult *= self._safe_float(scope_ctx.get("confidence_multiplier"), 1.0)
-                ret_mult *= self._safe_float(scope_ctx.get("expected_return_multiplier"), 1.0)
-                edge_mult *= self._safe_float(scope_ctx.get("edge_multiplier"), 1.0)
+                conf_mult_legacy *= self._safe_float(scope_ctx.get("confidence_multiplier"), 1.0)
+                ret_mult_legacy *= self._safe_float(scope_ctx.get("expected_return_multiplier"), 1.0)
+                edge_mult_legacy *= self._safe_float(scope_ctx.get("edge_multiplier"), 1.0)
                 pain_conf_mult *= self._safe_float(pain_ctx.get("confidence_multiplier"), 1.0)
                 pain_ret_mult *= self._safe_float(pain_ctx.get("expected_return_multiplier"), 1.0)
                 pain_edge_mult *= self._safe_float(pain_ctx.get("edge_multiplier"), 1.0)
 
-            conf_mult *= pain_conf_mult
-            ret_mult *= pain_ret_mult
-            edge_mult *= pain_edge_mult
-
-            working["pre_feedback_confidence"] = self._safe_float(working.get("confidence"), 0.0)
-            working["pre_feedback_expected_return"] = self._safe_float(working.get("expected_return"), 0.0)
-            working["feedback_confidence_multiplier"] = round(conf_mult, 4)
-            working["feedback_expected_return_multiplier"] = round(ret_mult, 4)
-            working["feedback_edge_multiplier"] = round(edge_mult, 4)
             signal_scope_ctx = scope_rows.get(("signal_label", str(working.get("signal_label", "") or "")), {})
             signal_pain_ctx = pain_scope_rows.get(("signal_label", str(working.get("signal_label", "") or "")), {})
+
+            # ── Calibrated edge adjustment (replaces applied multiplier chain) ──
+            # EdgeCalibrator.adjust() computes the historically realised fraction
+            # of predicted edge in this regime × spread × liquidity × vol context.
+            calibrated_edge_factor = 1.0
+            if _calibrator is not None:
+                try:
+                    calibrated_edge_factor = _calibrator.adjust(working)
+                except Exception:
+                    calibrated_edge_factor = 1.0
+
+            # ── Store diagnostics — these become retraining features ──
+            working["pre_feedback_confidence"] = self._safe_float(working.get("confidence"), 0.0)
+            working["pre_feedback_expected_return"] = self._safe_float(working.get("expected_return"), 0.0)
+            # Legacy multipliers: diagnostic only — NOT applied
+            working["feedback_confidence_multiplier"] = round(conf_mult_legacy * pain_conf_mult, 4)
+            working["feedback_expected_return_multiplier"] = round(ret_mult_legacy * pain_ret_mult, 4)
+            working["feedback_edge_multiplier"] = round(edge_mult_legacy * pain_edge_mult, 4)
             working["feedback_recent_win_rate"] = self._safe_float(signal_scope_ctx.get("win_rate"), self._safe_float(overall_row.get("win_rate"), 0.5))
             working["feedback_open_pain_score"] = self._safe_float(signal_pain_ctx.get("pain_score"), self._safe_float(pain_overall_row.get("pain_score"), 0.0))
             working["feedback_open_pain_rate"] = self._safe_float(signal_pain_ctx.get("pain_rate"), self._safe_float(pain_overall_row.get("pain_rate"), 0.0))
+            working["calibrated_edge_factor"] = round(calibrated_edge_factor, 4)
 
-            working["expected_return"] = self._safe_float(working.get("expected_return"), 0.0) * ret_mult
-            working["edge_score"] = self._safe_float(working.get("edge_score"), 0.0) * edge_mult
+            # ── Apply ONLY the calibrated factor to edge and return ──
+            working["expected_return"] = self._safe_float(working.get("expected_return"), 0.0) * calibrated_edge_factor
+            working["edge_score"] = self._safe_float(working.get("edge_score"), 0.0) * calibrated_edge_factor
 
             rescored = signal_engine.score_row(working)
             p_tp = self._safe_float(rescored.get("p_tp_before_sl"), 0.0)
             exp_ret = self._safe_float(rescored.get("expected_return"), 0.0)
             edge_score = self._safe_float(rescored.get("edge_score"), 0.0)
+
+            # Confidence cap: derived from calibrated edge sign, not heuristic
+            # thresholds.  If the calibrated edge is negative, cap confidence
+            # proportionally — the cap is itself a function of how negative.
             confidence_cap = 1.0
             if exp_ret <= 0 or edge_score <= 0 or p_tp < 0.52:
-                confidence_cap = min(confidence_cap, 0.59)
+                # Soft cap proportional to how far below threshold we are
+                severity = abs(min(exp_ret, 0.0)) + abs(min(edge_score, 0.0))
+                confidence_cap = max(0.35, 0.59 - min(severity * 2.0, 0.24))
             if exp_ret < 0 and p_tp < 0.48:
                 confidence_cap = min(confidence_cap, 0.44)
 
-            rescored["confidence"] = round(min(confidence_cap, max(0.0, self._safe_float(rescored.get("confidence"), 0.0) * conf_mult)), 4)
+            # Confidence itself is NOT multiplied — only the cap moves.
+            # Reduces the degree to which a bad edge can silently pass through.
+            rescored["confidence"] = round(
+                min(confidence_cap, max(0.0, self._safe_float(rescored.get("confidence"), 0.0))),
+                4,
+            )
             rescored = self._relabel(rescored, signal_engine.LABELS)
             rescored["reason"] = (
                 f"{rescored.get('reason')} | "
                 f"feedback_wr={self._safe_float(rescored.get('feedback_recent_win_rate'), 0.5):.2f}, "
-                f"feedback_conf_mult={self._safe_float(conf_mult, 1.0):.2f}, "
-                f"feedback_ret_mult={self._safe_float(ret_mult, 1.0):.2f}, "
+                f"calib_edge_factor={calibrated_edge_factor:.3f}, "
                 f"open_pain={self._safe_float(rescored.get('feedback_open_pain_score'), 0.0):.2f}"
             )
             adjusted_rows.append(rescored)

@@ -4,12 +4,24 @@ import numpy as np
 import pandas as pd
 
 
+# Model blend weights — used for combining legacy/stage1/stage2 predictions.
+# The old "multiplier" key was a hand-tuned edge adjustment applied at runtime.
+# It has been REMOVED from live inference.  Edge adjustment is now done by
+# EdgeCalibrator.adjust(row) which derives the factor from realized outcome data.
+# The "multiplier" field is kept at 1.0 so any legacy consumers get a no-op value.
 REGIME_MODEL_WEIGHTS = {
-    "calm": {"legacy": 0.45, "stage1": 0.35, "stage2": 0.20, "multiplier": 1.02},
-    "trend": {"legacy": 0.20, "stage1": 0.45, "stage2": 0.35, "multiplier": 1.08},
-    "volatile": {"legacy": 0.15, "stage1": 0.40, "stage2": 0.45, "multiplier": 0.94},
-    "chaotic": {"legacy": 0.35, "stage1": 0.25, "stage2": 0.40, "multiplier": 0.72},
+    "calm":     {"legacy": 0.45, "stage1": 0.35, "stage2": 0.20, "multiplier": 1.0},
+    "trend":    {"legacy": 0.20, "stage1": 0.45, "stage2": 0.35, "multiplier": 1.0},
+    "volatile": {"legacy": 0.15, "stage1": 0.40, "stage2": 0.45, "multiplier": 1.0},
+    "chaotic":  {"legacy": 0.35, "stage1": 0.25, "stage2": 0.40, "multiplier": 1.0},
 }
+# Calibrated edge factor is computed by EdgeCalibrator (edge_calibrator.py) and
+# stored as btc_market_regime_confidence_multiplier using data-derived adjustment.
+try:
+    from edge_calibrator import EdgeCalibrator as _EdgeCalibrator
+    _edge_calibrator = _EdgeCalibrator.load("btc")
+except Exception:
+    _edge_calibrator = None
 
 
 def _safe_float(value, default=0.0):
@@ -112,6 +124,22 @@ def classify_btc_regime_row(row: dict | pd.Series) -> dict:
     weights = REGIME_MODEL_WEIGHTS[label]
     primary_model = max(("legacy", "stage1", "stage2"), key=lambda key: weights[key])
 
+    # Calibrated edge factor: derived from EdgeCalibrator trained on realized outcome
+    # data, not from hand-tuned REGIME_MODEL_WEIGHTS["multiplier"].
+    # Stored in btc_market_regime_confidence_multiplier so downstream consumers
+    # receive a data-derived value instead of a hardcoded one.
+    calibrated_factor = 1.0
+    if _edge_calibrator is not None:
+        try:
+            calibrated_factor = _edge_calibrator.adjust({
+                "technical_regime_bucket": label,
+                "spread_bps": row.get("btc_live_spread_bps") if hasattr(row, "get") else None,
+                "liquidity_score": row.get("btc_live_liquidity_score") if hasattr(row, "get") else None,
+                "btc_volatility_24h": row.get("btc_realized_vol_4h") if hasattr(row, "get") else None,
+            })
+        except Exception:
+            calibrated_factor = 1.0
+
     return {
         "btc_market_regime_label": label,
         "btc_market_regime_score": round(_clip01(confidence), 6),
@@ -124,7 +152,8 @@ def classify_btc_regime_row(row: dict | pd.Series) -> dict:
         "btc_market_regime_is_volatile": 1 if label == "volatile" else 0,
         "btc_market_regime_is_chaotic": 1 if label == "chaotic" else 0,
         "btc_market_regime_primary_model": primary_model,
-        "btc_market_regime_confidence_multiplier": float(weights["multiplier"]),
+        # calibrated_edge_factor: data-derived (replaces old hand-tuned multiplier)
+        "btc_market_regime_confidence_multiplier": round(calibrated_factor, 4),
         "btc_market_regime_weight_legacy": float(weights["legacy"]),
         "btc_market_regime_weight_stage1": float(weights["stage1"]),
         "btc_market_regime_weight_stage2": float(weights["stage2"]),

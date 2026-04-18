@@ -15,6 +15,19 @@ from trade_quality import classify_exit_reason_family
 
 logger = logging.getLogger(__name__)
 
+# Recency weighting — Bayesian estimator with exponential decay + shrinkage
+try:
+    from recency_weighting import make_family_estimator as _make_family_estimator
+except ImportError:
+    _make_family_estimator = None
+
+# GovernorThresholdCalibrator — derives data-driven thresholds from canonical data.
+# Loaded lazily so the governor still works if edge_calibrator is not yet trained.
+try:
+    from edge_calibrator import GovernorThresholdCalibrator as _GovernorThresholdCalibrator
+except ImportError:
+    _GovernorThresholdCalibrator = None
+
 # Base levels definition dict
 _LEVEL_POLICY_DEFAULT = {
     "size_multiplier": 1.0,
@@ -250,38 +263,95 @@ class FamilyPerformanceGovernor(BaseGovernor):
 
         if df.empty or len(df) < 10:
             return {**_get_level_policy("0"), "governor_level": "0", "reason": "insufficient_data"}
-            
-        # EWMA weighting over the last 100 trades to smooth out small localized spikes
-        recent = df.tail(100).copy()
-        
-        pnl = pd.to_numeric(recent.get("net_realized_pnl", recent.get("realized_pnl")), errors="coerce").fillna(0.0)
-        
-        wins = (pnl > 0).astype(float)
-        # Simple EWMA win rate (span 30)
-        win_rate_ewma = float(wins.ewm(span=30, adjust=False).mean().iloc[-1]) if not wins.empty else 0.0
-        
-        running = pnl.cumsum()
-        peak = running.cummax()
-        drawdown = float((peak - running).max()) if not running.empty else 0.0
-        
-        avg_pnl_ewma = float(pnl.ewm(span=30, adjust=False).mean().iloc[-1]) if not pnl.empty else 0.0
-        
-        edge_decay = self._calculate_edge_decay(recent.tail(25))
+
+        # ── Bayesian recency estimator ────────────────────────────────────────
+        # Replaces raw EWMA win rate + tail(25) edge decay.
+        # FamilyRecencyEstimator applies exponential decay (half_life=25 trades),
+        # a minimum effective sample threshold (n_eff >= 15), and Bayesian
+        # shrinkage toward the family prior — so 5 bad trades in a row cannot
+        # move the governor unless total effective sample size is large enough.
+        _use_recency = _make_family_estimator is not None
+        _recency_summary = {}
+        if _use_recency:
+            try:
+                _est = _make_family_estimator(self.family)
+                _est.ingest(df)
+
+                win_rate_ewma   = _est.governor_win_rate()
+                avg_pnl_ewma, _ = _est.avg_pnl()
+                edge_decay      = _est.governor_edge_decay()
+
+                # Convert fraction drawdown → absolute $ for legacy threshold comparison.
+                # Legacy thresholds are in $ (30, 50, 75); scale by median |PnL| × 100.
+                _pnl_col_raw = df["net_realized_pnl"] if "net_realized_pnl" in df.columns \
+                               else df.get("realized_pnl", pd.Series(dtype=float))
+                _pnl_scale = float(pd.to_numeric(_pnl_col_raw, errors="coerce").abs().median() or 1.0)
+                drawdown = _est.governor_drawdown() * max(1.0, _pnl_scale * 100)
+
+                _recency_summary = {
+                    "recency_n_eff":        round(_est.n_eff(), 2),
+                    "recency_credibility":  round(_est._wr_est.credibility, 4),
+                    "recency_is_reliable":  _est.is_reliable(),
+                }
+                logger.debug("[Governor/%s] recency: n_eff=%.1f  cred=%.3f  wr=%.3f",
+                             self.family, _est.n_eff(), _est._wr_est.credibility, win_rate_ewma)
+            except Exception as _exc:
+                logger.warning("[Governor/%s] recency estimator failed, falling back to EWMA: %s",
+                               self.family, _exc)
+                _use_recency = False
+
+        if not _use_recency:
+            # Legacy fallback — raw EWMA (used only when recency_weighting unavailable)
+            recent = df.tail(100).copy()
+            pnl = pd.to_numeric(
+                recent.get("net_realized_pnl", recent.get("realized_pnl")),
+                errors="coerce"
+            ).fillna(0.0)
+            wins = (pnl > 0).astype(float)
+            win_rate_ewma = float(wins.ewm(span=30, adjust=False).mean().iloc[-1]) if not wins.empty else 0.0
+            running  = pnl.cumsum()
+            peak     = running.cummax()
+            drawdown = float((peak - running).max()) if not running.empty else 0.0
+            avg_pnl_ewma = float(pnl.ewm(span=30, adjust=False).mean().iloc[-1]) if not pnl.empty else 0.0
+            edge_decay = self._calculate_edge_decay(df.tail(25))
 
         failures_2B = []
         failures_2A = []
         failures_1 = []
 
-        # BTC Specific Limits vs Weather Specific Limits
-        if "btc" in self.family:
+        # Thresholds: prefer calibrated values derived from historical data.
+        # GovernorThresholdCalibrator (edge_calibrator.py) loads persisted JSON
+        # written by the offline training loop. Falls back to hardcoded defaults
+        # so the governor degrades gracefully when no calibration artifact exists.
+        _calibrated = None
+        if _GovernorThresholdCalibrator is not None:
+            try:
+                _calibrated = _GovernorThresholdCalibrator.load_thresholds(
+                    self.family, weights_dir=str(self.logs_dir.parent / "weights")
+                )
+            except Exception:
+                pass
+
+        if _calibrated:
+            min_wr_1  = _calibrated.get("min_wr_1",  0.38 if "btc" in self.family else 0.30)
+            min_wr_2A = _calibrated.get("min_wr_2A", 0.32 if "btc" in self.family else 0.25)
+            min_wr_2B = _calibrated.get("min_wr_2B", 0.28 if "btc" in self.family else 0.20)
+            max_dd_1  = _calibrated.get("max_dd_1",  30.0 if "btc" in self.family else 25.0)
+            max_dd_2A = _calibrated.get("max_dd_2A", 50.0 if "btc" in self.family else 40.0)
+            max_dd_2B = _calibrated.get("max_dd_2B", 75.0 if "btc" in self.family else 60.0)
+            max_decay_1  = _calibrated.get("max_decay_1",  0.01 if "btc" in self.family else 0.02)
+            max_decay_2A = _calibrated.get("max_decay_2A", 0.025 if "btc" in self.family else 0.04)
+            logger.debug("[Governor/%s] using calibrated thresholds (n=%s)", self.family, _calibrated.get("n_rows", "?"))
+        elif "btc" in self.family:
+            # BTC hardcoded fallback
             min_wr_1, min_wr_2A, min_wr_2B = 0.38, 0.32, 0.28
             max_dd_1, max_dd_2A, max_dd_2B = 30.0, 50.0, 75.0
-            max_decay_1, max_decay_2A = 0.01, 0.025 # 1% and 2.5% edge gap
+            max_decay_1, max_decay_2A = 0.01, 0.025
         else:
-            # Weather generally has lower win rate binary bets, so lower tolerance thresholds
+            # Weather hardcoded fallback
             min_wr_1, min_wr_2A, min_wr_2B = 0.30, 0.25, 0.20
             max_dd_1, max_dd_2A, max_dd_2B = 25.0, 40.0, 60.0
-            max_decay_1, max_decay_2A = 0.02, 0.04 # Wider spreads
+            max_decay_1, max_decay_2A = 0.02, 0.04
             
         if win_rate_ewma < min_wr_2B: failures_2B.append("alpha_win_rate_2B")
         if drawdown > max_dd_2B: failures_2B.append("alpha_drawdown_2B")
@@ -314,6 +384,7 @@ class FamilyPerformanceGovernor(BaseGovernor):
             "family_win_rate": round(win_rate_ewma, 4),
             "family_drawdown": round(drawdown, 2),
             "family_edge_decay": round(edge_decay, 4),
+            **_recency_summary,   # n_eff, credibility, is_reliable
         }
         
         state = self._apply_drift_overrides(state)

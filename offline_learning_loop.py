@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import shutil
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 import joblib
@@ -39,6 +40,21 @@ class PromotionGateMetrics:
     calibration_error: float
     fill_adjusted_edge: float
     family_stability: float
+
+
+@dataclass(frozen=True)
+class FamilyLoopConfig:
+    family: str
+    supported_models: tuple[str, ...]
+    validation_splits: int
+    dataset_policy: str
+    target_policy: str
+    promotion_policy: str
+    required_live_entry_models: tuple[str, ...] = field(default_factory=tuple)
+    required_live_exit_models: tuple[str, ...] = field(default_factory=tuple)
+    live_scope_policy: str = "approved_models_only"
+    gate_defaults: dict[str, float] = field(default_factory=dict)
+    task_gate_overrides: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
 def _safe_float(value, default: float = float("nan")) -> float:
@@ -87,6 +103,71 @@ class OfflineLearningLoop:
         self.min_family_stability = float(__import__("os").getenv("OFFLINE_PROMOTION_MIN_FAMILY_STABILITY", "0.45"))
         self.min_stability_group_size = int(float(__import__("os").getenv("OFFLINE_PROMOTION_MIN_STABILITY_GROUP_SIZE", "5")))
         self.metric_epsilon = float(__import__("os").getenv("OFFLINE_PROMOTION_METRIC_EPSILON", "1e-6"))
+        self.family_configs = self._build_family_configs()
+
+    def _build_family_configs(self) -> dict[str, FamilyLoopConfig]:
+        btc_defaults = {
+            "min_sample_size": float(self.min_sample_size),
+            "min_sharpe_delta": float(self.min_sharpe_delta),
+            "max_calibration_error": float(self.max_calibration_error),
+            "min_fill_adjusted_edge": float(self.min_fill_adjusted_edge),
+            "min_family_stability": float(self.min_family_stability),
+            "min_stability_group_size": float(self.min_stability_group_size),
+        }
+        weather_defaults = {
+            "min_sample_size": 120.0,
+            "min_sharpe_delta": 0.0,
+            "max_calibration_error": 0.25,
+            "min_fill_adjusted_edge": 0.0,
+            "min_family_stability": 0.55,
+            "min_stability_group_size": 12.0,
+        }
+        return {
+            "btc": FamilyLoopConfig(
+                family="btc",
+                supported_models=("entry_edge", "fill_probability", "slippage_liquidity", "exit_quality", "regime_calibration"),
+                validation_splits=5,
+                dataset_policy="closed_trade_attribution_spine",
+                target_policy="realized_trade_outcomes_with_clean_execution_filters",
+                promotion_policy="full_multi-task_promotion_with_execution-aware_gates",
+                required_live_entry_models=("entry_edge", "fill_probability", "slippage_liquidity", "regime_calibration"),
+                required_live_exit_models=("exit_quality",),
+                live_scope_policy="btc_full_stack_required_for_live_entries",
+                gate_defaults=btc_defaults,
+                task_gate_overrides={
+                    "fill_probability": {"min_family_stability": 0.45},
+                    "slippage_liquidity": {"min_family_stability": 0.45},
+                    "exit_quality": {"min_family_stability": 0.45},
+                },
+            ),
+            "weather_temperature": FamilyLoopConfig(
+                family="weather_temperature",
+                supported_models=("entry_edge", "exit_quality", "regime_calibration"),
+                validation_splits=3,
+                dataset_policy="resolved_contract_bootstrap_spine",
+                target_policy="resolved_contract_labels_without_synthetic_execution",
+                promotion_policy="forecast_and_regime_only_until_weather_execution_history_exists",
+                required_live_entry_models=("entry_edge", "regime_calibration"),
+                required_live_exit_models=("exit_quality",),
+                live_scope_policy="weather_forecast_and_regime_only_until_execution_models_exist",
+                gate_defaults=weather_defaults,
+                task_gate_overrides={
+                    "entry_edge": {"min_family_stability": 0.60, "min_sample_size": 120.0},
+                    "exit_quality": {"max_calibration_error": 0.35, "min_family_stability": 0.35, "min_sample_size": 120.0},
+                    "regime_calibration": {"min_family_stability": 0.80, "min_sample_size": 120.0},
+                },
+            ),
+        }
+
+    def _family_config(self, family: str) -> FamilyLoopConfig:
+        normalized = str(family or "").strip().lower()
+        return self.family_configs.get(normalized, self.family_configs["btc"])
+
+    def _gate_value(self, family: str, model_name: str, key: str) -> float:
+        config = self._family_config(family)
+        if model_name in config.task_gate_overrides and key in config.task_gate_overrides[model_name]:
+            return float(config.task_gate_overrides[model_name][key])
+        return float(config.gate_defaults[key])
 
     def _candidate_dir(self, family: str) -> Path:
         path = self.weights_dir / "_offline_candidates" / family
@@ -180,10 +261,26 @@ class OfflineLearningLoop:
             return float("nan")
         return float(((grouped["count"] / total) * (grouped["p_mean"] - grouped["y_mean"]).abs()).sum())
 
-    def _family_stability(self, frame: pd.DataFrame, edge_col: str, model_name: str) -> float:
+    def _family_stability(self, frame: pd.DataFrame, edge_col: str, model_name: str, family: str = "btc") -> float:
         if edge_col not in frame.columns:
             return float("nan")
-        if model_name == "entry_edge":
+        family = str(family or "").strip().lower()
+        if family.startswith("weather"):
+            if model_name == "entry_edge":
+                grouping_candidates = [
+                    ("weather_location", "weather_question_type"),
+                    ("technical_regime_bucket",),
+                    ("signal_label",),
+                    ("market_family",),
+                ]
+            else:
+                grouping_candidates = [
+                    ("weather_location", "technical_regime_bucket"),
+                    ("technical_regime_bucket",),
+                    ("weather_question_type",),
+                    ("market_family",),
+                ]
+        elif model_name == "entry_edge":
             grouping_candidates = [
                 ("technical_regime_bucket",),
                 ("market_family", "technical_regime_bucket"),
@@ -210,7 +307,8 @@ class OfflineLearningLoop:
         grouped = frame.groupby(group_cols)[edge_col].agg(["mean", "size"])
         if grouped.empty:
             return float("nan")
-        grouped = grouped[grouped["size"] >= self.min_stability_group_size].copy()
+        min_group_size = int(self._gate_value(family, model_name, "min_stability_group_size"))
+        grouped = grouped[grouped["size"] >= min_group_size].copy()
         if grouped.empty:
             return float("nan")
         if model_name in {"fill_probability", "slippage_liquidity", "exit_quality"}:
@@ -253,7 +351,7 @@ class OfflineLearningLoop:
             sharpe_like, max_drawdown = self._equity_curve_stats(correct - correct.mean())
             calibration_error = float("nan")
             fill_adjusted_edge = float(correct.mean()) if len(correct) else float("nan")
-            family_stability = self._family_stability(frame.assign(_edge=correct), "_edge", model_name)
+            family_stability = self._family_stability(frame.assign(_edge=correct), "_edge", model_name, family=str(frame.get("market_family", pd.Series(["btc"])).astype(str).iloc[0] if len(frame) else "btc"))
             return PromotionGateMetrics(
                 sample_size=int(len(frame)),
                 sharpe_like=sharpe_like,
@@ -289,7 +387,8 @@ class OfflineLearningLoop:
         else:
             fill_adjusted_edge = float((edge_series * fill_success.where(fill_success.notna(), 1.0)).mean()) if len(edge_series) else float("nan")
             stability_series = edge_series
-        family_stability = self._family_stability(frame.assign(_edge=stability_series), "_edge", model_name)
+        family_name = "weather_temperature" if is_weather else "btc"
+        family_stability = self._family_stability(frame.assign(_edge=stability_series), "_edge", model_name, family=family_name)
 
         return PromotionGateMetrics(
             sample_size=int(len(frame)),
@@ -305,22 +404,28 @@ class OfflineLearningLoop:
         model_name: str,
         candidate: PromotionGateMetrics,
         incumbent: PromotionGateMetrics | None,
+        *,
+        family: str = "btc",
     ) -> tuple[bool, str]:
-        if candidate.sample_size < self.min_sample_size:
-            return False, f"sample_size {candidate.sample_size} < {self.min_sample_size}"
-        if not np.isnan(candidate.calibration_error) and candidate.calibration_error > self.max_calibration_error:
-            return False, f"calibration_error {candidate.calibration_error:.4f} > {self.max_calibration_error:.4f}"
-        min_fill_edge = self.min_fill_adjusted_edge
+        min_sample_size = int(self._gate_value(family, model_name, "min_sample_size"))
+        max_calibration_error = self._gate_value(family, model_name, "max_calibration_error")
+        min_fill_edge = self._gate_value(family, model_name, "min_fill_adjusted_edge")
+        min_family_stability = self._gate_value(family, model_name, "min_family_stability")
+        min_sharpe_delta = self._gate_value(family, model_name, "min_sharpe_delta")
+        if candidate.sample_size < min_sample_size:
+            return False, f"sample_size {candidate.sample_size} < {min_sample_size}"
+        if not np.isnan(candidate.calibration_error) and candidate.calibration_error > max_calibration_error:
+            return False, f"calibration_error {candidate.calibration_error:.4f} > {max_calibration_error:.4f}"
         if model_name == "slippage_liquidity":
             min_fill_edge = min(min_fill_edge, 0.0) - self.metric_epsilon
         if not np.isnan(candidate.fill_adjusted_edge) and candidate.fill_adjusted_edge < min_fill_edge:
-            return False, f"fill_adjusted_edge {candidate.fill_adjusted_edge:.4f} < {self.min_fill_adjusted_edge:.4f}"
-        if not np.isnan(candidate.family_stability) and candidate.family_stability < self.min_family_stability:
-            return False, f"family_stability {candidate.family_stability:.4f} < {self.min_family_stability:.4f}"
+            return False, f"fill_adjusted_edge {candidate.fill_adjusted_edge:.4f} < {self._gate_value(family, model_name, 'min_fill_adjusted_edge'):.4f}"
+        if not np.isnan(candidate.family_stability) and candidate.family_stability < min_family_stability:
+            return False, f"family_stability {candidate.family_stability:.4f} < {min_family_stability:.4f}"
         if incumbent is None:
             return True, "no_incumbent_hard_gate_pass"
         if not np.isnan(candidate.sharpe_like) and not np.isnan(incumbent.sharpe_like):
-            if candidate.sharpe_like + self.metric_epsilon < incumbent.sharpe_like + self.min_sharpe_delta:
+            if candidate.sharpe_like + self.metric_epsilon < incumbent.sharpe_like + min_sharpe_delta:
                 return False, f"sharpe_like {candidate.sharpe_like:.4f} < incumbent {incumbent.sharpe_like:.4f}"
         if not np.isnan(candidate.max_drawdown) and not np.isnan(incumbent.max_drawdown):
             if candidate.max_drawdown + self.metric_epsilon < incumbent.max_drawdown:
@@ -342,8 +447,46 @@ class OfflineLearningLoop:
         verdict,
         candidate: PromotionGateMetrics,
         incumbent: PromotionGateMetrics | None,
+        *,
+        family: str = "btc",
     ) -> tuple[bool, str]:
         if incumbent is None:
+            return bool(verdict.promote), verdict.reason
+        if family == "weather_temperature" and model_name == "entry_edge":
+            better_edge = (
+                not np.isnan(candidate.fill_adjusted_edge)
+                and not np.isnan(incumbent.fill_adjusted_edge)
+                and candidate.fill_adjusted_edge + self.metric_epsilon >= incumbent.fill_adjusted_edge
+            )
+            better_stability = (
+                not np.isnan(candidate.family_stability)
+                and not np.isnan(incumbent.family_stability)
+                and candidate.family_stability + self.metric_epsilon >= incumbent.family_stability
+            )
+            if better_edge and better_stability and candidate.sample_size >= incumbent.sample_size:
+                return True, (
+                    "weather entry_edge compare: "
+                    f"fill_adjusted_edge {candidate.fill_adjusted_edge:.4f} >= {incumbent.fill_adjusted_edge:.4f}, "
+                    f"family_stability {candidate.family_stability:.4f} >= {incumbent.family_stability:.4f}"
+                )
+            return bool(verdict.promote), verdict.reason
+        if family == "weather_temperature" and model_name == "exit_quality":
+            better_calibration = (
+                not np.isnan(candidate.calibration_error)
+                and not np.isnan(incumbent.calibration_error)
+                and candidate.calibration_error <= incumbent.calibration_error + self.metric_epsilon
+            )
+            better_edge = (
+                not np.isnan(candidate.fill_adjusted_edge)
+                and not np.isnan(incumbent.fill_adjusted_edge)
+                and candidate.fill_adjusted_edge + self.metric_epsilon >= incumbent.fill_adjusted_edge
+            )
+            if better_calibration and better_edge:
+                return True, (
+                    "weather exit_quality compare: "
+                    f"calibration_error {candidate.calibration_error:.4f} <= {incumbent.calibration_error:.4f}, "
+                    f"fill_adjusted_edge {candidate.fill_adjusted_edge:.4f} >= {incumbent.fill_adjusted_edge:.4f}"
+                )
             return bool(verdict.promote), verdict.reason
         if model_name != "fill_probability":
             return bool(verdict.promote), verdict.reason
@@ -369,7 +512,7 @@ class OfflineLearningLoop:
         return bool(verdict.promote), verdict.reason
 
     def run(self) -> list[OfflinePromotionResult]:
-        from task_model_suite import _ALL_MODEL_NAMES, TaskModelSuite
+        from task_model_suite import _ALL_MODEL_NAMES, TaskModelSuite, supported_model_names
         from walk_forward_evaluator import TaskWalkForwardEvaluator
 
         build_family_datasets(shared_logs_dir=self.logs_dir, shared_weights_dir=self.weights_dir)
@@ -377,18 +520,39 @@ class OfflineLearningLoop:
 
         for context in list_brain_contexts(shared_logs_dir=self.logs_dir, shared_weights_dir=self.weights_dir):
             family = context.market_family
+            config = self._family_config(family)
             suite = TaskModelSuite(family, logs_dir=str(self.logs_dir), weights_dir=str(self._candidate_dir(family)))
-            evaluator = TaskWalkForwardEvaluator(family, logs_dir=str(self.logs_dir))
+            evaluator = TaskWalkForwardEvaluator(family, logs_dir=str(self.logs_dir), n_splits=config.validation_splits)
             suite.train_all()
 
-            for model_name in sorted(_ALL_MODEL_NAMES):
+            enabled_models = tuple(supported_model_names(family))
+            disabled_models = sorted(set(_ALL_MODEL_NAMES) - set(enabled_models))
+
+            for model_name in disabled_models:
+                results.append(
+                    OfflinePromotionResult(
+                        family=family,
+                        model_name=model_name,
+                        promoted=False,
+                        reason="family_loop_disabled_until_family_specific_data_exists",
+                        candidate_path="",
+                        incumbent_path=str(self._active_family_dir(family) / f"task_{model_name}.joblib"),
+                        candidate_auc=float("nan"),
+                        incumbent_auc=float("nan"),
+                        candidate_metrics={},
+                        incumbent_metrics={},
+                        hard_gate_passed=False,
+                    )
+                )
+
+            for model_name in enabled_models:
                 candidate_path = self._candidate_dir(family) / family / f"task_{model_name}.joblib"
                 incumbent_path = self._active_family_dir(family) / f"task_{model_name}.joblib"
                 verdict = evaluator.compare(candidate_path, incumbent_path, model_name)
                 candidate_metrics = self._promotion_metrics(candidate_path, evaluator, model_name)
                 incumbent_metrics = self._promotion_metrics(incumbent_path, evaluator, model_name) if incumbent_path.exists() else None
-                hard_gate_passed, hard_gate_reason = self._hard_promotion_gate(model_name, candidate_metrics, incumbent_metrics)
-                compare_passed, compare_reason = self._task_specific_compare(model_name, verdict, candidate_metrics, incumbent_metrics)
+                hard_gate_passed, hard_gate_reason = self._hard_promotion_gate(model_name, candidate_metrics, incumbent_metrics, family=family)
+                compare_passed, compare_reason = self._task_specific_compare(model_name, verdict, candidate_metrics, incumbent_metrics, family=family)
                 promote = bool(compare_passed and hard_gate_passed and candidate_path.exists())
                 if promote:
                     self._promote(family, model_name, candidate_path)
@@ -409,7 +573,8 @@ class OfflineLearningLoop:
                 )
 
         payload = {
-            "generated_at": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+            "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "family_configs": {family: asdict(config) for family, config in self.family_configs.items()},
             "results": [r.__dict__ for r in results],
         }
         self.report_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")

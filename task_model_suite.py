@@ -637,6 +637,15 @@ class RegimeCalibrationModel:
 # ---------------------------------------------------------------------------
 
 _ALL_MODEL_NAMES = {"entry_edge", "fill_probability", "slippage_liquidity", "exit_quality", "regime_calibration"}
+_FAMILY_MODEL_NAMES = {
+    "btc": ("entry_edge", "fill_probability", "slippage_liquidity", "exit_quality", "regime_calibration"),
+    "weather_temperature": ("entry_edge", "exit_quality", "regime_calibration"),
+}
+
+
+def supported_model_names(family: str) -> tuple[str, ...]:
+    normalized = family.lower().strip()
+    return tuple(_FAMILY_MODEL_NAMES.get(normalized, tuple(sorted(_ALL_MODEL_NAMES))))
 
 
 class TaskModelSuite:
@@ -673,7 +682,7 @@ class TaskModelSuite:
             return ExitQualityModel(**kw)
         if name == "regime_calibration":
             return RegimeCalibrationModel(**kw)
-        raise ValueError(f"Unknown model name '{name}'. Choose from {_ALL_MODEL_NAMES}")
+        raise ValueError(f"Unknown model name '{name}'. Choose from {supported_model_names(self.family)}")
 
     def train(self, name: str) -> dict[str, Any] | None:
         """Train a single model by name."""
@@ -682,9 +691,9 @@ class TaskModelSuite:
         return learner.train()
 
     def train_all(self) -> dict[str, dict[str, Any] | None]:
-        """Train all 5 task models. Returns results dict keyed by model name."""
+        """Train the family-specific task models. Returns results dict keyed by model name."""
         results = {}
-        for name in ["entry_edge", "fill_probability", "slippage_liquidity", "exit_quality", "regime_calibration"]:
+        for name in supported_model_names(self.family):
             results[name] = self.train(name)
         log.info("=== Suite complete for family=%s ===", self.family)
         log.info("Results: %s", {k: v for k, v in results.items() if v is not None})

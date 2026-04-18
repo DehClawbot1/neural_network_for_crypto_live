@@ -21,6 +21,8 @@ from model_artifact_staging import (
     build_candidate_weights_dir,
     promote_candidate_artifacts,
 )
+from champion_challenger import get_slot as _get_cc_slot
+from promotion_gate import PromotionGateRunner
 from rl_trainer import train_model
 from trade_quality import enrich_quality_frame
 
@@ -404,13 +406,99 @@ class Retrainer:
         summary["live_profit_factor"] = float(self._profit_factor_from_pnl(pnl))
         return summary
 
-    def _evaluate_promotion_quality_gates(self, candidate_row):
+    def _run_hard_promotion_gates(
+        self,
+        candidate_row: dict,
+        candidate_artifact_dir=None,
+        market_family: str | None = None,
+    ) -> tuple[bool, list[str]]:
+        """
+        Run the seven hard promotion gates from promotion_gate.py.
+
+        Gates:
+          1. sample_size          — minimum OOS eligible rows
+          2. sharpe               — annualised Sortino ratio on OOS PnL (+ p-value)
+          3. drawdown             — max rolling drawdown on OOS equity curve
+          4. calibration          — ECE of entry_edge model on OOS data
+          5. fill_adjusted_edge   — gross edge minus mean slippage cost
+          6. family_stability     — CV of walk-forward fold AUC
+          7. beats_champion       — candidate Sortino >= champion Sortino + margin
+
+        Any single failure blocks the promotion.  Results are merged into
+        candidate_row for registry recording.
+        """
+        family = (market_family or "btc").lower().strip()
+        failures: list[str] = []
+
+        try:
+            runner = PromotionGateRunner(
+                family=family,
+                logs_dir=str(self.logs_dir),
+                weights_dir=str(self.weights_dir),
+            )
+            gate_result = runner.evaluate(
+                candidate_artifact_dir=candidate_artifact_dir,
+                candidate_version=candidate_row.get("model_version", ""),
+            )
+
+            # Merge all gate metric values into the candidate row for full audit trail
+            candidate_row.update(gate_result.to_dict())
+            candidate_row["hard_gate_report"] = gate_result.report().replace("\n", " | ")
+
+            if not gate_result.passed:
+                for g in gate_result.failed_gates():
+                    failures.append(
+                        f"hard_gate:{g.name} value={g.value:.4f} "
+                        f"{'<' if g.direction == 'above' else '>'} threshold={g.threshold:.4f}"
+                    )
+            logging.info("[Retrainer] hard gate result: %s", gate_result.report().splitlines()[1])
+
+        except Exception as exc:
+            logging.warning("[Retrainer] hard promotion gates raised an exception: %s", exc)
+            # Do NOT silently pass on exception — block and surface the error
+            failures.append(f"hard_gate:exception — {exc}")
+
+        return len(failures) == 0, failures
+
+    def _evaluate_promotion_quality_gates(
+        self,
+        candidate_row: dict,
+        candidate_artifact_dir=None,
+        market_family: str | None = None,
+    ):
+        """
+        Two-layer gate evaluation:
+
+        Layer 1 — Hard quantitative gates (promotion_gate.py):
+            sample_size, sharpe/sortino, drawdown, calibration,
+            fill_adjusted_edge, family_stability, beats_champion.
+            Any failure here blocks immediately.
+
+        Layer 2 — Live-window data quality gates (legacy):
+            live_closed_trades, live_profit_factor, live_average_pnl,
+            learning_eligible_ratio, entry_context_complete_ratio,
+            operational_close_ratio, unknown_signal_label_ratio.
+            These guard data quality, not model quality — kept as secondary screen.
+
+        Both layers must pass for promotion to proceed.
+        """
         live_summary = self._build_live_validation_summary()
         candidate_row.update(live_summary)
 
+        failures: list[str] = []
+
+        # ── Layer 1: Hard promotion gates ────────────────────────────────────
+        hard_passed, hard_failures = self._run_hard_promotion_gates(
+            candidate_row,
+            candidate_artifact_dir=candidate_artifact_dir,
+            market_family=market_family,
+        )
+        failures.extend(hard_failures)
+
+        # ── Layer 2: Live data-quality checks ────────────────────────────────
         min_profit_factor = self._env_float("PROMOTION_MIN_PROFIT_FACTOR", 1.05)
         min_average_pnl = self._env_float("PROMOTION_MIN_AVERAGE_PNL", 0.0)
-        max_drawdown = self._env_float("PROMOTION_MAX_DRAWDOWN", 15.0)
+        max_drawdown_legacy = self._env_float("PROMOTION_MAX_DRAWDOWN", 15.0)
         min_live_closed_trades = max(1, self._env_int("PROMOTION_MIN_LIVE_CLOSED_TRADES", 30))
         min_live_profit_factor = self._env_float("PROMOTION_MIN_LIVE_PROFIT_FACTOR", 1.00)
         min_live_average_pnl = self._env_float("PROMOTION_MIN_LIVE_AVERAGE_PNL", 0.0)
@@ -419,11 +507,10 @@ class Retrainer:
         max_operational_close_ratio = self._env_float("PROMOTION_MAX_OPERATIONAL_CLOSE_RATIO", 0.30)
         max_unknown_signal_label_ratio = self._env_float("PROMOTION_MAX_UNKNOWN_SIGNAL_LABEL_RATIO", 0.20)
 
-        failures = []
         candidate_profit_factor = self._safe_float(candidate_row.get("profit_factor"), 0.0)
         candidate_average_pnl = self._safe_float(candidate_row.get("average_pnl"), 0.0)
         candidate_max_drawdown = self._safe_float(candidate_row.get("max_drawdown"), 0.0)
-        
+
         if candidate_profit_factor < min_profit_factor:
             failures.append(
                 f"profit_factor {candidate_profit_factor:.3f} < required {min_profit_factor:.3f}"
@@ -432,9 +519,9 @@ class Retrainer:
             failures.append(
                 f"average_pnl {candidate_average_pnl:.4f} <= required {min_average_pnl:.4f}"
             )
-        if candidate_max_drawdown > max_drawdown:
+        if candidate_max_drawdown > max_drawdown_legacy:
             failures.append(
-                f"max_drawdown {candidate_max_drawdown:.3f} > allowed {max_drawdown:.3f}"
+                f"max_drawdown {candidate_max_drawdown:.3f} > allowed {max_drawdown_legacy:.3f}"
             )
 
         live_closed_trades = _safe_int(candidate_row.get("live_closed_trades", 0))
@@ -444,6 +531,7 @@ class Retrainer:
         live_entry_context_complete_ratio = self._safe_float(candidate_row.get("live_entry_context_complete_ratio"), 0.0)
         live_operational_close_ratio = self._safe_float(candidate_row.get("live_operational_close_ratio"), 1.0)
         live_unknown_signal_label_ratio = self._safe_float(candidate_row.get("live_unknown_signal_label_ratio"), 1.0)
+
         if live_closed_trades < min_live_closed_trades:
             failures.append(
                 f"live_closed_trades {live_closed_trades} < required {min_live_closed_trades}"
@@ -514,7 +602,13 @@ class Retrainer:
             return None
         return registry.iloc[-1].to_dict()
 
-    def _build_candidate_registry_row(self, closed_rows, replay_rows):
+    def _build_candidate_registry_row(
+        self,
+        closed_rows,
+        replay_rows,
+        candidate_artifact_dir=None,
+        market_family: str | None = None,
+    ):
         backtest_df = self._safe_read(self.backtest_summary_file)
         time_split_df = self._safe_read(self.time_split_file)
         if backtest_df.empty:
@@ -539,12 +633,21 @@ class Retrainer:
             "activation_status": "candidate",
             "promotion_block_reason": "",
         }
-        gates_passed, failures = self._evaluate_promotion_quality_gates(row)
+        gates_passed, failures = self._evaluate_promotion_quality_gates(
+            row,
+            candidate_artifact_dir=candidate_artifact_dir,
+            market_family=market_family,
+        )
         row["live_validation_passed"] = gates_passed
         row["live_validation_failures"] = " | ".join(failures)
         return row, champion, None
 
     def _candidate_beats_champion(self, candidate_row, champion):
+        """
+        Champion comparison is now handled inside the hard gate 'beats_champion'
+        (Sortino-based OOS comparison).  This method remains as a legacy secondary
+        check on the backtest summary metrics so existing callers are unaffected.
+        """
         if champion is None:
             return True
 
@@ -564,12 +667,38 @@ class Retrainer:
         self._append_csv_row(self.registry_file, row, sort_by="attempted_at")
         return f"Recorded candidate model {row['model_version']} ({row.get('activation_status', 'unknown')})"
 
-    def _promote_if_better(self, closed_rows, replay_rows):
-        candidate_row, champion, error_message = self._build_candidate_registry_row(closed_rows, replay_rows)
+    def _promote_if_better(
+        self,
+        closed_rows,
+        replay_rows,
+        candidate_artifact_dir=None,
+        market_family: str | None = None,
+    ):
+        candidate_row, champion, error_message = self._build_candidate_registry_row(
+            closed_rows,
+            replay_rows,
+            candidate_artifact_dir=candidate_artifact_dir,
+            market_family=market_family,
+        )
         if candidate_row is None:
             return False, error_message
+
+        # Hard gates (Layer 1) are embedded in _evaluate_promotion_quality_gates.
+        # If they already blocked the candidate, live_validation_passed is False.
+        if not candidate_row.get("promotion_gate_passed", False):
+            failures = candidate_row.get("promotion_gate_failures", "gate_failed")
+            candidate_row["activation_status"] = "blocked_quality_gate"
+            candidate_row["promotion_block_reason"] = failures
+            self._register_attempt(candidate_row)
+            return False, f"Blocked by promotion gates: {failures}"
+
+        # Secondary champion comparison on backtest metrics
         if not self._candidate_beats_champion(candidate_row, champion):
-            return False, "Candidate did not beat champion on promotion metrics."
+            candidate_row["activation_status"] = "blocked_champion"
+            candidate_row["promotion_block_reason"] = "did_not_beat_champion_on_backtest_metrics"
+            self._register_attempt(candidate_row)
+            return False, "Candidate did not beat champion on backtest metrics."
+
         candidate_row["activation_status"] = "promoted"
         candidate_row["promotion_block_reason"] = ""
         return True, self._register_attempt(candidate_row)
@@ -648,6 +777,71 @@ class Retrainer:
                 logging.warning("Shadow mode log write failed: %s", exc)
         logging.info("Shadow mode: scored %d candidates with challenger", scored)
         return scored
+
+    # ── Phase 8b — Champion/Challenger helpers (called by supervisor) ────────
+
+    def score_signal_shadow(self, signal_row: dict, market_family: str = "btc") -> dict:
+        """
+        Score a live candidate signal with both the champion and the challenger.
+        Returns a dict with champion_prob, champion_action, challenger_prob,
+        challenger_action keys.  Safe to call on every candidate — returns an
+        empty dict if no challenger is registered yet.
+
+        The supervisor should follow up with log_shadow_signal() once it has a
+        signal_id, and record_trade_outcome() when the position closes.
+        """
+        try:
+            cc_slot = _get_cc_slot(
+                market_family,
+                weights_dir=str(self.weights_dir),
+                logs_dir=str(self.logs_dir),
+            )
+            return cc_slot.score_shadow(signal_row)
+        except Exception as exc:
+            logging.debug("[CC] score_signal_shadow failed (non-blocking): %s", exc)
+            return {}
+
+    def log_shadow_signal(
+        self,
+        signal_row: dict,
+        shadow_result: dict,
+        signal_id: str,
+        market_family: str = "btc",
+    ) -> None:
+        """
+        Persist a shadow-scored signal to logs/{family}/shadow_eval.csv so that
+        outcomes can be matched later via record_trade_outcome().
+        """
+        try:
+            cc_slot = _get_cc_slot(
+                market_family,
+                weights_dir=str(self.weights_dir),
+                logs_dir=str(self.logs_dir),
+            )
+            cc_slot.log_shadow_signal(signal_row, shadow_result, signal_id)
+        except Exception as exc:
+            logging.debug("[CC] log_shadow_signal failed (non-blocking): %s", exc)
+
+    def record_trade_outcome(
+        self,
+        signal_id: str,
+        realized_return: float,
+        market_family: str = "btc",
+    ) -> None:
+        """
+        Match a closed position's realized_return back to its shadow-eval row.
+        Call this from the supervisor's position-close handler so the CC system
+        accumulates outcome-matched records needed for promotion evaluation.
+        """
+        try:
+            cc_slot = _get_cc_slot(
+                market_family,
+                weights_dir=str(self.weights_dir),
+                logs_dir=str(self.logs_dir),
+            )
+            cc_slot.record_outcome(signal_id, realized_return)
+        except Exception as exc:
+            logging.debug("[CC] record_trade_outcome failed (non-blocking): %s", exc)
 
     # ── Phase 11 — Drift Trigger ─────────────────────────────────────────────
     def _check_drift_trigger(self) -> bool:
@@ -770,12 +964,37 @@ class Retrainer:
         build_family_datasets(shared_logs_dir=self.logs_dir, shared_weights_dir=self.weights_dir)
         for context in list_brain_contexts(shared_logs_dir=self.logs_dir, shared_weights_dir=self.weights_dir):
             brain_candidate_dir = train_brain_models(context, candidate_prefix="base_retrain")
-            # Phase 8 — shadow mode: score recent candidates with challenger (non-blocking)
+            # Phase 8 — champion/challenger: install freshly trained models as challenger,
+            # then attempt promotion if enough shadow cycles have accumulated.
             try:
-                shadow_count = self._run_shadow_mode(brain_candidate_dir)
-                logging.info("Shadow mode completed for %s: %d row(s) scored", context.market_family, shadow_count)
-            except Exception as _shadow_exc:
-                logging.warning("Shadow mode failed (non-blocking): %s", _shadow_exc)
+                cc_slot = _get_cc_slot(
+                    context.market_family,
+                    weights_dir=str(self.weights_dir),
+                    logs_dir=str(self.logs_dir),
+                )
+                cc_slot.bootstrap_champion_from_weights()   # no-op if champion already seeded
+                version_label = pd.Timestamp.utcnow().strftime("retrain_%Y%m%d%H%M%S")
+                cc_slot.register_challenger(brain_candidate_dir, version_label=version_label)
+                logging.info(
+                    "[CC] %s challenger registered (version=%s)",
+                    context.market_family,
+                    version_label,
+                )
+                cc_result = cc_slot.try_promote()
+                if cc_result.get("promoted"):
+                    logging.info(
+                        "[CC] %s challenger PROMOTED to champion (version=%s)",
+                        context.market_family,
+                        version_label,
+                    )
+                else:
+                    logging.info(
+                        "[CC] %s challenger not promoted yet: %s",
+                        context.market_family,
+                        cc_result.get("reason", "gates_pending"),
+                    )
+            except Exception as _cc_exc:
+                logging.warning("[CC] champion/challenger update failed (non-blocking): %s", _cc_exc)
             brain_run_id = pd.Timestamp.utcnow().strftime(f"retrain_{context.market_family}_%Y%m%d%H%M%S")
             brain_candidate_rows = evaluate_brain_candidate_rows(
                 context,

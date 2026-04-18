@@ -98,6 +98,7 @@ _load_risk_env()
 from btc_trade_feedback import BTCTradeFeedback
 from weather_temperature_strategy import WeatherTemperatureStrategy
 from weather_temperature_markets import fetch_weather_temperature_markets
+from family_live_runtime_policy import build_family_live_runtime_policy, load_family_live_runtime_policy
 from brain_paths import active_runtime_identity, resolve_brain_context, infer_market_family_from_row
 from brain_log_routing import append_csv_with_brain_mirrors
 from model_registry import ModelRegistry
@@ -1720,6 +1721,11 @@ def main_loop():
     offline_signal_file = Path("logs/offline_learning_signal.json")
     inline_retraining_enabled = str(os.getenv("ENABLE_INLINE_RETRAINING", "")).strip().lower() in {"1", "true", "yes", "on"}
     last_offline_signal_mtime = None
+    _family_live_runtime_state = load_family_live_runtime_policy(offline_signal_file)
+    _btc_system_env_enabled = True
+    _weather_system_env_enabled = True
+    _btc_live_entry_models_enabled = True
+    _weather_live_entry_models_enabled = True
     feedback_learner = TradeFeedbackLearner()
     position_telemetry = PositionTelemetry()
     global_governor = GlobalPerformanceGovernor(logs_dir="logs")
@@ -1730,6 +1736,52 @@ def main_loop():
     btc_trade_feedback = BTCTradeFeedback(logs_dir="logs")
     latest_open_positions_snapshot_for_shutdown = pd.DataFrame()
     weather_watchlist_warned = False
+
+    def _runtime_family_key(market_family: str | None) -> str:
+        return "weather_temperature" if str(market_family or "").strip().lower().startswith("weather_temperature") else "btc"
+
+    def _family_live_state(market_family: str | None):
+        return _family_live_runtime_state.get(_runtime_family_key(market_family))
+
+    def _family_entry_live_policy(market_family: str | None):
+        state = _family_live_state(market_family)
+        if state is None or not getattr(state, "signal_present", False):
+            return True, "no_offline_signal_fallback", state
+        return bool(getattr(state, "entry_ready", False)), str(getattr(state, "reason", "approved")), state
+
+    def _refresh_family_live_scope(reason="startup", payload=None):
+        nonlocal _family_live_runtime_state
+        nonlocal _btc_live_entry_models_enabled, _weather_live_entry_models_enabled
+        if payload is None:
+            _family_live_runtime_state = load_family_live_runtime_policy(offline_signal_file)
+        else:
+            _family_live_runtime_state = build_family_live_runtime_policy(payload)
+
+        btc_state = _family_live_runtime_state.get("btc")
+        weather_state = _family_live_runtime_state.get("weather_temperature")
+
+        _btc_live_entry_models_enabled = True if btc_state is None or not btc_state.signal_present else bool(btc_state.entry_ready)
+        _weather_live_entry_models_enabled = True if weather_state is None or not weather_state.signal_present else bool(weather_state.entry_ready)
+
+        summary = {}
+        for fam, state in _family_live_runtime_state.items():
+            summary[fam] = {
+                "signal_present": bool(state.signal_present),
+                "supported_models": list(state.supported_models),
+                "promoted_models": list(state.promoted_models),
+                "required_live_entry_models": list(state.required_live_entry_models),
+                "required_live_exit_models": list(state.required_live_exit_models),
+                "entry_ready": bool(state.entry_ready),
+                "exit_ready": bool(state.exit_ready),
+                "reason": state.reason,
+            }
+        logging.info("LIVE_FAMILY_MODEL_SCOPE reason=%s summary=%s", reason, json.dumps(summary, sort_keys=True))
+        autonomous_monitor.write_heartbeat(
+            "live_family_scope",
+            status="ok" if _btc_live_entry_models_enabled and _weather_live_entry_models_enabled else "warn",
+            message=reason,
+            extra=summary,
+        )
 
     def _flush_runtime_state(reason="shutdown"):
         nonlocal latest_open_positions_snapshot_for_shutdown
@@ -1855,6 +1907,11 @@ def main_loop():
         stage2_inference = Stage2TemporalInference(brain_context=btc_brain_context)
 
         active_artifacts = snapshot_artifact_state("weights")
+        family_scope_extra = {}
+        for fam, state in _family_live_runtime_state.items():
+            family_scope_extra[f"{fam}_promoted_models"] = list(state.promoted_models)
+            family_scope_extra[f"{fam}_entry_ready"] = bool(state.entry_ready)
+            family_scope_extra[f"{fam}_reason"] = state.reason
         autonomous_monitor.write_heartbeat(
             "inference",
             status="ok",
@@ -1865,6 +1922,7 @@ def main_loop():
                 "legacy_brain_loaded": legacy_brain is not None,
                 "entry_brain_loaded": entry_brain is not None,
                 "position_brain_loaded": position_brain is not None,
+                **family_scope_extra,
             },
         )
 
@@ -1884,6 +1942,7 @@ def main_loop():
         except Exception as exc:
             logging.warning("Offline learning signal unreadable: %s", exc)
             return
+        _refresh_family_live_scope(reason="offline_learning_signal_seen", payload=payload)
         promoted = [
             row for row in payload.get("results", [])
             if str(row.get("promoted", "")).lower() in {"true", "1"} or row.get("promoted") is True
@@ -2161,13 +2220,14 @@ def main_loop():
     #
     # Rule: no new feature enters live unless it proves edge offline AND shadow.
     # See feature_shadow_gate.py for the enforcement mechanism.
-    _btc_system_enabled = os.getenv("BTC_SYSTEM_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
-    _weather_system_enabled = os.getenv("WEATHER_SYSTEM_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    _btc_system_env_enabled = os.getenv("BTC_SYSTEM_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    _weather_system_env_enabled = os.getenv("WEATHER_SYSTEM_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 
-    if not _btc_system_enabled:
+    if not _btc_system_env_enabled:
         logging.info("SCOPE: BTC system DISABLED (BTC_SYSTEM_ENABLED=false)")
-    if not _weather_system_enabled:
+    if not _weather_system_env_enabled:
         logging.info("SCOPE: Weather system DISABLED (WEATHER_SYSTEM_ENABLED=false)")
+    _refresh_family_live_scope(reason="startup")
 
     # ── ALWAYS-ON MARKET ──────────────────────────────────────────────────────
     # Always-on market disabled by default.
@@ -2848,43 +2908,56 @@ def main_loop():
                 signals_df = _dedupe_signals_df(signals_df)
 
             if os.getenv("ENABLE_WEATHER_TEMPERATURE_STRATEGY", "true").strip().lower() in {"1", "true", "yes", "on"}:
-                try:
-                    weather_watchlist_df = weather_temperature_strategy.load_watchlist()
-                    if weather_watchlist_df.empty:
-                        if not weather_watchlist_warned:
-                            logging.warning(
-                                "Weather temperature strategy is enabled but no approved weather wallets are configured. "
-                                "Populate %s or set WEATHER_APPROVED_WALLETS to enable live weather signals.",
-                                weather_temperature_strategy.watchlist_path,
+                if _deployment_gate.is_live and not _weather_live_entry_models_enabled:
+                    _weather_state = _family_live_state("weather_temperature")
+                    autonomous_monitor.write_heartbeat(
+                        "weather_strategy",
+                        status="warn",
+                        message="weather_live_models_not_ready",
+                        extra={
+                            "reason": getattr(_weather_state, "reason", "missing_offline_signal"),
+                            "required_live_entry_models": list(getattr(_weather_state, "required_live_entry_models", ()) or ()),
+                            "promoted_models": list(getattr(_weather_state, "promoted_models", ()) or ()),
+                        },
+                    )
+                else:
+                    try:
+                        weather_watchlist_df = weather_temperature_strategy.load_watchlist()
+                        if weather_watchlist_df.empty:
+                            if not weather_watchlist_warned:
+                                logging.warning(
+                                    "Weather temperature strategy is enabled but no approved weather wallets are configured. "
+                                    "Populate %s or set WEATHER_APPROVED_WALLETS to enable live weather signals.",
+                                    weather_temperature_strategy.watchlist_path,
+                                )
+                                weather_watchlist_warned = True
+                            autonomous_monitor.write_heartbeat(
+                                "weather_strategy",
+                                status="warn",
+                                message="weather_watchlist_empty",
+                                extra={"watchlist_path": str(weather_temperature_strategy.watchlist_path)},
                             )
-                            weather_watchlist_warned = True
-                        autonomous_monitor.write_heartbeat(
-                            "weather_strategy",
-                            status="warn",
-                            message="weather_watchlist_empty",
-                            extra={"watchlist_path": str(weather_temperature_strategy.watchlist_path)},
-                        )
-                    weather_signals_df = weather_temperature_strategy.build_cycle_signals(markets_df)
-                    if weather_signals_df is not None and not weather_signals_df.empty:
-                        weather_watchlist_warned = False
-                        if signals_df is None or signals_df.empty:
-                            signals_df = weather_signals_df
-                        else:
-                            signals_df = pd.concat([signals_df, weather_signals_df], ignore_index=True)
-                            _audit_duplicate_step(signals_df, "signals_add_weather", source="weather_wallet_state")
-                        signals_df = _dedupe_signals_df(signals_df)
-                        logging.info("Added %d weather temperature wallet-state signals.", len(weather_signals_df))
-                        autonomous_monitor.write_heartbeat(
-                            "weather_strategy",
-                            status="ok",
-                            message="weather_signals_built",
-                            extra={
-                                "watchlist_wallets": int(len(weather_watchlist_df.index)) if weather_watchlist_df is not None else 0,
-                                "signal_rows": int(len(weather_signals_df.index)),
-                            },
-                        )
-                except Exception as weather_signal_exc:
-                    logging.warning("Weather temperature strategy signal build failed: %s", weather_signal_exc)
+                        weather_signals_df = weather_temperature_strategy.build_cycle_signals(markets_df)
+                        if weather_signals_df is not None and not weather_signals_df.empty:
+                            weather_watchlist_warned = False
+                            if signals_df is None or signals_df.empty:
+                                signals_df = weather_signals_df
+                            else:
+                                signals_df = pd.concat([signals_df, weather_signals_df], ignore_index=True)
+                                _audit_duplicate_step(signals_df, "signals_add_weather", source="weather_wallet_state")
+                            signals_df = _dedupe_signals_df(signals_df)
+                            logging.info("Added %d weather temperature wallet-state signals.", len(weather_signals_df))
+                            autonomous_monitor.write_heartbeat(
+                                "weather_strategy",
+                                status="ok",
+                                message="weather_signals_built",
+                                extra={
+                                    "watchlist_wallets": int(len(weather_watchlist_df.index)) if weather_watchlist_df is not None else 0,
+                                    "signal_rows": int(len(weather_signals_df.index)),
+                                },
+                            )
+                    except Exception as weather_signal_exc:
+                        logging.warning("Weather temperature strategy signal build failed: %s", weather_signal_exc)
 
             # Inject always-on signal with BTC forecast driving the YES/NO side
             # and leaderboard consensus used as extra confirmation info
@@ -4355,11 +4428,32 @@ def main_loop():
                 # ── GATE 1: SYSTEM SCOPE ─────────────────────────────────────────
                 # Drop signals from disabled systems before any other work.
                 _is_weather_signal = market_family.startswith("weather_temperature")
-                if _is_weather_signal and not _weather_system_enabled:
+                if _is_weather_signal and not _weather_system_env_enabled:
                     _log_candidate_skip(signal_row, "weather_system_disabled", gate="system_scope")
                     continue
-                if not _is_weather_signal and not _btc_system_enabled:
+                if not _is_weather_signal and not _btc_system_env_enabled:
                     _log_candidate_skip(signal_row, "btc_system_disabled", gate="system_scope")
+                    continue
+                _family_entry_ready, _family_live_reason, _family_live_state = _family_entry_live_policy(market_family)
+                if _is_weather_signal and not _family_entry_ready:
+                    _log_candidate_skip(
+                        signal_row,
+                        "weather_family_models_not_live_ready",
+                        gate="system_scope",
+                        family_live_reason=_family_live_reason,
+                        required_live_entry_models=",".join(getattr(_family_live_state, "required_live_entry_models", ()) or ()),
+                        promoted_models=",".join(getattr(_family_live_state, "promoted_models", ()) or ()),
+                    )
+                    continue
+                if not _is_weather_signal and not _family_entry_ready:
+                    _log_candidate_skip(
+                        signal_row,
+                        "btc_family_models_not_live_ready",
+                        gate="system_scope",
+                        family_live_reason=_family_live_reason,
+                        required_live_entry_models=",".join(getattr(_family_live_state, "required_live_entry_models", ()) or ()),
+                        promoted_models=",".join(getattr(_family_live_state, "promoted_models", ()) or ()),
+                    )
                     continue
                 _passed_gates.append("system_scope")
 
