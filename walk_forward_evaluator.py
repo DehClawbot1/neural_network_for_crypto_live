@@ -207,37 +207,45 @@ _FEAT_FILL = [
 _FEAT_CLOSE = [
     "exit_price", "price_return", "hold_time_seconds", "close_reason",
 ]
+_FEAT_WEATHER_FORECAST = [
+    "weather_market_probability", "weather_forecast_edge",
+    "forecast_margin_to_lower_c", "forecast_margin_to_upper_c",
+    "forecast_uncertainty_c", "liquidity_score", "volume_score",
+    "open_positions_count", "confidence", "p_tp_before_sl",
+    "expected_return", "final_decision", "weather_location",
+    "weather_question_type",
+]
 
 _TASK_MODEL_SPECS: dict[str, dict[str, Any]] = {
     "entry_edge": {
         "target_btc": "entry_quality",
         "target_weather": "entry_quality",
-        "features": _FEAT_ORDER_DECISION + _FEAT_MICROSTRUCTURE + _FEAT_WALLET,
+        "features": _FEAT_ORDER_DECISION + _FEAT_MICROSTRUCTURE + _FEAT_WALLET + _FEAT_WEATHER_FORECAST,
         "eligible_only": True,
     },
     "fill_probability": {
         "target_btc": "fill_success",
         "target_weather": "fill_success",
-        "features": _FEAT_ORDER_DECISION + _FEAT_MICROSTRUCTURE + _FEAT_WALLET,
+        "features": _FEAT_ORDER_DECISION + _FEAT_MICROSTRUCTURE + _FEAT_WALLET + _FEAT_WEATHER_FORECAST,
         "eligible_only": False,
         "derive_target": "fill_success",
     },
     "slippage_liquidity": {
         "target_btc": "execution_quality",
         "target_weather": "execution_quality",
-        "features": _FEAT_FILL + _FEAT_MICROSTRUCTURE + ["size_usdc", "btc_volatility_24h", "btc_volatility_regime"],
+        "features": _FEAT_FILL + _FEAT_MICROSTRUCTURE + ["size_usdc", "btc_volatility_24h", "btc_volatility_regime"] + _FEAT_WEATHER_FORECAST,
         "eligible_only": False,
     },
     "exit_quality": {
         "target_btc": "exit_quality",
         "target_weather": "weather_contract_resolved_yes",
-        "features": _FEAT_CLOSE + _FEAT_ORDER_DECISION + _FEAT_WALLET + _FEAT_BTC_REGIME,
+        "features": _FEAT_CLOSE + _FEAT_ORDER_DECISION + _FEAT_WALLET + _FEAT_BTC_REGIME + _FEAT_WEATHER_FORECAST,
         "eligible_only": True,
     },
     "regime_calibration": {
         "target_btc": "technical_regime_bucket",
         "target_weather": "technical_regime_bucket",
-        "features": _FEAT_BTC_REGIME + _FEAT_MICROSTRUCTURE + _FEAT_WALLET,
+        "features": _FEAT_BTC_REGIME + _FEAT_MICROSTRUCTURE + _FEAT_WALLET + _FEAT_WEATHER_FORECAST,
         "eligible_only": False,
         "multiclass": True,
     },
@@ -372,7 +380,15 @@ class TaskWalkForwardEvaluator:
 
     @staticmethod
     def _present(df: pd.DataFrame, cols: list[str]) -> list[str]:
-        return [c for c in cols if c in df.columns and df[c].notna().any()]
+        seen: set[str] = set()
+        present: list[str] = []
+        for c in cols:
+            if c in seen:
+                continue
+            if c in df.columns and df[c].notna().any():
+                present.append(c)
+                seen.add(c)
+        return present
 
     @staticmethod
     def _encode(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
@@ -429,7 +445,12 @@ class TaskWalkForwardEvaluator:
 
     @staticmethod
     def _eval_fold(model, X_test, y_test, multiclass: bool):
-        preds = model.predict(X_test)
+        try:
+            preds = model.predict(X_test)
+        except ValueError as exc:
+            if "feature names" not in str(exc).lower():
+                raise
+            preds = model.predict(X_test.to_numpy())
         acc = accuracy_score(y_test, preds)
         if multiclass:
             prec = precision_score(y_test, preds, average="macro", zero_division=0)
@@ -438,7 +459,12 @@ class TaskWalkForwardEvaluator:
         auc = float("nan")
         if y_test.nunique() > 1:
             try:
-                pm = model.predict_proba(X_test)
+                try:
+                    pm = model.predict_proba(X_test)
+                except ValueError as exc:
+                    if "feature names" not in str(exc).lower():
+                        raise
+                    pm = model.predict_proba(X_test.to_numpy())
                 prob = pm[:, 1] if pm.shape[1] > 1 else pm[:, 0]
                 auc = roc_auc_score(y_test, prob)
             except Exception:

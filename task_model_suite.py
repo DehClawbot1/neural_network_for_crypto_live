@@ -112,6 +112,23 @@ _FEAT_CLOSE = [
     "close_reason",
 ]
 
+_FEAT_WEATHER_FORECAST = [
+    "weather_market_probability",
+    "weather_forecast_edge",
+    "forecast_margin_to_lower_c",
+    "forecast_margin_to_upper_c",
+    "forecast_uncertainty_c",
+    "liquidity_score",
+    "volume_score",
+    "open_positions_count",
+    "confidence",
+    "p_tp_before_sl",
+    "expected_return",
+    "final_decision",
+    "weather_location",
+    "weather_question_type",
+]
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -154,7 +171,15 @@ def _encode_categoricals(df: pd.DataFrame, feature_cols: list[str]) -> tuple[pd.
 
 def _present(df: pd.DataFrame, cols: list[str]) -> list[str]:
     """Return only columns that exist in df and have at least one non-null value."""
-    return [c for c in cols if c in df.columns and df[c].notna().any()]
+    seen: set[str] = set()
+    present: list[str] = []
+    for c in cols:
+        if c in seen:
+            continue
+        if c in df.columns and df[c].notna().any():
+            present.append(c)
+            seen.add(c)
+    return present
 
 
 def _build_pipeline(use_gbm: bool = False) -> Pipeline:
@@ -211,6 +236,23 @@ def _split_temporal(X: pd.DataFrame, y: pd.Series, test_frac: float = 0.2):
     n = len(X)
     split = int(n * (1 - test_frac))
     return X.iloc[:split], X.iloc[split:], y.iloc[:split], y.iloc[split:]
+
+
+def _find_temporal_binary_split(
+    y: pd.Series,
+    *,
+    min_train_rows: int = 100,
+    min_test_rows: int = 20,
+) -> int | None:
+    n = len(y)
+    if n < (min_train_rows + min_test_rows):
+        return None
+    for split in range(max(min_train_rows, 1), n - min_test_rows + 1):
+        y_train = y.iloc[:split]
+        y_test = y.iloc[split:]
+        if y_train.nunique() >= 2 and y_test.nunique() >= 2:
+            return split
+    return None
 
 
 def _split_temporal_three_way(
@@ -276,7 +318,11 @@ class EntryEdgeModel:
             log.warning("[entry_edge] Target %s missing or all-NaN", target)
             return None
 
-        candidate_features = _FEAT_ORDER_DECISION + _FEAT_MICROSTRUCTURE + _FEAT_WALLET
+        candidate_features = (
+            _FEAT_WEATHER_FORECAST
+            if self.family == "weather_temperature"
+            else _FEAT_ORDER_DECISION + _FEAT_MICROSTRUCTURE + _FEAT_WALLET
+        )
         feature_cols = _present(df, candidate_features)
         df, feature_cols = _encode_categoricals(df, feature_cols)
 
@@ -322,7 +368,11 @@ class FillProbabilityModel:
             df["actual_execution_path"].astype(str).str.lower() == "live_exit_filled"
         ).astype(int)
 
-        candidate_features = _FEAT_ORDER_DECISION + _FEAT_MICROSTRUCTURE + _FEAT_WALLET
+        candidate_features = (
+            _FEAT_WEATHER_FORECAST
+            if self.family == "weather_temperature"
+            else _FEAT_ORDER_DECISION + _FEAT_MICROSTRUCTURE + _FEAT_WALLET
+        )
         feature_cols = _present(df, candidate_features)
         df, feature_cols = _encode_categoricals(df, feature_cols)
 
@@ -415,7 +465,11 @@ class SlippageLiquidityModel:
                 log.warning("[slippage_liquidity] Target %s missing — skipping", target)
                 return None
 
-        candidate_features = _FEAT_FILL + _FEAT_MICROSTRUCTURE + ["size_usdc", "btc_volatility_24h", "btc_volatility_regime"]
+        candidate_features = (
+            _FEAT_WEATHER_FORECAST
+            if self.family == "weather_temperature"
+            else _FEAT_FILL + _FEAT_MICROSTRUCTURE + ["size_usdc", "btc_volatility_24h", "btc_volatility_regime"]
+        )
         feature_cols = _present(df, candidate_features)
         df, feature_cols = _encode_categoricals(df, feature_cols)
 
@@ -466,9 +520,11 @@ class ExitQualityModel:
         # Drop NaN target rows
         df = df[df[target].notna()].copy()
 
-        candidate_features = _FEAT_CLOSE + _FEAT_ORDER_DECISION + _FEAT_WALLET
-        if self.family == "btc":
-            candidate_features += _FEAT_BTC_REGIME
+        candidate_features = (
+            _FEAT_WEATHER_FORECAST
+            if self.family == "weather_temperature"
+            else _FEAT_CLOSE + _FEAT_ORDER_DECISION + _FEAT_WALLET + _FEAT_BTC_REGIME
+        )
         feature_cols = _present(df, candidate_features)
         df, feature_cols = _encode_categoricals(df, feature_cols)
 
@@ -479,10 +535,12 @@ class ExitQualityModel:
             log.warning("[exit_quality] Insufficient data (n=%d) or one class — skipping", len(df))
             return None
 
-        X_train, X_test, y_train, y_test = _split_temporal(X, y)
-        if y_train.nunique() < 2:
-            log.warning("[exit_quality] Train split has only one class — skipping")
+        split = _find_temporal_binary_split(y, min_train_rows=100, min_test_rows=20)
+        if split is None:
+            log.warning("[exit_quality] Could not find temporal split with both classes in train and test — skipping")
             return None
+        X_train, X_test = X.iloc[:split], X.iloc[split:]
+        y_train, y_test = y.iloc[:split], y.iloc[split:]
         model = _build_pipeline(use_gbm=True)
         model.fit(X_train, y_train)
         metrics = _evaluate(model, X_test, y_test, self.name)
@@ -536,7 +594,11 @@ class RegimeCalibrationModel:
             df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
             df = df.sort_values("timestamp")
 
-        candidate_features = _FEAT_BTC_REGIME + _FEAT_MICROSTRUCTURE + _FEAT_WALLET
+        candidate_features = (
+            _FEAT_WEATHER_FORECAST
+            if self.family == "weather_temperature"
+            else _FEAT_BTC_REGIME + _FEAT_MICROSTRUCTURE + _FEAT_WALLET
+        )
         feature_cols = _present(df, candidate_features)
         df, feature_cols = _encode_categoricals(df, feature_cols)
 
