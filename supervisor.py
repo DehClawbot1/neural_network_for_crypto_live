@@ -121,6 +121,10 @@ except (ImportError, ModuleNotFoundError):
 # Configure logging for zero-intervention monitoring
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+BTC_LIVE_MIN_ENTRY_CONFIDENCE = 0.45
+BTC_PAPER_MIN_ENTRY_CONFIDENCE = 0.30
+BTC_BLOCKED_MARKET_FAMILIES = {"btc_other", "btc_price_threshold"}
+
 # Ensure logging directory exists
 os.makedirs("logs", exist_ok=True)
 EXECUTION_FILE = "logs/execution_log.csv"
@@ -1713,6 +1717,9 @@ def main_loop():
     # replay buffer (logs/btc/path_replay_backtest.csv — 1,451 rows) instead
     # of the root logs dir (logs/path_replay_backtest.csv — only 146 rows).
     retrainer = Retrainer(logs_dir=str(btc_brain_context.logs_dir))
+    offline_signal_file = Path("logs/offline_learning_signal.json")
+    inline_retraining_enabled = str(os.getenv("ENABLE_INLINE_RETRAINING", "")).strip().lower() in {"1", "true", "yes", "on"}
+    last_offline_signal_mtime = None
     feedback_learner = TradeFeedbackLearner()
     position_telemetry = PositionTelemetry()
     global_governor = GlobalPerformanceGovernor(logs_dir="logs")
@@ -1859,6 +1866,34 @@ def main_loop():
                 "entry_brain_loaded": entry_brain is not None,
                 "position_brain_loaded": position_brain is not None,
             },
+        )
+
+    def _check_offline_learning_signal():
+        nonlocal last_offline_signal_mtime
+        if not offline_signal_file.exists():
+            return
+        try:
+            current_mtime = offline_signal_file.stat().st_mtime
+        except Exception:
+            return
+        if last_offline_signal_mtime is not None and current_mtime <= last_offline_signal_mtime:
+            return
+        last_offline_signal_mtime = current_mtime
+        try:
+            payload = json.loads(offline_signal_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logging.warning("Offline learning signal unreadable: %s", exc)
+            return
+        promoted = [
+            row for row in payload.get("results", [])
+            if str(row.get("promoted", "")).lower() in {"true", "1"} or row.get("promoted") is True
+        ]
+        if promoted:
+            _refresh_runtime_model_handles(reason="offline_learning_promotions_detected")
+        autonomous_monitor.write_heartbeat(
+            "offline_learning",
+            status="ok",
+            message=f"signal_seen promoted={len(promoted)}",
         )
     previous_markets_df = None
     previous_entry_freeze_active = False
@@ -3208,7 +3243,11 @@ def main_loop():
                 if inferred_df is not None and not inferred_df.empty:
                     inferred_df = inferred_df.loc[:, ~inferred_df.columns.duplicated()]
                 btc_scored_df = signal_engine.score_features(inferred_df)
-                btc_scored_df = feedback_learner.apply_to_scored_df(btc_scored_df, signal_engine)
+                btc_feedback_live_enabled = os.getenv("BTC_ENABLE_LIVE_FEEDBACK_ADJUSTMENTS", "false").strip().lower() in {"1", "true", "yes", "on"}
+                if btc_feedback_live_enabled:
+                    btc_scored_df = feedback_learner.apply_to_scored_df(btc_scored_df, signal_engine)
+                else:
+                    logging.info("BTC live feedback adjustments disabled; using report-only feedback mode.")
                 btc_scored_df = _annotate_scored_candidates(
                     btc_scored_df,
                     default_model_family="runtime_live_stack",
@@ -4625,6 +4664,13 @@ def main_loop():
                     
                     # HARD GATES to hit 51% win rate:
                     _alpha_min_conf = max(0.50, float(os.getenv("ALPHA_GATE_MIN_CONFIDENCE", "0.0") or 0.0))
+                    if market_family.startswith("btc"):
+                        btc_stage_conf_floor = (
+                            BTC_LIVE_MIN_ENTRY_CONFIDENCE
+                            if trading_mode == "live"
+                            else BTC_PAPER_MIN_ENTRY_CONFIDENCE
+                        )
+                        _alpha_min_conf = max(_alpha_min_conf, btc_stage_conf_floor)
                     
                     # Check action_val constraint
                     if action_val < 2:
@@ -4638,12 +4684,12 @@ def main_loop():
                         continue
                         
                     # Check family constraint
-                    if str(signal_row.get("market_family", "")) == "btc_other":
+                    if str(signal_row.get("market_family", "") or "").strip().lower() in BTC_BLOCKED_MARKET_FAMILIES:
                         _log_candidate_skip(
                             signal_row,
                             "blocked_market_family",
                             gate="alpha_quality",
-                            market_family="btc_other",
+                            market_family=str(signal_row.get("market_family", "") or "").strip().lower(),
                             model_action=action_map.get(action_val, "UNKNOWN")
                         )
                         continue
@@ -4725,6 +4771,18 @@ def main_loop():
                     # Wallet state (source wallet conflict) + family-specific signal
                     # quality requirements. Runs after enrichment so signal_label,
                     # market_family and model context are available.
+                    if market_family.startswith("btc"):
+                        normalized_signal_label = str(signal_row.get("signal_label", "") or "").strip().upper()
+                        if normalized_signal_label in {"IGNORE", "LOW-CONFIDENCE WATCH"}:
+                            _log_candidate_skip(
+                                signal_row,
+                                "btc_signal_label_below_live_floor",
+                                gate="alpha_quality",
+                                signal_label=signal_row.get("signal_label"),
+                                confidence=round(confidence, 4),
+                                min_confidence=round(_alpha_min_conf, 4),
+                            )
+                            continue
                     wallet_state_gate_pass = bool(signal_row.get("wallet_state_gate_pass", True))
                     if entry_intent == "OPEN_LONG" and not wallet_state_gate_pass:
                         if should_soften_wallet_state_conflict(signal_row):
@@ -5626,6 +5684,14 @@ def main_loop():
                     elif pos_action_val == 3 and trajectory_signal.get("profit_lock_signal"):
                         pos_action_val = 4
 
+                    trade_market_family = str(getattr(trade, "market_family", "") or "").strip().lower()
+                    if trade_market_family.startswith("btc") and pos_action_val == 5:
+                        logging.info(
+                            "BTC RL EXIT disabled for %s; demoting position action EXIT -> HOLD for rule-based exit handling.",
+                            token_id,
+                        )
+                        pos_action_val = 3
+
                     if pos_action_val == 4:
                         if getattr(trade, 'has_been_reduced', False):
                             continue
@@ -6324,12 +6390,13 @@ def main_loop():
                 sync_ops_state_to_db("logs")
             except Exception as exc:
                 logging.warning("Ops state sync to DB failed: %s", exc)
+            _check_offline_learning_signal()
             # Retraining is forbidden in live stages (shadow-live and above).
             # A live process must never train or promote a model.
             # Offline retraining runs in a separate process and promotes artifacts
             # into the weights/ directory; the live process loads them on next restart.
             retrain_promoted = False
-            if _deployment_gate.can_train:
+            if _deployment_gate.can_train and inline_retraining_enabled:
                 retrain_promoted = bool(retrainer.maybe_retrain(
                     force=closed_trade_feedback_count > 0,
                     reason="closed_trade_feedback" if closed_trade_feedback_count > 0 else "scheduled_cycle_check",
@@ -6337,6 +6404,12 @@ def main_loop():
                 if retrain_promoted:
                     _refresh_runtime_model_handles(reason="retrain_promoted_models_activated")
                 autonomous_monitor.write_heartbeat("retrainer", status="ok", message="retrain_checked")
+            elif _deployment_gate.can_train:
+                autonomous_monitor.write_heartbeat(
+                    "retrainer",
+                    status="ok",
+                    message="inline_retraining_disabled_use_offline_learning_loop",
+                )
             else:
                 # Hard rule: live process must not train. Log and skip.
                 autonomous_monitor.write_heartbeat(

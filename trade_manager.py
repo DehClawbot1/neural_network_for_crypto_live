@@ -55,8 +55,10 @@ class TradeManager:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.positions_file = self.logs_dir / "positions.csv"
         self.closed_file = self.logs_dir / "closed_positions.csv"
+        self.btc_attribution_file = self.logs_dir / "btc_trade_attribution.csv"
         self.db = Database(self.logs_dir / "trading.db")
         self._empty_reconciled_streak = 0
+        self._missing_reconciliation_confirmations: Dict[str, int] = {}
         self._max_empty_reconciled_streak = max(
             1,
             int(os.getenv("MAX_EMPTY_RECONCILED_STREAK", "3") or 3),
@@ -786,6 +788,12 @@ class TradeManager:
             "learning_eligible": getattr(trade, "learning_eligible", False),
             "operational_close_flag": getattr(trade, "operational_close_flag", False),
             "reconciliation_close_flag": str(getattr(trade, "close_reason", "") or "").strip().lower() == "external_manual_close",
+            "reconciliation_reason": getattr(trade, "reconciliation_reason", None),
+            "reconciliation_snapshot_open_count": getattr(trade, "reconciliation_snapshot_open_count", None),
+            "reconciliation_local_open_count": getattr(trade, "reconciliation_local_open_count", None),
+            "reconciliation_missing_confirmations": getattr(trade, "reconciliation_missing_confirmations", None),
+            "reconciliation_required_confirmations": getattr(trade, "reconciliation_required_confirmations", None),
+            "reconciliation_presence_key": getattr(trade, "reconciliation_presence_key", None),
             "exit_reason_family": getattr(trade, "exit_reason_family", "unknown"),
             "intended_exit_reason": getattr(trade, "intended_exit_reason", None),
             "actual_execution_path": getattr(trade, "actual_execution_path", None),
@@ -925,6 +933,12 @@ class TradeManager:
         row["learning_eligible"] = getattr(trade, "learning_eligible", False)
         row["operational_close_flag"] = getattr(trade, "operational_close_flag", False)
         row["reconciliation_close_flag"] = str(trade.close_reason or "").strip().lower() == "external_manual_close"
+        row["reconciliation_reason"] = getattr(trade, "reconciliation_reason", None)
+        row["reconciliation_snapshot_open_count"] = getattr(trade, "reconciliation_snapshot_open_count", None)
+        row["reconciliation_local_open_count"] = getattr(trade, "reconciliation_local_open_count", None)
+        row["reconciliation_missing_confirmations"] = getattr(trade, "reconciliation_missing_confirmations", None)
+        row["reconciliation_required_confirmations"] = getattr(trade, "reconciliation_required_confirmations", None)
+        row["reconciliation_presence_key"] = getattr(trade, "reconciliation_presence_key", None)
         row["exit_reason_family"] = getattr(trade, "exit_reason_family", classify_exit_reason_family(trade.close_reason))
         row["intended_exit_reason"] = getattr(trade, "intended_exit_reason", trade.close_reason)
         row["actual_execution_path"] = getattr(trade, "actual_execution_path", "local_rule_close")
@@ -933,6 +947,114 @@ class TradeManager:
         row["exit_partial_fill_ratio"] = getattr(trade, "exit_partial_fill_ratio", 0.0)
         row["exit_realized_slippage_bps"] = getattr(trade, "exit_realized_slippage_bps", 0.0)
         return row
+
+    def _safe_json_dict(self, value) -> dict:
+        if isinstance(value, dict):
+            return value
+        text = str(value or "").strip()
+        if not text or text.lower() == "nan":
+            return {}
+        try:
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+
+    def _build_btc_attribution_row(self, row: dict) -> dict | None:
+        market_family = str(row.get("market_family", "") or "").strip().lower()
+        if not market_family.startswith("btc"):
+            return None
+
+        snapshot = self._safe_json_dict(row.get("entry_signal_snapshot_json"))
+        realized_pnl = float(row.get("net_realized_pnl", row.get("realized_pnl", 0.0)) or 0.0)
+        entry_price = float(row.get("entry_price", 0.0) or 0.0)
+        exit_price = float(row.get("exit_price", row.get("current_price", 0.0)) or 0.0)
+        shares = float(row.get("shares", 0.0) or 0.0)
+        size_usdc = float(row.get("size_usdc", 0.0) or 0.0)
+        price_return = ((exit_price - entry_price) / entry_price) if entry_price > 0 else 0.0
+
+        snapshot_confidence = row.get("confidence_at_entry", snapshot.get("confidence", row.get("confidence", 0.0)))
+        snapshot_signal_label = row.get("signal_label", snapshot.get("signal_label", "UNKNOWN"))
+        snapshot_expected_return = snapshot.get("expected_return", row.get("entry_ev", row.get("entry_btc_predicted_return", 0.0)))
+        snapshot_edge = snapshot.get("edge_score", row.get("edge_score", 0.0))
+        snapshot_ptp = snapshot.get("p_tp_before_sl", snapshot.get("ensemble_probability", 0.0))
+        snapshot_decision_score = snapshot.get("decision_score", None)
+
+        return {
+            "closed_at": row.get("closed_at"),
+            "opened_at": row.get("opened_at"),
+            "position_id": row.get("position_id"),
+            "close_fingerprint": row.get("close_fingerprint"),
+            "market": row.get("market"),
+            "market_family": market_family,
+            "token_id": row.get("token_id"),
+            "condition_id": row.get("condition_id"),
+            "outcome_side": row.get("outcome_side"),
+            "entry_model_family": row.get("entry_model_family"),
+            "entry_model_version": row.get("entry_model_version"),
+            "brain_id": row.get("brain_id"),
+            "active_model_group": row.get("active_model_group"),
+            "active_model_kind": row.get("active_model_kind"),
+            "active_regime": row.get("active_regime"),
+            "technical_regime_bucket": row.get("technical_regime_bucket"),
+            "signal_label": snapshot_signal_label,
+            "confidence_at_entry": snapshot_confidence,
+            "decision_score": snapshot_decision_score,
+            "p_tp_before_sl": snapshot_ptp,
+            "expected_return_at_entry": snapshot_expected_return,
+            "edge_score_at_entry": snapshot_edge,
+            "btc_predicted_direction": row.get("entry_btc_predicted_direction", snapshot.get("btc_predicted_direction")),
+            "btc_predicted_return": row.get("entry_btc_predicted_return", snapshot.get("btc_predicted_return_15")),
+            "btc_forecast_confidence": row.get("entry_btc_forecast_confidence", snapshot.get("btc_forecast_confidence")),
+            "btc_mtf_agreement": row.get("entry_btc_mtf_agreement", snapshot.get("btc_mtf_agreement")),
+            "entry_price": entry_price,
+            "exit_price": exit_price,
+            "shares": shares,
+            "size_usdc": size_usdc,
+            "realized_pnl": realized_pnl,
+            "price_return": round(price_return, 6),
+            "close_reason": row.get("close_reason"),
+            "exit_reason_family": row.get("exit_reason_family"),
+            "actual_execution_path": row.get("actual_execution_path"),
+            "intended_exit_reason": row.get("intended_exit_reason"),
+            "exit_fill_latency_seconds": row.get("exit_fill_latency_seconds"),
+            "exit_partial_fill_ratio": row.get("exit_partial_fill_ratio"),
+            "exit_realized_slippage_bps": row.get("exit_realized_slippage_bps"),
+            "max_adverse_excursion_pct": row.get("max_adverse_excursion_pct"),
+            "max_favorable_excursion_pct": row.get("max_favorable_excursion_pct"),
+            "max_drawdown_from_peak_pct": row.get("max_drawdown_from_peak_pct"),
+            "operational_close_flag": row.get("operational_close_flag"),
+            "reconciliation_close_flag": row.get("reconciliation_close_flag"),
+            "reconciliation_reason": row.get("reconciliation_reason"),
+            "reconciliation_snapshot_open_count": row.get("reconciliation_snapshot_open_count"),
+            "reconciliation_local_open_count": row.get("reconciliation_local_open_count"),
+            "reconciliation_missing_confirmations": row.get("reconciliation_missing_confirmations"),
+            "reconciliation_required_confirmations": row.get("reconciliation_required_confirmations"),
+            "reconciliation_presence_key": row.get("reconciliation_presence_key"),
+            "entry_signal_snapshot_feature_count": row.get("entry_signal_snapshot_feature_count"),
+            "entry_signal_snapshot_version": row.get("entry_signal_snapshot_version"),
+        }
+
+    def _append_btc_attribution_rows(self, rows: List[dict]) -> int:
+        attribution_rows = []
+        for row in rows or []:
+            payload = self._build_btc_attribution_row(row)
+            if payload is not None:
+                attribution_rows.append(payload)
+        if not attribution_rows:
+            return 0
+
+        append_df = pd.DataFrame(attribution_rows)
+        append_csv_with_brain_mirrors(
+            self.btc_attribution_file,
+            append_df,
+            shared_logs_dir=self.logs_dir,
+            include_shared=True,
+        )
+        return len(attribution_rows)
+
+    def _btc_missing_confirmation_threshold(self) -> int:
+        return max(1, int(os.getenv("BTC_RECONCILIATION_MISSING_CONFIRMATIONS", "3") or 3))
 
     def _ledger_presence_key(self, row: dict) -> str:
         token_id = str(row.get("token_id") or "").strip()
@@ -1026,6 +1148,7 @@ class TradeManager:
                 shared_logs_dir=self.logs_dir,
                 include_shared=True,
             )
+        self._append_btc_attribution_rows(deduped_rows)
         self._upsert_position_rows_to_db(deduped_rows)
         self._refresh_lifecycle_audit_reports()
         return len(deduped_rows)
@@ -1062,9 +1185,27 @@ class TradeManager:
 
         now = datetime.now(timezone.utc).isoformat()
         rows_to_close = []
+        local_open_count = len(open_rows)
+        snapshot_open_count = len(snapshot_keys)
+        btc_confirmation_threshold = self._btc_missing_confirmation_threshold()
         for row in open_rows:
             presence_key = self._ledger_presence_key(row)
+            market_family = str(row.get("market_family", "") or "").strip().lower()
             if presence_key in snapshot_keys:
+                if presence_key:
+                    self._missing_reconciliation_confirmations.pop(presence_key, None)
+                continue
+            confirmation_count = self._missing_reconciliation_confirmations.get(presence_key, 0) + 1 if presence_key else 1
+            if presence_key:
+                self._missing_reconciliation_confirmations[presence_key] = confirmation_count
+            required_confirmations = btc_confirmation_threshold if market_family.startswith("btc") else 1
+            if confirmation_count < required_confirmations:
+                logger.warning(
+                    "Reconciliation miss confirmation %s/%s for %s; delaying forced close.",
+                    confirmation_count,
+                    required_confirmations,
+                    presence_key or row.get("position_id"),
+                )
                 continue
             closed_row = dict(row)
             closed_row["status"] = "CLOSED"
@@ -1075,8 +1216,16 @@ class TradeManager:
             closed_row["is_reconciliation_close"] = True
             closed_row["reconciliation_close_flag"] = True
             closed_row["lifecycle_source"] = "trade_manager_reconciled_closed"
+            closed_row["reconciliation_reason"] = "missing_from_reconciled_snapshot"
+            closed_row["reconciliation_snapshot_open_count"] = snapshot_open_count
+            closed_row["reconciliation_local_open_count"] = local_open_count
+            closed_row["reconciliation_missing_confirmations"] = confirmation_count
+            closed_row["reconciliation_required_confirmations"] = required_confirmations
+            closed_row["reconciliation_presence_key"] = presence_key
             closed_row["close_fingerprint"] = self._closed_row_fingerprint(closed_row)
             rows_to_close.append(closed_row)
+            if presence_key:
+                self._missing_reconciliation_confirmations.pop(presence_key, None)
 
         return self._append_closed_rows(rows_to_close)
 
@@ -1177,6 +1326,8 @@ class TradeManager:
                 "market_family", "brain_id", "active_model_group", "active_model_kind", "active_regime",
                 "horizon_bucket", "liquidity_bucket", "volatility_bucket", "technical_regime_bucket",
                 "entry_context_complete", "learning_eligible", "operational_close_flag", "reconciliation_close_flag", "exit_reason_family",
+                "reconciliation_reason", "reconciliation_snapshot_open_count", "reconciliation_local_open_count",
+                "reconciliation_missing_confirmations", "reconciliation_required_confirmations", "reconciliation_presence_key",
                 "intended_exit_reason", "actual_execution_path", "exit_fill_latency_seconds", "exit_cancel_count",
                 "exit_partial_fill_ratio", "exit_realized_slippage_bps",
                 "mark_price", "best_bid", "best_ask", "spread", "mid_price", "spread_pct", "mark_source",
@@ -1338,6 +1489,18 @@ class TradeManager:
             df["operational_close_flag"] = False
         if "reconciliation_close_flag" not in df.columns:
             df["reconciliation_close_flag"] = False
+        if "reconciliation_reason" not in df.columns:
+            df["reconciliation_reason"] = None
+        if "reconciliation_snapshot_open_count" not in df.columns:
+            df["reconciliation_snapshot_open_count"] = None
+        if "reconciliation_local_open_count" not in df.columns:
+            df["reconciliation_local_open_count"] = None
+        if "reconciliation_missing_confirmations" not in df.columns:
+            df["reconciliation_missing_confirmations"] = None
+        if "reconciliation_required_confirmations" not in df.columns:
+            df["reconciliation_required_confirmations"] = None
+        if "reconciliation_presence_key" not in df.columns:
+            df["reconciliation_presence_key"] = None
         if "exit_reason_family" not in df.columns:
             df["exit_reason_family"] = "unknown"
         if "intended_exit_reason" not in df.columns:
@@ -1464,6 +1627,49 @@ class TradeManager:
 
         self._upsert_position_rows_to_db(rows)
         return {"db_rows_upserted": len(rows), "csv_rows": len(closed_df.index)}
+
+    def backfill_btc_attribution_from_closed_csv(self):
+        if not self.closed_file.exists():
+            return {"btc_attribution_rows": 0, "csv_rows": 0}
+        try:
+            closed_df = pd.read_csv(self.closed_file, engine="python", on_bad_lines="skip")
+        except Exception:
+            return {"btc_attribution_rows": 0, "csv_rows": 0}
+        if closed_df.empty:
+            return {"btc_attribution_rows": 0, "csv_rows": 0}
+
+        rows = []
+        for _, row in closed_df.iterrows():
+            data = row.to_dict()
+            close_fingerprint = str(data.get("close_fingerprint") or "").strip()
+            if not close_fingerprint:
+                close_fingerprint = self._closed_row_fingerprint(data)
+            data["close_fingerprint"] = close_fingerprint
+            rows.append(data)
+
+        existing_fingerprints = set()
+        if self.btc_attribution_file.exists() and self.btc_attribution_file.stat().st_size > 0:
+            try:
+                existing_df = pd.read_csv(self.btc_attribution_file, usecols=["close_fingerprint"], engine="python", on_bad_lines="skip")
+                existing_fingerprints = {
+                    str(value).strip()
+                    for value in existing_df["close_fingerprint"].dropna().astype(str).tolist()
+                    if str(value).strip()
+                }
+            except Exception:
+                existing_fingerprints = set()
+
+        pending_rows = []
+        for data in rows:
+            fingerprint = str(data.get("close_fingerprint") or "").strip()
+            if fingerprint and fingerprint in existing_fingerprints:
+                continue
+            pending_rows.append(data)
+            if fingerprint:
+                existing_fingerprints.add(fingerprint)
+
+        appended = self._append_btc_attribution_rows(pending_rows)
+        return {"btc_attribution_rows": appended, "csv_rows": len(closed_df.index)}
     def reconcile_live_positions(self, execution_client=None, reconciled_positions_df: pd.DataFrame | None = None):
         if reconciled_positions_df is None:
             try:

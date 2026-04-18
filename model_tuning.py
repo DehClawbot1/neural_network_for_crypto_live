@@ -15,9 +15,22 @@ except Exception:
 
 
 class Stage2TemporalTuner:
-    def __init__(self, logs_dir="logs"):
+    # tp_before_sl_60m is a BTC price-space label.  Weather uses target_up.
+    _TARGET_BY_FAMILY: dict[str, str] = {
+        "btc": "tp_before_sl_60m",
+        "weather_temperature": "target_up",
+    }
+
+    def __init__(self, logs_dir: str = "logs", market_family: str | None = None):
+        self.market_family = (market_family or "").lower().strip()
         self.logs_dir = Path(logs_dir)
-        self.dataset_file = self.logs_dir / "sequence_dataset.csv"
+        # Prefer the family-scoped sequence_dataset when available
+        family_file = self.logs_dir / self.market_family / "sequence_dataset.csv" if self.market_family else None
+        shared_file = self.logs_dir / "sequence_dataset.csv"
+        self.dataset_file = (
+            family_file if (family_file and family_file.exists()) else shared_file
+        )
+        self.target = self._TARGET_BY_FAMILY.get(self.market_family, "tp_before_sl_60m")
 
     def _safe_read(self):
         if not self.dataset_file.exists():
@@ -32,7 +45,7 @@ class Stage2TemporalTuner:
             raise ImportError("Optuna is required for model_tuning.py. Install optuna to run hyperparameter tuning.")
 
         df = self._safe_read()
-        if df.empty or "tp_before_sl_60m" not in df.columns:
+        if df.empty or self.target not in df.columns:
             return None
         if "timestamp" in df.columns:
             df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
@@ -45,7 +58,7 @@ class Stage2TemporalTuner:
             return None
 
         X = df[feature_cols]
-        y = df["tp_before_sl_60m"].fillna(0).astype(int)
+        y = df[self.target].fillna(0).astype(int)
         tscv = TimeSeriesSplit(n_splits=min(5, max(2, len(df) // 50)))
 
         def objective(trial):

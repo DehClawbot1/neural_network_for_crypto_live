@@ -4,6 +4,7 @@ import logging
 import os
 from enum import Enum
 from pathlib import Path
+from typing import Optional
 
 class RiskTier(Enum):
     SHADOW = 0
@@ -21,7 +22,7 @@ class LiveRiskManager:
     Live-test pre-trade and operational risk controls with persistent lockout blocks.
     """
 
-    def __init__(self, db=None, max_position_size=100.0, max_open_orders=10, max_daily_loss=200.0, max_spread=0.05, cooldown_after_loss_minutes=15, max_failed_orders=10, max_unresolved_exposure=2000.0):
+    def __init__(self, db=None, max_position_size=100.0, max_open_orders=10, max_daily_loss=200.0, max_spread=0.05, cooldown_after_loss_minutes=15, max_failed_orders=10, max_unresolved_exposure=2000.0, lockfile_path: Optional[str | Path] = None):
         self.db = db
         self.max_position_size = max_position_size
         self.max_open_orders = max_open_orders
@@ -32,7 +33,7 @@ class LiveRiskManager:
         self.max_unresolved_exposure = max_unresolved_exposure
         self.last_loss_time = None
         self.failed_orders = 0
-        self.lockfile = Path("operational_lockout.lock")
+        self.lockfile = Path(lockfile_path) if lockfile_path is not None else Path("operational_lockout.lock")
         self.kill_switch = self.lockfile.exists()
         
         # Apply Risk Tiers dynamically from .env
@@ -72,7 +73,9 @@ class LiveRiskManager:
             self.tier = RiskTier.SHADOW
 
     def _evaluate(self, price, size, spread=None, open_orders=0, daily_pnl=0.0, unresolved_exposure=0.0):
-        if self.kill_switch or self.lockfile.exists():
+        if self.kill_switch:
+            return RiskDecision(False, "kill_switch_enabled")
+        if self.lockfile.exists():
             return RiskDecision(False, "operational_lockout_active")
         if self.tier == RiskTier.SHADOW:
             return RiskDecision(False, "shadow_tier_block")

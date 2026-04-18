@@ -7,7 +7,12 @@ from dotenv import load_dotenv
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 ENV_TEMPLATE = """# Neural Network for Crypto - runtime configuration
-# Choose one mode: live or paper
+# TRADING_MODE is the user's runtime choice:
+#   - paper = simulate trades, no real money sent
+#   - live  = use real exchange credentials and live execution paths
+# DEPLOYMENT_STAGE is a separate safety gate configured elsewhere.
+# It controls what the bot is allowed to do even if TRADING_MODE=live.
+# Choose one TRADING_MODE: live or paper
 TRADING_MODE=live
 
 # Live mode

@@ -21,8 +21,8 @@ def load_latest_bundle(weights_dir="weights"):
     return bundle_path, bundle
 
 
-def rebuild_test_split(data_path="logs/sequence_dataset.csv"):
-    trainer = MetaModelTrainer(data_path=data_path)
+def rebuild_test_split(data_path="logs/sequence_dataset.csv", market_family: str | None = None):
+    trainer = MetaModelTrainer(data_path=data_path, market_family=market_family)
     X_train, X_test, y_train, y_test, feature_names = trainer._prepare_data()
     return X_test, y_test, feature_names
 

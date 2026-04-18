@@ -37,6 +37,8 @@ def _default_max_clob_tokens():
 
 MAX_CLOB_TOKENS = int(os.getenv("MAX_CLOB_TOKENS", str(_default_max_clob_tokens())))  # cap tokens fetched
 MAX_CLOB_DAYS = int(os.getenv("MAX_CLOB_DAYS", "3"))  # reduce from 7 to 3 days
+CLOB_SELECTION_AUDIT_FILE = Path("logs") / "clob_selection_audit.csv"
+CANDIDATE_CYCLE_STATS_FILE = Path("logs") / "candidate_cycle_stats.csv"
 
 
 
@@ -55,6 +57,248 @@ def _safe_read_csv(path: Path):
         return pd.read_csv(path, engine="python", on_bad_lines="skip")
     except Exception:
         return pd.DataFrame()
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+        if not pd.notna(parsed):
+            return float(default)
+        return parsed
+    except Exception:
+        return float(default)
+
+
+def _is_truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        try:
+            return float(value) != 0.0
+        except Exception:
+            return False
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _build_ranked_clob_token_ids(markets_df: pd.DataFrame) -> list[str]:
+    if markets_df is None or markets_df.empty:
+        return []
+
+    work = markets_df.copy()
+    if "end_date" in work.columns:
+        work["end_date"] = pd.to_datetime(work["end_date"], utc=True, errors="coerce")
+    else:
+        work["end_date"] = pd.NaT
+
+    now_ts = pd.Timestamp.utcnow().tz_localize("UTC") if pd.Timestamp.utcnow().tzinfo is None else pd.Timestamp.utcnow()
+
+    def _market_priority(row: pd.Series) -> int:
+        text_blob = " ".join(
+            str(row.get(col) or "")
+            for col in ("market_family", "market_title", "question", "slug")
+        ).lower()
+        if "btc" in text_blob or "bitcoin" in text_blob:
+            return 0
+        if "weather" in text_blob or "temperature" in text_blob:
+            return 1
+        return 2
+
+    def _spread_penalty(row: pd.Series) -> float:
+        spread = _safe_float(row.get("spread"), 1.0)
+        if spread > 0:
+            return spread
+        best_bid = _safe_float(row.get("best_bid"), 0.0)
+        best_ask = _safe_float(row.get("best_ask"), 0.0)
+        if best_bid > 0 and best_ask > 0 and best_ask >= best_bid:
+            return best_ask - best_bid
+        return 1.0
+
+    work["_active_rank"] = work.get("active", False).apply(lambda v: 0 if _is_truthy(v) else 1)
+    work["_closed_rank"] = work.get("closed", False).apply(lambda v: 1 if _is_truthy(v) else 0)
+    work["_expired_rank"] = work["end_date"].apply(lambda ts: 1 if pd.notna(ts) and ts <= now_ts else 0)
+    work["_market_priority"] = work.apply(_market_priority, axis=1)
+    work["_liquidity_rank"] = pd.to_numeric(work.get("liquidity", 0.0), errors="coerce").fillna(0.0)
+    work["_volume_rank"] = pd.to_numeric(work.get("volume", 0.0), errors="coerce").fillna(0.0)
+    work["_spread_rank"] = work.apply(_spread_penalty, axis=1)
+
+    sort_cols = [
+        "_active_rank",
+        "_closed_rank",
+        "_expired_rank",
+        "_market_priority",
+        "_liquidity_rank",
+        "_volume_rank",
+        "_spread_rank",
+    ]
+    ascending = [True, True, True, True, False, False, True]
+    work = work.sort_values(sort_cols, ascending=ascending, kind="mergesort")
+
+    ranked_tokens: list[str] = []
+    seen_tokens: set[str] = set()
+    for _, row in work.iterrows():
+        for col in ("yes_token_id", "no_token_id"):
+            token = str(row.get(col) or "").strip().strip('"').strip("'")
+            if not token or not re.fullmatch(r"\d{8,}", token):
+                continue
+            if token in seen_tokens:
+                continue
+            seen_tokens.add(token)
+            ranked_tokens.append(token)
+    return ranked_tokens
+
+
+def _summarize_ranked_clob_selection(markets_df: pd.DataFrame, selected_token_ids: list[str]) -> dict:
+    if markets_df is None or markets_df.empty or not selected_token_ids:
+        return {}
+
+    selected = set(str(token).strip() for token in selected_token_ids if str(token).strip())
+    if not selected:
+        return {}
+
+    work = markets_df.copy()
+    mask = work.get("yes_token_id", pd.Series(index=work.index, dtype=object)).astype(str).isin(selected)
+    mask = mask | work.get("no_token_id", pd.Series(index=work.index, dtype=object)).astype(str).isin(selected)
+    work = work[mask].copy()
+    if work.empty:
+        return {}
+
+    def _family_bucket(row: pd.Series) -> str:
+        text_blob = " ".join(
+            str(row.get(col) or "")
+            for col in ("market_family", "market_title", "question", "slug")
+        ).lower()
+        if "btc" in text_blob or "bitcoin" in text_blob:
+            return "btc"
+        if "weather" in text_blob or "temperature" in text_blob:
+            return "weather"
+        return "other"
+
+    liquidity = pd.to_numeric(work.get("liquidity", 0.0), errors="coerce").fillna(0.0)
+    volume = pd.to_numeric(work.get("volume", 0.0), errors="coerce").fillna(0.0)
+    spread = pd.to_numeric(work.get("spread", 0.0), errors="coerce").fillna(0.0)
+    family_counts = work.apply(_family_bucket, axis=1).value_counts().to_dict()
+
+    return {
+        "markets": int(len(work)),
+        "tokens": int(len(selected)),
+        "btc_markets": int(family_counts.get("btc", 0)),
+        "weather_markets": int(family_counts.get("weather", 0)),
+        "other_markets": int(family_counts.get("other", 0)),
+        "median_liquidity": round(float(liquidity.median()), 4) if not liquidity.empty else 0.0,
+        "median_volume": round(float(volume.median()), 4) if not volume.empty else 0.0,
+        "median_spread": round(float(spread.replace(0, pd.NA).dropna().median()), 6) if not spread.empty else 0.0,
+    }
+
+
+def _append_clob_selection_audit(
+    summary: dict,
+    *,
+    total_ranked_tokens: int,
+    max_clob_tokens: int,
+    always_on_only: bool,
+    max_clob_days: int,
+    output_path: Path = CLOB_SELECTION_AUDIT_FILE,
+) -> None:
+    if not summary:
+        return
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "timestamp": pd.Timestamp.utcnow().isoformat(),
+        "total_ranked_tokens": int(total_ranked_tokens),
+        "selected_tokens": int(summary.get("tokens", 0) or 0),
+        "selected_markets": int(summary.get("markets", 0) or 0),
+        "btc_markets": int(summary.get("btc_markets", 0) or 0),
+        "weather_markets": int(summary.get("weather_markets", 0) or 0),
+        "other_markets": int(summary.get("other_markets", 0) or 0),
+        "median_liquidity": float(summary.get("median_liquidity", 0.0) or 0.0),
+        "median_volume": float(summary.get("median_volume", 0.0) or 0.0),
+        "median_spread": float(summary.get("median_spread", 0.0) or 0.0),
+        "max_clob_tokens": int(max_clob_tokens),
+        "max_clob_days": int(max_clob_days),
+        "always_on_only": bool(always_on_only),
+        "selection_utilization": round(
+            float(summary.get("tokens", 0) or 0) / max(1, int(max_clob_tokens)),
+            6,
+        ),
+        "selection_coverage": round(
+            float(summary.get("tokens", 0) or 0) / max(1, int(total_ranked_tokens)),
+            6,
+        ),
+    }
+    payload = pd.DataFrame([row])
+    header = not output_path.exists()
+    payload.to_csv(output_path, mode="a", header=header, index=False)
+
+
+def _refresh_clob_selection_outcome_audit(
+    audit_path: Path = CLOB_SELECTION_AUDIT_FILE,
+    candidate_stats_path: Path = CANDIDATE_CYCLE_STATS_FILE,
+) -> None:
+    if not audit_path.exists() or not candidate_stats_path.exists():
+        return
+
+    try:
+        audit_df = pd.read_csv(audit_path, engine="python", on_bad_lines="skip")
+        cycle_df = pd.read_csv(candidate_stats_path, engine="python", on_bad_lines="skip")
+    except Exception:
+        return
+
+    if audit_df.empty or cycle_df.empty or "timestamp" not in audit_df.columns or "timestamp" not in cycle_df.columns:
+        return
+
+    audit_df["timestamp"] = pd.to_datetime(audit_df["timestamp"], utc=True, errors="coerce")
+    cycle_df["timestamp"] = pd.to_datetime(cycle_df["timestamp"], utc=True, errors="coerce")
+    audit_df = audit_df.sort_values("timestamp", kind="mergesort").reset_index(drop=True)
+    cycle_df = cycle_df.sort_values("timestamp", kind="mergesort").reset_index(drop=True)
+
+    downstream_cols = {
+        "linked_cycle_id": None,
+        "linked_cycle_timestamp": None,
+        "minutes_to_linked_cycle": None,
+        "downstream_candidates_seen": 0,
+        "downstream_candidates_tradable": 0,
+        "downstream_candidates_rejected": 0,
+        "downstream_entries_sent": 0,
+        "downstream_fills_received": 0,
+    }
+    for col, default in downstream_cols.items():
+        if col not in audit_df.columns:
+            audit_df[col] = default
+
+    cycle_rows = cycle_df.dropna(subset=["timestamp"]).to_dict("records")
+    if not cycle_rows:
+        return
+
+    updated = False
+    schema_changed = False
+    for idx, row in audit_df.iterrows():
+        audit_ts = row.get("timestamp")
+        if pd.isna(audit_ts):
+            continue
+        if str(row.get("linked_cycle_id") or "").strip():
+            continue
+
+        match = next((c for c in cycle_rows if c["timestamp"] >= audit_ts), None)
+        if match is None:
+            continue
+
+        delta_minutes = (match["timestamp"] - audit_ts).total_seconds() / 60.0
+        audit_df.at[idx, "linked_cycle_id"] = str(match.get("cycle_id") or "")
+        audit_df.at[idx, "linked_cycle_timestamp"] = match["timestamp"].isoformat()
+        audit_df.at[idx, "minutes_to_linked_cycle"] = round(float(delta_minutes), 4)
+        audit_df.at[idx, "downstream_candidates_seen"] = int(match.get("candidates_seen", 0) or 0)
+        audit_df.at[idx, "downstream_candidates_tradable"] = int(match.get("candidates_tradable", 0) or 0)
+        audit_df.at[idx, "downstream_candidates_rejected"] = int(match.get("candidates_rejected", 0) or 0)
+        audit_df.at[idx, "downstream_entries_sent"] = int(match.get("entries_sent", 0) or 0)
+        audit_df.at[idx, "downstream_fills_received"] = int(match.get("fills_received", 0) or 0)
+        updated = True
+
+    if any(col not in pd.read_csv(audit_path, nrows=0).columns for col in downstream_cols):
+        schema_changed = True
+
+    if updated or schema_changed:
+        audit_df.to_csv(audit_path, index=False)
 
 
 def _ensure_dashboard_supervised_eval(logs_dir="logs"):
@@ -174,7 +418,9 @@ def run_research_pipeline():
             raise
 
     try:
+        _refresh_clob_selection_outcome_audit()
         _pipeline_step = "resolve_contexts"
+        always_on_only = os.getenv("ALWAYS_ON_ONLY", "true").strip().lower() in {"1", "true", "yes", "on"}
         btc_context = resolve_brain_context("btc", shared_logs_dir="logs", shared_weights_dir="weights")
         weather_context = resolve_brain_context("weather_temperature", shared_logs_dir="logs", shared_weights_dir="weights")
         logging.info("Building BTC direction targets...")
@@ -197,28 +443,37 @@ def run_research_pipeline():
         # ── Cap number of tokens fetched ──
         logging.info("Fetching token-level CLOB price history...")
         markets_df = pd.read_csv("logs/markets.csv", engine="python", on_bad_lines="skip") if HistoricalDatasetBuilder().logs_dir.joinpath("markets.csv").exists() else pd.DataFrame()
-        token_ids = []
-        def _normalize_token_id(raw):
-            token = str(raw or "").strip().strip('"').strip("'")
-            if not token:
-                return None
-            return token if re.fullmatch(r"\d{8,}", token) else None
-        if not markets_df.empty:
-            for col in ["yes_token_id", "no_token_id"]:
-                if col in markets_df.columns:
-                    for value in markets_df[col].dropna().tolist():
-                        token = _normalize_token_id(value)
-                        if token:
-                            token_ids.append(token)
-        token_ids = sorted(set(token_ids))
+        token_ids = _build_ranked_clob_token_ids(markets_df)
 
         # Cap at MAX_CLOB_TOKENS to prevent 15+ min fetch times
+        total_ranked_tokens = len(token_ids)
         if len(token_ids) > MAX_CLOB_TOKENS:
             logging.warning(
                 "Capping CLOB token fetch from %d to %d tokens (set MAX_CLOB_TOKENS to change)",
                 len(token_ids), MAX_CLOB_TOKENS,
             )
             token_ids = token_ids[:MAX_CLOB_TOKENS]
+        selection_summary = _summarize_ranked_clob_selection(markets_df, token_ids)
+        if selection_summary:
+            logging.info(
+                "CLOB selection summary: tokens=%d markets=%d btc=%d weather=%d other=%d median_liquidity=%.2f median_volume=%.2f median_spread=%.4f",
+                selection_summary["tokens"],
+                selection_summary["markets"],
+                selection_summary["btc_markets"],
+                selection_summary["weather_markets"],
+                selection_summary["other_markets"],
+                selection_summary["median_liquidity"],
+                selection_summary["median_volume"],
+                selection_summary["median_spread"],
+            )
+            _append_clob_selection_audit(
+                selection_summary,
+                total_ranked_tokens=total_ranked_tokens,
+                max_clob_tokens=MAX_CLOB_TOKENS,
+                always_on_only=always_on_only,
+                max_clob_days=MAX_CLOB_DAYS,
+            )
+            _refresh_clob_selection_outcome_audit()
 
         if token_ids:
             _run_step("clob_history", lambda: CLOBHistoryClient().append_history(token_ids, days=MAX_CLOB_DAYS, interval="1m"))

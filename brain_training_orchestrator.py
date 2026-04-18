@@ -4,10 +4,12 @@ from pathlib import Path
 
 import pandas as pd
 
+from canonical_dataset_builder import CanonicalDatasetBuilder
 from baseline_models import BaselineModels
 from brain_paths import BTC_FAMILY, WEATHER_FAMILY, BrainContext, list_brain_contexts
 from contract_target_builder import ContractTargetBuilder
 from historical_dataset_builder import HistoricalDatasetBuilder
+from learning_row_builder import LearningRowBuilder
 from model_artifact_staging import build_candidate_weights_dir
 from model_registry import ModelRegistry
 from model_registry_runtime import evaluate_artifact_against_dataset, register_and_promote_rows
@@ -15,6 +17,7 @@ from sequence_feature_builder import SequenceFeatureBuilder
 from stage1_models import Stage1Models
 from stage2_temporal_models import Stage2TemporalModels
 from supervised_models import SupervisedModels
+from task_training_table_builder import TaskTrainingTableBuilder
 from weather_temperature_trainer import WeatherTemperatureTrainer
 
 
@@ -71,6 +74,11 @@ def build_family_datasets(
             sl_move=sl_move,
         )
         SequenceFeatureBuilder(brain_context=context).write()
+    # Build the canonical learning dataset after family-specific artifacts
+    # exist, so every later training step can rely on one joined spine.
+    LearningRowBuilder(logs_dir=str(shared_logs_dir)).write()
+    CanonicalDatasetBuilder(logs_dir=str(shared_logs_dir)).write()
+    TaskTrainingTableBuilder(logs_dir=str(shared_logs_dir)).write()
     return contexts
 
 

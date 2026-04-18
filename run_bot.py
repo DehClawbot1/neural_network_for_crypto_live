@@ -28,6 +28,7 @@ from supervisor import main_loop, load_brain
 import supervisor as supervisor_module
 from supervisor_ui_patch import apply_supervisor_ui_patch
 from retrainer import Retrainer
+from offline_learning_loop import OfflineLearningLoop
 from real_pipeline import run_research_pipeline
 from execution_client import ExecutionClient
 from deployment_gate import DeploymentGate, DeploymentStage, get_deployment_gate, reset_gate_singleton
@@ -85,9 +86,77 @@ def _supports_unicode_stdout() -> bool:
     encoding = (getattr(sys.stdout, "encoding", "") or "").lower()
     return "utf" in encoding
 
+
+def _recommended_stage_hint(trading_mode: str) -> str:
+    mode = str(trading_mode or "paper").strip().lower()
+    if mode == "live":
+        return "Recommended pairings: live + shadow-live (simulate live flow), live + micro-live (small real-money cap), live + scaled-live (full live permissions)."
+    return "Recommended pairing: paper + paper."
+
+
+def _recommended_stage_example(trading_mode: str) -> str:
+    mode = str(trading_mode or "paper").strip().lower()
+    if mode == "live":
+        return "Example: set TRADING_MODE=live and DEPLOYMENT_STAGE=shadow-live for simulated live execution, or DEPLOYMENT_STAGE=micro-live for small real-money trading."
+    return "Example: set TRADING_MODE=paper and DEPLOYMENT_STAGE=paper."
+
+
+def choose_startup_mode():
+    """Interactive startup choice between live trading and offline training."""
+    if not sys.stdin.isatty():
+        return "runtime"
+
+    current_mode = (os.getenv("TRADING_MODE") or "paper").strip().lower()
+    current_stage = (os.getenv("DEPLOYMENT_STAGE") or "paper").strip().lower()
+
+    print("--- STARTUP MODE ---")
+    print("Choose what you want to do right now:")
+    print("  1 = Live trading")
+    print("      Starts the bot runtime. Recommended stages: shadow-live, micro-live, or scaled-live.")
+    print("  2 = Offline training")
+    print("      Rebuilds datasets, retrains offline, runs walk-forward checks, promotes only if better, then exits.")
+    print("  Enter = keep current launcher behavior")
+    print(f"Current env: TRADING_MODE={current_mode or 'paper'} | DEPLOYMENT_STAGE={current_stage or 'paper'}")
+    print()
+    try:
+        choice = input("Your choice [1/2] (Enter = keep current): ").strip()
+    except EOFError:
+        choice = ""
+
+    if choice == "1":
+        os.environ["TRADING_MODE"] = "live"
+        if not os.getenv("DEPLOYMENT_STAGE", "").strip():
+            os.environ["DEPLOYMENT_STAGE"] = "shadow-live"
+        os.environ["RUN_OFFLINE_LEARNING_ON_START"] = "0"
+        reset_gate_singleton()
+        print("[+] Startup mode selected: live trading")
+        print(f"    TRADING_MODE={os.environ['TRADING_MODE']}")
+        print(f"    DEPLOYMENT_STAGE={os.environ.get('DEPLOYMENT_STAGE', 'shadow-live')}\n")
+        return "runtime"
+
+    if choice == "2":
+        os.environ["RUN_OFFLINE_LEARNING_ON_START"] = "1"
+        os.environ["ENABLE_INLINE_RETRAINING"] = "0"
+        if not os.getenv("TRADING_MODE", "").strip():
+            os.environ["TRADING_MODE"] = "paper"
+        if not os.getenv("DEPLOYMENT_STAGE", "").strip():
+            os.environ["DEPLOYMENT_STAGE"] = "paper"
+        reset_gate_singleton()
+        print("[+] Startup mode selected: offline training")
+        print("    The launcher will run the offline learning loop and exit without starting live trading.\n")
+        return "offline_training"
+
+    print("[+] Keeping current launcher behavior.\n")
+    return "runtime"
+
 def print_banner():
     gate = get_deployment_gate()
+    trading_mode = (os.getenv("TRADING_MODE") or "paper").strip().lower()
     stage_label = gate.stage.value.upper()
+    trading_mode_desc = {
+        "paper": "simulate trades, no real money sent",
+        "live": "use real exchange credentials and live execution paths",
+    }.get(trading_mode, trading_mode)
     mode_desc = {
         "replay":      "HISTORICAL REPLAY — no exchange contact",
         "paper":       "PAPER TRADING — live data, no real orders",
@@ -96,12 +165,16 @@ def print_banner():
         "scaled-live": "SCALED LIVE — REAL MONEY, normal risk limits",
     }.get(gate.stage.value, gate.stage.value.upper())
     print("\n=== NEURAL NETWORK FOR CRYPTO ===")
+    print(f"Trading mode: {trading_mode.upper()} | {trading_mode_desc}")
     print(f"Stage: {stage_label} | {mode_desc}")
     print(f"Env:   {gate.env.value.upper()}")
     if is_interactive():
         print("Credentials: FROM USER INPUT (interactive mode)")
     else:
         print("Credentials: FROM .env FILE")
+    print("TRADING_MODE is your runtime choice. DEPLOYMENT_STAGE is the safety gate that limits what the bot is allowed to do.")
+    print(_recommended_stage_hint(trading_mode))
+    print(_recommended_stage_example(trading_mode))
     print("This launcher validates the environment, checks model weights, and starts the supervisor.\n")
 
 
@@ -111,14 +184,34 @@ def _preflight_env_check():
     warnings = []
 
     gate = get_deployment_gate()
+    trading_mode = (os.getenv("TRADING_MODE") or "paper").strip().lower()
 
     # DEPLOYMENT_STAGE must be set explicitly; default is "paper" (not live).
-    raw_stage = os.getenv("DEPLOYMENT_STAGE", "").strip()
+    raw_stage = os.getenv("DEPLOYMENT_STAGE", "").strip().lower()
     if not raw_stage:
+        if trading_mode == "live":
+            warnings.append(
+                "DEPLOYMENT_STAGE is not set — deployment control defaults to 'paper' "
+                "while TRADING_MODE=live validates live credentials. Set DEPLOYMENT_STAGE "
+                "explicitly to match intent and suppress this warning. "
+                "Use TRADING_MODE to choose paper vs live behavior; use DEPLOYMENT_STAGE to choose the allowed safety level."
+            )
+            warnings.append(_recommended_stage_example(trading_mode))
+        else:
+            warnings.append(
+                "DEPLOYMENT_STAGE is not set — defaulting to 'paper'. "
+                "Set DEPLOYMENT_STAGE=paper explicitly to suppress this warning. "
+                "TRADING_MODE is your runtime choice; DEPLOYMENT_STAGE is the safety gate."
+            )
+            warnings.append(_recommended_stage_example(trading_mode))
+    elif trading_mode == "live" and raw_stage == "paper":
         warnings.append(
-            "DEPLOYMENT_STAGE is not set — defaulting to 'paper'. "
-            "Set DEPLOYMENT_STAGE=paper explicitly to suppress this warning."
+            "TRADING_MODE=live but DEPLOYMENT_STAGE=paper. Credentials may validate as live "
+            "while the deployment gate still runs in paper mode. "
+            "TRADING_MODE answers 'how should I run?', DEPLOYMENT_STAGE answers 'what is allowed?'."
         )
+        warnings.append(_recommended_stage_hint(trading_mode))
+        warnings.append(_recommended_stage_example(trading_mode))
 
     # Live credentials are only required when the stage contacts the exchange.
     if gate.can_place_orders:
@@ -296,12 +389,29 @@ def ensure_optional_rl_model():
 
 
 def maybe_retrain_before_start():
+    inline_enabled = str(os.getenv("ENABLE_INLINE_RETRAINING", "")).strip().lower() in {"1", "true", "yes", "on"}
+    offline_on_start = str(os.getenv("RUN_OFFLINE_LEARNING_ON_START", "")).strip().lower() in {"1", "true", "yes", "on"}
+    if not inline_enabled and not offline_on_start:
+        print("[3.5/5] Offline-first learning is enabled. Skipping inline startup retraining by default.")
+        print("    Run `python offline_learning_loop.py` or set RUN_OFFLINE_LEARNING_ON_START=true to retrain offline before startup.\n")
+        return False
+
     print("[3.5/5] Checking whether the model should retrain from accumulated data...")
     try:
         coverage = build_btc_brain_coverage_report(shared_logs_dir=LOGS_DIR, shared_weights_dir=Path("weights"))
         print(f"[~] {format_btc_brain_coverage_line(coverage)}")
     except Exception as exc:
         print(f"[!] BTC brain coverage report failed but startup will continue: {exc}")
+    if offline_on_start:
+        try:
+            results = OfflineLearningLoop(logs_dir=LOGS_DIR, weights_dir=Path("weights")).run()
+            promoted = sum(1 for row in results if row.promoted)
+            print(f"[+] Offline learning loop completed before startup. Promoted {promoted} task model(s).\n")
+            return promoted > 0
+        except Exception as exc:
+            print(f"[!] Offline learning loop failed but startup will continue: {exc}\n")
+            return False
+
     retrainer = Retrainer()
     try:
         retrained = retrainer.maybe_retrain()
@@ -494,6 +604,7 @@ def ensure_signature_type():
 
 def main():
     try:
+        startup_mode = choose_startup_mode()
         # DeploymentGate.from_env() is called here (via get_deployment_gate()).
         # It validates promotion gates and exits(1) if stage/env combination is invalid.
         gate = get_deployment_gate()
@@ -522,6 +633,18 @@ def main():
                   f"stage={gate.stage.value!r}\n")
             print("[3.5/5] Skipping pre-start retraining — forbidden at "
                   f"stage={gate.stage.value!r}\n")
+
+        if startup_mode == "offline_training":
+            print("[4/5] Running offline training only...")
+            try:
+                results = OfflineLearningLoop(logs_dir=LOGS_DIR, weights_dir=Path("weights")).run()
+                promoted = sum(1 for row in results if row.promoted)
+                print(f"[+] Offline training complete. Promoted {promoted} model(s).")
+                print("[+] Exiting without starting the live runtime.\n")
+                return
+            except Exception as exc:
+                print(f"[!] Offline training failed: {exc}\n")
+                sys.exit(1)
 
         build_research_artifacts()
         log_live_leaderboard_status()

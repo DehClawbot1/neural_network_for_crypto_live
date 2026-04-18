@@ -43,11 +43,34 @@ class MetaModelTrainer:
         df = df.loc[:, ~df.columns.duplicated()]
         return df
 
-    def __init__(self, data_path="logs/sequence_dataset.csv", model_dir="weights"):
-        self.data_path = Path(data_path)
+    # Target column per family.  tp_before_sl_60m is a BTC price-space label
+    # (TP +4% hit before SL -3% in 60m window).  It is meaningless for weather
+    # probability-space contracts — those use target_up / resolved_yes.
+    _TARGET_BY_FAMILY: dict[str, str] = {
+        "btc": "tp_before_sl_60m",
+        "weather_temperature": "target_up",
+    }
+    _DEFAULT_TARGET = "tp_before_sl_60m"
+
+    def __init__(
+        self,
+        data_path: str = "logs/sequence_dataset.csv",
+        model_dir: str = "weights",
+        market_family: str | None = None,
+    ):
+        self.market_family = (market_family or "").lower().strip()
+        # Route to the family-scoped sequence_dataset if no explicit path given
+        # and a family was specified.
+        default_path = Path(data_path)
+        if market_family and data_path == "logs/sequence_dataset.csv":
+            family_path = Path("logs") / self.market_family / "sequence_dataset.csv"
+            if family_path.exists():
+                default_path = family_path
+        self.data_path = default_path
         self.model_dir = Path(model_dir)
         self.model_dir.mkdir(parents=True, exist_ok=True)
-        self.target = "tp_before_sl_60m"
+        # Select classifier target for this family
+        self.target = self._TARGET_BY_FAMILY.get(self.market_family, self._DEFAULT_TARGET)
         self.ignored_cols = [
             "timestamp", "token_id", "condition_id", "market_slug", "trade_id", "market_url", "anchor_timestamp",
             "trader_wallet", "trader_wallet_x", "trader_wallet_y",
